@@ -1282,6 +1282,21 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(result))
         }
+        "gate_history" => {
+            use crate::signaling::bridge::GATE_HISTORY_DEFAULT;
+            let limit = match args.get("limit") {
+                None | Some(Value::Null) => GATE_HISTORY_DEFAULT,
+                Some(v) => v.as_u64().filter(|n| *n >= 1).ok_or_else(|| {
+                    JsonRpcError::new(JsonRpcError::INVALID_PARAMS, "limit must be a whole number of rows, at least 1")
+                })? as usize,
+            };
+            let grep = args.get("grep").and_then(Value::as_str).filter(|g| !g.trim().is_empty());
+            let text = bridge
+                .gate_history(&caller.session_id, limit, grep)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(text))
+        }
         "get_finding" => {
             // Scoped to the caller's session; ungated (a finding about the
             // session's work is every participant's to read).

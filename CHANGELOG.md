@@ -249,6 +249,14 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A session's gates have a ledger.** `gate_history` lists the session's
+  gated commands newest first — each one's short id, time, issuer, state
+  (queued for the reviewer, pending your approval, approved with its exit code,
+  run time and output size, rejected with your words, withdrawn) and the
+  command, with secrets redacted — so a participant whose context was
+  compacted can reuse an approved command shape verbatim instead of parsing
+  its transcript from disk, and "did that run?" has one place to look.
+  Read-only; `gate_status` still gives one gate's output.
 - **The close card names what would archive unnoticed.** Besides the open
   advisory findings, the recap now lists the open BLOCKING findings (the
   commit gate holds them against a commit, not against a close) and the custom

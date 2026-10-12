@@ -581,6 +581,25 @@ impl Storage {
         Ok(rows)
     }
 
+    /// Every COMMAND-carrying gate of a session (`action_gate`, the hook's
+    /// auto-park, `read_gate`, `prod_read`), whatever its status — queued,
+    /// pending, answered, withdrawn, superseded — newest first, at most
+    /// `limit` rows (feedback #88: the ledger `gate_history` reads, so an
+    /// approved shape can be reused verbatim after a compaction and "did that
+    /// run?" has one place to look).
+    pub async fn gates_for_session(&self, session_id: &str, limit: usize) -> Result<Vec<SessionTrayEntry>> {
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
+             WHERE session_id = ? AND command_text IS NOT NULL \
+             ORDER BY id DESC LIMIT ?"
+        ))
+        .bind(session_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     /// Whether ANY tray row is pending OR queued for this session — question,
     /// gate, or an outward publish waiting on the reviewer (0080). The
     /// idle-unflagged watchdog reads this each poll: such a row means the

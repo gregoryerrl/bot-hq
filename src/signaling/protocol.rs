@@ -775,6 +775,18 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "gate_history",
+            description: "This session's gate ledger, newest first: every gated command parked so far (action_gate, the Tool Gate's auto-park, read_gate, prod_read) with its 8-character id, when and by whom, its state (queued / pending / approved with exit code, run time and output size / rejected with the user's words / withdrawn), and the command. Read-only — nothing runs. The place to look after a compaction for an approved command shape to reuse verbatim, or to answer \"did that run?\"; gate_status(id) then gives one gate's output. Default 20 rows, at most 100; `grep` keeps the rows whose command or state contains it.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "How many gates, newest first (default 20, at most 100)." },
+                    "grep": { "type": "string", "description": "Optional case-insensitive filter over the command text and the state." }
+                },
+                "required": []
+            }),
+        },
+        ToolDescriptor {
             name: "get_finding",
             description: "Read ONE finding of this session whole, by its id (or 8+ characters of it): the full text, where it points, who filed it, its status and any disposition. The lists elsewhere (check_open_findings, the close card) abbreviate; this is how you read the rest before dispositioning or rebutting.",
             input_schema: serde_json::json!({

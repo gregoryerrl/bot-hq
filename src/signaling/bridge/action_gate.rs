@@ -614,6 +614,94 @@ impl SignalingBridge {
         self.gate_status_for(gate_id, None).await
     }
 
+    /// The session's gate ledger (feedback #88): its command-carrying gates,
+    /// newest first — id, when, who issued it, its state (queued / pending /
+    /// approved and how it ended / rejected with the user's words / withdrawn),
+    /// exit code, how long it ran and its output's size, and the command as an
+    /// excerpt, redacted. `grep` keeps only the rows whose command or state
+    /// contains it (case-insensitive). Read-only: nothing here runs or
+    /// re-issues anything.
+    pub async fn gate_history(&self, session_id: &str, limit: usize, grep: Option<&str>) -> Result<String> {
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+        let limit = limit.clamp(1, GATE_HISTORY_MAX);
+        // Read past the limit when grepping, so a filter over a long ledger
+        // still finds its rows; never past the hard cap.
+        let fetch = if grep.is_some() { GATE_HISTORY_MAX } else { limit };
+        let rows = storage.gates_for_session(session_id, fetch).await?;
+        let needle = grep.map(str::to_lowercase);
+        let mut lines: Vec<String> = Vec::new();
+        for row in &rows {
+            let Some(command) = row.command_text.as_deref() else { continue };
+            let state = self.gate_ledger_state(&storage, row).await;
+            if let Some(n) = &needle {
+                if !command.to_lowercase().contains(n) && !state.to_lowercase().contains(n) {
+                    continue;
+                }
+            }
+            let id8: String = row.choice_id.chars().take(8).collect();
+            let shown = crate::policy::secret_scan::redact_string(super::util::command_excerpt(command).into_owned());
+            let shown = if shown.contains('\n') { format!("\n    {}", shown.replace('\n', "\n    ")) } else { format!(" `{shown}`") };
+            lines.push(format!("- {id8} · {} · {} · {state}{shown}", row.asked_at, row.agent));
+            if lines.len() >= limit {
+                break;
+            }
+        }
+        if lines.is_empty() {
+            return Ok(match grep {
+                Some(g) => format!("gate_history: no gate of this session matches {g:?}"),
+                None => "gate_history: this session has parked no gated command yet".to_string(),
+            });
+        }
+        Ok(format!(
+            "gate_history — {} gate(s), newest first (id · asked · by · state · command; full ids and \
+             output via gate_status):\n{}",
+            lines.len(),
+            lines.join("\n")
+        ))
+    }
+
+    /// One ledger row's state, from the tray row and the running mark.
+    async fn gate_ledger_state(&self, storage: &crate::storage::Storage, row: &crate::storage::SessionTrayEntry) -> String {
+        match row.status.as_str() {
+            "queued" => "queued for the reviewer's read".to_string(),
+            "pending" => "pending the user's approval".to_string(),
+            "answered" => {
+                let picked = row.picked_option.as_deref().unwrap_or("");
+                let approved = matches!(gate_verdict(picked), ViolationOutcome::Approved);
+                if !approved {
+                    return format!("rejected ({picked})");
+                }
+                if let Some(refusal) = row.run_refusal.as_deref() {
+                    return format!("approved but NOT RUN ({refusal})");
+                }
+                if self.gate_run_info(&row.session_id, &row.choice_id).is_some() {
+                    return "approved, RUNNING".to_string();
+                }
+                let mut out = String::from("approved");
+                match (row.exit_code, row.ran_ms) {
+                    (Some(code), Some(ms)) => out.push_str(&format!(", exit {code} after {}", human_ms(ms))),
+                    (None, Some(ms)) => out.push_str(&format!(", could not start ({})", human_ms(ms))),
+                    _ => {}
+                }
+                if let Some(row_id) = row.result_row_id {
+                    if let Ok(Some(content)) = storage.message_content(row_id).await {
+                        out.push_str(&format!(", {} bytes of output", content.len()));
+                    }
+                }
+                out
+            }
+            other => match row.picked_option.as_deref().filter(|r| !r.is_empty()) {
+                Some(reason) => format!("{other} ({reason})"),
+                None => other.to_string(),
+            },
+        }
+    }
+
     /// [`gate_status`](Self::gate_status) scoped to the caller's session
     /// (round 11): a gate row carries the user's answer text and the exact
     /// command, and the tool is deliberately ungated, so a participant holding
@@ -1768,6 +1856,10 @@ pub(super) fn park_outcome_text(outcome: &ParkOutcome, command: &str) -> String 
 /// is quoted with in chat, the same floor `flag_finding`'s `gate_id` has.
 const GATE_ID_PREFIX_MIN: usize = 8;
 
+/// The most rows `gate_history` returns (feedback #88); its default is 20.
+pub const GATE_HISTORY_MAX: usize = 100;
+pub const GATE_HISTORY_DEFAULT: usize = 20;
+
 /// How much of a finished gate's output `gate_status` returns: the END of it,
 /// where the exit-code footer and the last lines are.
 const GATE_STATUS_OUTPUT_TAIL_BYTES: usize = 6_000;
@@ -2176,6 +2268,57 @@ mod tests {
         let plain = park("psql -h prod.db -c 'select 1'").await;
         let row = storage.get_tray_entry(&plain).await.unwrap().unwrap();
         assert!(!row.prompt.contains("only writes text"), "{}", row.prompt);
+    }
+
+    /// Feedback #88: the ledger lists the session's gates newest first with
+    /// their state, redacts the command, honours `limit` and `grep`, and names
+    /// nothing of another session.
+    #[tokio::test]
+    async fn gate_history_lists_the_sessions_gates_with_their_states() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        assert!(bridge.gate_history("s1", 20, None).await.unwrap().contains("parked no gated command yet"));
+        let park = |cmd: &str| {
+            let cmd = cmd.to_string();
+            let bridge = bridge.clone();
+            async move {
+                let reply = bridge.action_gate("s1".into(), "hands".into(), cmd, true).await.unwrap();
+                reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string()
+            }
+        };
+        let marker = repo.path().join("ran.txt");
+        let approved = park(&format!("touch {}", posix_path(&marker))).await;
+        bridge.resolve_choice(&approved, "Approve".into()).await.unwrap();
+        let rejected = park("rm -rf build").await;
+        bridge.resolve_choice(&rejected, "not yet, CI is red".into()).await.unwrap();
+        let secret = park(&format!("curl -H 'Authorization: Bearer {}{}' https://api.example.com", "ghp_", "1234567890abcdefghijABCDEF")).await;
+        let pending = park("echo pending").await;
+
+        let ledger = bridge.gate_history("s1", 20, None).await.unwrap();
+        assert!(ledger.starts_with("gate_history — 4 gate(s), newest first"), "{ledger}");
+        let order: Vec<usize> = [&pending, &secret, &rejected, &approved]
+            .iter()
+            .map(|id| ledger.find(&id[..8]).unwrap_or_else(|| panic!("{} missing: {ledger}", &id[..8])))
+            .collect();
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "newest first: {ledger}");
+        assert!(ledger.contains("pending the user's approval `echo pending`"), "{ledger}");
+        assert!(ledger.contains("approved, exit 0 after") && ledger.contains("bytes of output"), "{ledger}");
+        assert!(ledger.contains("rejected (not yet, CI is red) `rm -rf build`"), "{ledger}");
+        assert!(!ledger.contains("1234567890abcdefghij"), "the command is redacted: {ledger}");
+        assert!(ledger.contains("hands"), "{ledger}");
+        // grep and limit.
+        let only = bridge.gate_history("s1", 20, Some("rejected")).await.unwrap();
+        assert!(only.contains("1 gate(s)") && only.contains(&rejected[..8]) && !only.contains(&approved[..8]), "{only}");
+        let two = bridge.gate_history("s1", 2, None).await.unwrap();
+        assert!(two.contains("2 gate(s)") && two.contains(&pending[..8]) && two.contains(&secret[..8]) && !two.contains(&approved[..8]), "{two}");
+        assert!(bridge.gate_history("s1", 20, Some("nothing-like-this")).await.unwrap().contains("no gate of this session matches"));
+        // Another session sees none of it.
+        storage.create_session("s2", "t", None).await.unwrap();
+        assert!(bridge.gate_history("s2", 20, None).await.unwrap().contains("parked no gated command yet"));
     }
 
     /// Feedback #96: under a zsh gate shell, a command carrying the
