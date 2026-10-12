@@ -14,7 +14,7 @@
 -- `message_id` ties the entry to its channel row.
 CREATE TABLE session_user_words (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id  TEXT    NOT NULL,
+    session_id  TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     message_id  INTEGER NOT NULL,
     created_at  TEXT    NOT NULL,
     text        TEXT    NOT NULL

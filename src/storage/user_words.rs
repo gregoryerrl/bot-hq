@@ -10,6 +10,11 @@
 //! `core::broadcast::broadcast_user_message` for a message the caller marked
 //! as the user's (`Authored::ByUser`) and by the tray's `deliver_oob` with the
 //! answer's summary.
+//!
+//! Known limit: the mirror reads the table and then writes the file, so two
+//! records landing at the same instant (a typed Send and a tray click) can
+//! leave the file one entry behind until the next record or spawn re-renders
+//! it. The table is the fact; the file is a best-effort copy of it.
 
 use super::*;
 use crate::agents::handoff::{self, UserWordsEntry};
