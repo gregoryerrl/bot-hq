@@ -75,16 +75,17 @@ const PUSH_RERUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6
 pub const HALT_WAIT_CHUNK: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long the temporary-halt timer waits next, at wall-clock `now` for a
-/// halt due at `wake`: the time left, capped at [`HALT_WAIT_CHUNK`]; `None`
-/// once the instant has passed, which is the signal to fire. Pure, so the
-/// chunking that bounds the sleep-clock drift is pinned by a test rather
-/// than by closing a laptop lid.
+/// halt due at `wake`: the time left, capped at `chunk` ([`HALT_WAIT_CHUNK`]
+/// in production); `None` once the instant has passed, which is the signal to
+/// fire. Pure, so the chunking that bounds the sleep-clock drift is pinned by
+/// a test rather than by closing a laptop lid.
 pub fn halt_wait_chunk(
     now: chrono::DateTime<chrono::Utc>,
     wake: chrono::DateTime<chrono::Utc>,
+    chunk: std::time::Duration,
 ) -> Option<std::time::Duration> {
     let left = (wake - now).to_std().ok().filter(|d| !d.is_zero())?;
-    Some(left.min(HALT_WAIT_CHUNK))
+    Some(left.min(chunk))
 }
 
 /// The `picked_option` a queued gate carries when its own issuer withdrew it
@@ -1946,36 +1947,57 @@ impl SignalingBridge {
                 .ok()
                 .map(|t| t.with_timezone(&chrono::Utc))
                 .unwrap_or_else(chrono::Utc::now);
-            if bridge.wait_until_halt_instant(&session_id, &wake_at, wake, &chrono::Utc::now).await {
+            if bridge
+                .wait_until_halt_instant(&session_id, &wake_at, wake, HALT_WAIT_CHUNK, &chrono::Utc::now)
+                .await
+            {
                 bridge.fire_temporary_halt(&session_id, &agent, &wake_at).await;
             }
         });
     }
 
-    /// The temporary halt's wait: chunks of at most [`HALT_WAIT_CHUNK`], each
-    /// recomputed from `now` (the wall clock in production; a test's clock
-    /// here), until the instant has passed — `true`, fire — or the slot no
-    /// longer holds this halt — `false`, a replaced or released halt ends its
-    /// timer early. A read of the slot that FAILS keeps waiting (EYES
-    /// 2f2a9d30): the slot is read once a minute, up to thousands of times for
-    /// a long halt, and one passing database error must not leave the session
-    /// halted for good.
+    /// The temporary halt's wait: chunks of at most `chunk` ([`HALT_WAIT_CHUNK`]
+    /// in production; milliseconds in a test, so the test runs on real time
+    /// — paused tokio time jumped the pool's acquire timeout while SQLite was
+    /// still answering, EYES 128a11a9), each recomputed from `now` (the wall
+    /// clock in production; a test's clock), until the instant has passed —
+    /// `true`, fire — or the slot no longer holds this halt — `false`, a
+    /// replaced or released halt ends its timer early. A read of the slot that
+    /// FAILS keeps waiting (EYES 2f2a9d30): the slot is read once a minute, up
+    /// to thousands of times for a long halt, and one passing database error
+    /// must not leave the session halted for good. Returns the count of slot
+    /// reads that SUCCEEDED beside the verdict, so a test can tell "waited
+    /// through errors" from "waited with the slot in view".
     async fn wait_until_halt_instant(
         &self,
         session_id: &str,
         wake_at: &str,
         wake: chrono::DateTime<chrono::Utc>,
+        chunk: std::time::Duration,
         now: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Sync),
     ) -> bool {
-        while let Some(chunk) = halt_wait_chunk(now(), wake) {
+        self.wait_until_halt_instant_counting(session_id, wake_at, wake, chunk, now).await.0
+    }
+
+    /// [`Self::wait_until_halt_instant`] with the number of successful slot reads.
+    async fn wait_until_halt_instant_counting(
+        &self,
+        session_id: &str,
+        wake_at: &str,
+        wake: chrono::DateTime<chrono::Utc>,
+        chunk: std::time::Duration,
+        now: &(dyn Fn() -> chrono::DateTime<chrono::Utc> + Sync),
+    ) -> (bool, usize) {
+        let mut reads_ok = 0usize;
+        while let Some(chunk) = halt_wait_chunk(now(), wake, chunk) {
             tokio::time::sleep(chunk).await;
             let storage = self.storage.lock().await.clone();
             if let Some(storage) = storage {
                 match storage.session_halt_wake_at(session_id).await {
-                    Ok(Some(current)) if current == wake_at => {}
+                    Ok(Some(current)) if current == wake_at => reads_ok += 1,
                     Ok(_) => {
                         tracing::debug!(session_id, wake_at, "temporary halt replaced or released mid-wait; its timer ends");
-                        return false;
+                        return (false, reads_ok + 1);
                     }
                     Err(e) => {
                         tracing::warn!(session_id, wake_at, error = %e, "reading the halt slot mid-wait failed; the timer keeps waiting");
@@ -1983,7 +2005,7 @@ impl SignalingBridge {
                 }
             }
         }
-        true
+        (true, reads_ok)
     }
 
     /// The temporary halt's wake. Re-reads the slot first: if the session's
@@ -3010,17 +3032,16 @@ mod tests {
         assert!(cleared, "the UI is told the halt cleared");
     }
 
-    /// The timer's LOOP, driven by a test clock under paused time (EYES
-    /// 2f2a9d30): a halt two hours out waits a minute at a time; when the clock
-    /// jumps past the instant (the Mac slept), it fires within one chunk of
-    /// paused time rather than two hours later; a slot that stops holding this
-    /// halt ends it with `false`; a storage read that fails keeps it waiting.
-    /// A single `sleep(delay)` put back INSIDE `wait_until_halt_instant` turns
-    /// the first assertion red; that `arm_temporary_halt` calls the function
-    /// is read in the code, not pinned here.
-    /// (Time is paused AFTER the storage opens: an opening pool waits on a
-    /// blocking thread, and paused time auto-advances past its acquire
-    /// timeout while nothing else runs.)
+    /// The timer's LOOP, driven by a test clock on REAL time with a
+    /// millisecond chunk (EYES 2f2a9d30; 128a11a9 — paused tokio time jumped
+    /// the pool's acquire timeout while SQLite was still answering, red on the
+    /// Ubuntu runner only): a halt two hours out waits a chunk at a time and
+    /// reads the slot each chunk; when the clock jumps past the instant (the
+    /// Mac slept), it fires at the next read rather than two hours later; a
+    /// slot that stops holding this halt ends it with `false`; a storage read
+    /// that fails keeps it waiting. A single `sleep(delay)` put back INSIDE
+    /// `wait_until_halt_instant` turns the first assertion red; that
+    /// `arm_temporary_halt` calls the function is read in the code.
     #[tokio::test]
     async fn the_halt_timer_fires_within_one_chunk_of_a_clock_jump_and_survives_a_read_error() {
         use chrono::TimeZone;
@@ -3032,7 +3053,7 @@ mod tests {
         let wake = t0 + chrono::Duration::hours(2);
         let wake_at = wake.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         storage.declare_temporary_session_halt("s1", "hands", "CI", &wake_at).await.unwrap();
-        tokio::time::pause();
+        let chunk = std::time::Duration::from_millis(5);
         // The clock: `t0` for the first three reads, then two hours and a
         // second later — the Mac slept through the instant.
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -3043,27 +3064,28 @@ mod tests {
                 if n < 3 { t0 } else { t0 + chrono::Duration::hours(2) + chrono::Duration::seconds(1) }
             }
         };
-        let started = tokio::time::Instant::now();
-        let fire = bridge.wait_until_halt_instant("s1", &wake_at, wake, &clock).await;
+        let started = std::time::Instant::now();
+        let (fire, slot_reads) = bridge.wait_until_halt_instant_counting("s1", &wake_at, wake, chunk, &clock).await;
         assert!(fire, "the instant passed with the slot still ours: fire");
         // Three chunk waits (one per `t0` read), then the fourth read sees the
-        // jump and the wait ends: the clock is consulted every chunk, and the
-        // paused clock never ran anywhere near the two hours a single sleep
-        // would have taken. (The elapsed paused time is not exactly three
-        // chunks: the pool's own timers auto-advance it during each read.)
+        // jump and the wait ends: the clock is consulted every chunk, the slot
+        // was READ (successfully) after each wait, and nothing waited anywhere
+        // near the two hours a single sleep would have taken.
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4, "one clock read per chunk, then the jump");
-        let waited = started.elapsed();
-        assert!(
-            waited >= 3 * HALT_WAIT_CHUNK && waited < std::time::Duration::from_secs(2 * 3600),
-            "chunked waits, not the whole two hours: waited {waited:?}"
-        );
-        // Replaced mid-wait: the slot holds another instant → `false`.
+        assert_eq!(slot_reads, 3, "the slot was read after every chunk, and every read succeeded");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "chunked waits of {chunk:?}, not two hours");
+        // Replaced mid-wait: the slot holds another instant → `false`, at the
+        // first read.
         let other = (wake + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         storage.declare_temporary_session_halt("s1", "hands", "CI again", &other).await.unwrap();
         let steady = || t0;
-        assert!(!bridge.wait_until_halt_instant("s1", &wake_at, wake, &steady).await, "replaced: no fire");
-        // A read error is not a replacement: the wait goes on until the clock
-        // passes the instant.
+        assert_eq!(
+            bridge.wait_until_halt_instant_counting("s1", &wake_at, wake, chunk, &steady).await,
+            (false, 1),
+            "replaced: no fire"
+        );
+        // A read error is not a replacement: the wait goes on, with no read
+        // succeeding, until the clock passes the instant.
         storage.declare_temporary_session_halt("s1", "hands", "CI", &wake_at).await.unwrap();
         storage.pool().close().await;
         let reads = std::sync::atomic::AtomicUsize::new(0);
@@ -3071,7 +3093,11 @@ mod tests {
             let n = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < 2 { t0 } else { wake }
         };
-        assert!(bridge.wait_until_halt_instant("s1", &wake_at, wake, &clock).await, "errors logged, then fired on time");
+        assert_eq!(
+            bridge.wait_until_halt_instant_counting("s1", &wake_at, wake, chunk, &clock).await,
+            (true, 0),
+            "errors logged, then fired on time"
+        );
     }
 
     /// The timer's wait is chunked on the WALL clock (EYES S8/P13): a halt an
@@ -3084,15 +3110,15 @@ mod tests {
         use chrono::TimeZone;
         let now = chrono::Utc.with_ymd_and_hms(2026, 10, 12, 8, 0, 0).unwrap();
         let hour = now + chrono::Duration::hours(1);
-        assert_eq!(halt_wait_chunk(now, hour), Some(HALT_WAIT_CHUNK));
-        assert_eq!(halt_wait_chunk(now, now + chrono::Duration::seconds(90)), Some(HALT_WAIT_CHUNK));
+        assert_eq!(halt_wait_chunk(now, hour, HALT_WAIT_CHUNK), Some(HALT_WAIT_CHUNK));
+        assert_eq!(halt_wait_chunk(now, now + chrono::Duration::seconds(90), HALT_WAIT_CHUNK), Some(HALT_WAIT_CHUNK));
         assert_eq!(
-            halt_wait_chunk(now, now + chrono::Duration::seconds(25)),
+            halt_wait_chunk(now, now + chrono::Duration::seconds(25), HALT_WAIT_CHUNK),
             Some(std::time::Duration::from_secs(25)),
             "the last chunk is the remainder"
         );
-        assert_eq!(halt_wait_chunk(now, now), None, "due now: fire");
-        assert_eq!(halt_wait_chunk(now, now - chrono::Duration::minutes(30)), None, "overdue (the Mac slept): fire");
+        assert_eq!(halt_wait_chunk(now, now, HALT_WAIT_CHUNK), None, "due now: fire");
+        assert_eq!(halt_wait_chunk(now, now - chrono::Duration::minutes(30), HALT_WAIT_CHUNK), None, "overdue (the Mac slept): fire");
         assert_eq!(HALT_WAIT_CHUNK, std::time::Duration::from_secs(60));
     }
 
