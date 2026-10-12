@@ -602,6 +602,13 @@ pub(crate) fn is_outward(command: &str) -> bool {
 /// POST (and can be a mutation); any other explicit method is a write; an
 /// `X-HTTP-Method-Override` header may turn the request into one; a value the
 /// shell computes could be any of these. Every doubt reads as "not a GET".
+///
+/// Flags are an exact allow-list, never "anything else is a switch" (EYES
+/// d2f1cdc4): gh's parser splits combined short flags, so `-iXPOST` is `-i -X
+/// POST` and `-iFbody=hi` is `-i -F body=hi` — a write that an unknown-flag
+/// shrug once classed as a pure read. And a field read from a FILE (`-F
+/// k=@path`, `--input path`) sends that file's contents to GitHub, so it is
+/// never a read whatever the method.
 fn is_gh_api_get(c: &Cmd) -> bool {
     if c.tool != "gh" || c.opaque {
         return false;
@@ -636,14 +643,26 @@ fn is_gh_api_get(c: &Cmd) -> bool {
                 Some(m) => method = Some(m.to_ascii_uppercase()),
                 None => return false,
             }
-        } else if a == "--input" || a.starts_with("--input=") || a == "--field" || a.starts_with("--field=")
-            || a == "--raw-field" || a.starts_with("--raw-field=")
-            || (a.starts_with("-f") && !a.starts_with("--")) || (a.starts_with("-F") && !a.starts_with("--"))
-        {
-            has_body = true;
-            if a == "--input" || a == "--field" || a == "--raw-field" || a == "-f" || a == "-F" {
-                i += 1; // the value
+        } else if a == "--input" || a.starts_with("--input=") {
+            // A body read from a file (or stdin): a file's contents leave the
+            // machine. Never a read.
+            return false;
+        } else if a == "--field" || a.starts_with("--field=") || (a.starts_with("-F") && !a.starts_with("--")) {
+            // A typed field: `@path` sends a file's contents — never a read.
+            let v = match value_of(&mut i) {
+                Some(v) => v,
+                None => return false,
+            };
+            if v.split_once('=').is_some_and(|(_, val)| val.starts_with('@')) {
+                return false;
             }
+            has_body = true;
+        } else if a == "--raw-field" || a.starts_with("--raw-field=") || (a.starts_with("-f") && !a.starts_with("--")) {
+            // A literal field: a query parameter under an explicit GET.
+            if value_of(&mut i).is_none() {
+                return false;
+            }
+            has_body = true;
         } else if a == "-H" || a == "--header" || a.starts_with("--header=") || (a.starts_with("-H") && a.len() > 2) {
             let v = match value_of(&mut i) {
                 Some(v) => v,
@@ -660,8 +679,12 @@ fn is_gh_api_get(c: &Cmd) -> bool {
             if !a.contains('=') {
                 i += 1;
             }
+        } else if matches!(a, "-i" | "--include" | "--paginate" | "--silent" | "--verbose" | "--slurp") {
+            // The known switches, exactly. Anything else that starts with a
+            // dash — a combined short flag such as `-iXPOST`, a flag this
+            // table does not know — is not a GET.
         } else if a.starts_with('-') {
-            // A boolean flag (`--paginate`, `-i`, `--silent`, `--verbose`).
+            return false;
         } else if endpoint.is_none() {
             endpoint = Some(a);
         }
@@ -1702,6 +1725,19 @@ mod tests {
             "gh api --raw-field body=hi repos/o/r/issues/5/comments",
             "gh api $EP",
             "gh api repos/o/r/issues -X",
+            // Combined short flags (EYES d2f1cdc4): gh's parser reads `-iXPOST`
+            // as `-i -X POST`, `-iFbody=x` as `-i -F body=x`. An exact flag
+            // table refuses them; so does any flag it does not know.
+            "gh api -iXPOST repos/o/r/issues/5/comments -iFbody=hi",
+            "gh api -iXPOST repos/o/r/issues/5/comments",
+            "gh api -if title=x repos/o/r/issues",
+            "gh api -iFbody=x repos/o/r/issues/5/comments",
+            "gh api -iH 'X-HTTP-Method-Override: DELETE' repos/o/r/issues/5",
+            "gh api --unknown-flag repos/o/r",
+            // A field or body read from a FILE leaves the machine, GET or not.
+            "gh api -X GET -F q=@secrets.txt search/issues",
+            "gh api -X GET --input body.json repos/o/r/issues",
+            "gh api --input - repos/o/r/issues",
         ] {
             assert!(is_outward(write), "still outward: {write}");
             assert!(!is_gh_api_read(write), "not a pure read: {write}");
