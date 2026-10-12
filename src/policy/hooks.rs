@@ -597,19 +597,22 @@ fn compact_handoff_text(
 
 /// What the `compact-user-words` hook prints: the user's own words of the
 /// session from after the participant's handoff doc was last written (read
-/// off the participant's rendered file — `None` there, or no file, means the
-/// whole session), under `agents::handoff::USER_WORDS_BUDGET_BYTES`.
+/// off the participant's rendered file; the no-doc text there means the whole
+/// session), under `agents::handoff::USER_WORDS_BUDGET_BYTES`.
 ///
 /// `None` — nothing printed, exit 0 — when there is no session id, the names
-/// are not path-safe, the words file is missing or unreadable, or nothing was
-/// said since. File reads only, like `compact_handoff_text`.
+/// are not path-safe, either file is missing or unreadable, or nothing was
+/// said since. A MISSING rendered file is not "no doc": it means the agent is
+/// unknown (`BOT_HQ_AGENT` unset) or a render failed, and the no-doc header
+/// would then be a false claim — so nothing is printed, as `pre_compact_text`
+/// does (EYES a81491d5). File reads only, like `compact_handoff_text`.
 fn compact_user_words_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
     use crate::agents::handoff;
     let session_id = session_id?;
     let dir = handoff::dir_under(&crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir);
     let words = std::fs::read_to_string(handoff::user_words_path(&dir, session_id)?).ok()?;
-    let rendered = handoff::file_path(&dir, session_id, agent).and_then(|p| std::fs::read_to_string(p).ok());
-    let since = rendered.as_deref().and_then(handoff::written_at);
+    let rendered = std::fs::read_to_string(handoff::file_path(&dir, session_id, agent)?).ok()?;
+    let since = handoff::written_at(&rendered);
     handoff::render_user_words(&handoff::parse_user_words_file(&words), since, handoff::USER_WORDS_BUDGET_BYTES)
 }
 
@@ -3295,7 +3298,8 @@ mod tests {
         ];
         handoff::write_file(&handoff::user_words_path(&dir, "s-1").unwrap(), &handoff::render_user_words_file(&words)).unwrap();
         // hands' doc was written between the two messages; eyes has the no-doc
-        // text; a third participant has no rendered file at all.
+        // text; a third participant has no rendered file at all — and gets
+        // nothing, since "no doc" would be a claim nothing supports.
         let hands = handoff::file_path(&dir, "s-1", "hands").unwrap();
         handoff::write_file(&hands, &handoff::render("s-1", "hands", Some(("plan", "2026-10-12T06:00:00.000Z")))).unwrap();
         handoff::write_file(&handoff::file_path(&dir, "s-1", "eyes").unwrap(), &handoff::render("s-1", "eyes", None)).unwrap();
@@ -3304,10 +3308,10 @@ mod tests {
         assert!(out.starts_with(handoff::USER_WORDS_MARKER), "{out}");
         assert!(out.contains("(2026-10-12T06:00:00.000Z) — 1 message,") && out.contains("work on the handoff"), "{out}");
         assert!(!out.contains("feedback queue"), "said before the doc: {out}");
-        for who in ["eyes", "nobody"] {
-            let out = compact_user_words_text(tmp.path(), Some("s-1"), who).unwrap();
-            assert!(out.contains("in this session — 2 messages,") && out.contains("feedback queue"), "{who}: {out}");
-        }
+        let out = compact_user_words_text(tmp.path(), Some("s-1"), "eyes").unwrap();
+        assert!(out.contains("in this session — 2 messages,") && out.contains("feedback queue"), "{out}");
+        assert_eq!(compact_user_words_text(tmp.path(), Some("s-1"), "nobody"), None, "no rendered file: nothing");
+        assert_eq!(compact_user_words_text(tmp.path(), Some("s-1"), "an agent"), None);
         // Nothing said since the doc, no session, an unsafe id, no words file: nothing.
         handoff::write_file(&hands, &handoff::render("s-1", "hands", Some(("plan", "2026-10-12T06:30:00.000Z")))).unwrap();
         assert_eq!(compact_user_words_text(tmp.path(), Some("s-1"), "hands"), None);
