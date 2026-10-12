@@ -39,7 +39,7 @@
 //! here.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Why a claim is reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,15 +183,28 @@ fn is_symbol_shaped(span: &str) -> bool {
 /// contents-only corpus reported three real files as "no occurrence in the
 /// tracked source" (round 7: 3 of the 30 hits). A file's own path is the
 /// evidence it exists (and its stem is a substring of it).
-fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), String> {
+fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), CorpusError> {
     let out = crate::core::git::hardened(repo_root)
         .args(["ls-files", "-z"])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| CorpusError::Git(e.to_string()))?;
     if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        return Err(CorpusError::Git(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
     let listing = String::from_utf8_lossy(&out.stdout).to_string();
+    // An EMPTY tracked set is a refusal, not a corpus (feedback #99): with
+    // nothing to search, every symbol reads as missing and the report lists
+    // the whole library. Live case: a project folder registered inside a
+    // bigger repository that tracks nothing under it ("Minecraft Mods", whose
+    // toplevel is `~/Projects`). A TRACKED subfolder keeps working — its
+    // `ls-files` lists its files — so the test is the empty set, not a
+    // toplevel that differs.
+    if listing.split('\0').all(|p| p.is_empty()) {
+        return Err(CorpusError::NoTrackedFiles {
+            folder: repo_root.to_path_buf(),
+            toplevel: git_toplevel(repo_root).filter(|top| !same_dir(top, repo_root)),
+        });
+    }
     let mut corpus = String::new();
     let mut tracked = Vec::new();
     for rel in listing.split('\0').filter(|p| !p.is_empty()) {
@@ -212,6 +225,64 @@ fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), String> {
         }
     }
     Ok((corpus, tracked))
+}
+
+/// Why a folder yielded no corpus to check CL claims against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CorpusError {
+    /// `git ls-files` itself failed (no repository, no git): its stderr.
+    Git(String),
+    /// The repository tracks no file under `folder`: a project folder
+    /// registered inside a bigger repository that tracks nothing there
+    /// (`toplevel` is that repository's root), or a repository with nothing
+    /// committed yet (`None`). A configuration problem to name, not a scan to
+    /// run.
+    NoTrackedFiles { folder: PathBuf, toplevel: Option<PathBuf> },
+}
+
+impl std::fmt::Display for CorpusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CorpusError::Git(e) => write!(f, "{e}"),
+            CorpusError::NoTrackedFiles { folder, toplevel: Some(top) } => write!(
+                f,
+                "the folder {} has no tracked files to check CL claims against: it sits inside the \
+                 git repository at {}, which tracks nothing under it. Register that repository's \
+                 own folder as the project's repo, or commit the project's files, and run the \
+                 report again.",
+                folder.display(),
+                top.display()
+            ),
+            CorpusError::NoTrackedFiles { folder, toplevel: None } => write!(
+                f,
+                "the repository at {} tracks no files yet, so there is nothing to check CL claims \
+                 against. Commit the project's files and run the report again.",
+                folder.display()
+            ),
+        }
+    }
+}
+
+/// The root of the repository `dir` is inside, per git; `None` when git cannot say.
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let out = crate::core::git::hardened(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!top.is_empty()).then(|| PathBuf::from(top))
+}
+
+/// The same directory once symlinks and relative segments are resolved
+/// (`/tmp` is `/private/tmp` on macOS; git reports the resolved form).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// Does the repo hold this path? Either literally, or as the tail of a tracked
@@ -340,7 +411,7 @@ pub(crate) fn stale_in_body(
 /// Walk a project's CL directory and report every claim naming absent code.
 ///
 /// `cl_dir` is the project's own CL folder; `repo_root` the repo it documents.
-pub fn stale_claims(cl_dir: &Path, repo_root: &Path) -> Result<Vec<StaleClaim>, String> {
+pub fn stale_claims(cl_dir: &Path, repo_root: &Path) -> Result<Vec<StaleClaim>, CorpusError> {
     let (corpus, tracked) = source_corpus(repo_root)?;
     let mut out = Vec::new();
     let mut stack = vec![cl_dir.to_path_buf()];
@@ -554,6 +625,62 @@ in the specta 2 migration.
         let refs: Vec<&str> = claims.iter().map(|c| c.reference.as_str()).collect();
         assert!(!refs.contains(&"codebase_map_test"), "a tracked file's stem is present: {refs:?}");
         assert!(refs.contains(&"an_absent_symbol"), "a genuinely absent symbol still reports: {refs:?}");
+    }
+
+    /// Feedback #99: a folder whose tracked set is EMPTY is refused with a
+    /// configuration message (naming the repository's root when the folder
+    /// sits inside one), instead of a corpus in which every symbol is missing.
+    /// A TRACKED subfolder of a bigger repository still gets its corpus.
+    #[test]
+    fn an_empty_tracked_set_is_refused_and_names_the_repository_it_sits_in() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        // Nothing tracked anywhere yet: refused, and the folder IS the root.
+        match source_corpus(repo.path()) {
+            Err(CorpusError::NoTrackedFiles { folder, toplevel: None }) => assert_eq!(folder, repo.path()),
+            other => panic!("expected a no-tracked-files refusal, got {other:?}"),
+        }
+        std::fs::create_dir_all(repo.path().join("app/src")).unwrap();
+        std::fs::create_dir_all(repo.path().join("mods")).unwrap();
+        std::fs::write(repo.path().join("app/src/main.rs"), "fn tracked_symbol() {}\n").unwrap();
+        std::fs::write(repo.path().join("mods/notes.txt"), "untracked").unwrap();
+        git(&["add", "app/src/main.rs"]);
+        // The untracked subfolder: refused, naming the repository it sits in.
+        let err = source_corpus(&repo.path().join("mods")).expect_err("nothing tracked under mods/");
+        match &err {
+            CorpusError::NoTrackedFiles { folder, toplevel: Some(top) } => {
+                assert_eq!(folder, &repo.path().join("mods"));
+                assert!(same_dir(top, repo.path()), "toplevel {top:?} is the repo root {:?}", repo.path());
+            }
+            other => panic!("got {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("has no tracked files") && msg.contains("sits inside the git repository at"), "{msg}");
+        assert!(msg.contains("Register that repository's own folder"), "{msg}");
+        // The tracked subfolder keeps its corpus (its own files, relative to it).
+        let (corpus, tracked) = source_corpus(&repo.path().join("app")).expect("a tracked subfolder scans");
+        assert_eq!(tracked, ["src/main.rs"]);
+        assert!(corpus.contains("tracked_symbol"));
+        // And `stale_claims` carries the refusal through to the facade's match.
+        let cl = tempfile::tempdir().unwrap();
+        std::fs::write(cl.path().join("notes.md"), "`tracked_symbol` lives here.").unwrap();
+        assert!(matches!(
+            stale_claims(cl.path(), &repo.path().join("mods")),
+            Err(CorpusError::NoTrackedFiles { .. })
+        ));
+        assert!(stale_claims(cl.path(), &repo.path().join("app")).unwrap().is_empty());
+        // No repository at all is still a git error, not a configuration one.
+        let bare = tempfile::tempdir().unwrap();
+        assert!(matches!(source_corpus(bare.path()), Err(CorpusError::Git(_))));
     }
 
     /// The extraction floor. Without it the report is unreadable: every `Some`,

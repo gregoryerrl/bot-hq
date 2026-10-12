@@ -139,7 +139,12 @@ impl SignalingBridge {
         })
         .await
         .map_err(|e| anyhow::anyhow!("cl_stale_refs task panicked: {e}"))?
-        .map_err(|e| anyhow::anyhow!("scanning the repo failed: {e}"))?;
+        .map_err(|e| match e {
+            // A configuration problem, named like the no-repo case above —
+            // not a failed scan (feedback #99).
+            e @ super::cl_staleness::CorpusError::NoTrackedFiles { .. } => anyhow::anyhow!("{e}"),
+            super::cl_staleness::CorpusError::Git(e) => anyhow::anyhow!("scanning the repo failed: {e}"),
+        })?;
         // The drift sweep (Batch 10; the W6 verdict's gap, narrowed by review:
         // the retrieve path already hash-flags drifted atoms per query — the
         // REPORT was the blind surface). Same comparison, whole project: an

@@ -215,6 +215,15 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The staleness report no longer lists a whole library as missing for a
+  folder git tracks nothing under.** A project whose folder sits inside a
+  bigger repository that tracks no file there (a mods folder under
+  `~/Projects`, say) used to get an empty corpus, so `cl_stale_refs` reported
+  every identifier in its Context Library as gone. The report now refuses
+  such a folder with a configuration message that names the repository it
+  sits in and what to do (register that repository's own folder, or commit
+  the project's files). A folder that IS tracked inside a bigger repository
+  still gets its report.
 - **A model the claude CLI does not know runs at the window the registry
   says.** For a model id that is not Claude's own (OpenRouter, DeepSeek, …)
   the CLI only ever used its own 200k default, whatever the model row's
