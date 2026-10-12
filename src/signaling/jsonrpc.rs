@@ -2500,10 +2500,15 @@ mod tests {
             ("plan-eyes", "the review", Some("plan")),
             ("handoff-hands", "my handoff", None),
             ("promoted-notes", "already in the CL", None),
+            ("stale-copy", "copied, then changed", None),
         ] {
             storage.upsert_session_document("s1", slug, body, phase).await.unwrap();
         }
         storage.mark_session_document_promoted("s1", "promoted-notes", "bot-hq/notes.md").await.unwrap();
+        // Promoted, then changed: its library copy is out of date (EYES).
+        storage.mark_session_document_promoted("s1", "stale-copy", "bot-hq/stale.md").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        storage.upsert_session_document("s1", "stale-copy", "copied, then changed again", None).await.unwrap();
         let mut sub = bridge.subscribe();
 
         let first = close_text(&bridge, 1).await;
@@ -2514,10 +2519,11 @@ mod tests {
         assert!(second.contains("close PARKED"), "got: {second}");
         assert!(second.contains("CL learnings delta: NOT written"), "got: {second}");
         assert!(
-            second.contains("2 custom document(s) never promoted to the Context Library will archive with the session: `key-questions`, `eyes-handoff`."),
+            second.contains("3 custom document(s) not in the Context Library — never promoted, or changed since — will archive with the session: `key-questions`, `eyes-handoff`, `stale-copy` (changed since its copy to bot-hq/stale.md)."),
             "got: {second}"
         );
         assert!(second.contains("cl_write_file(project, file_path, session_doc: \"<slug>\")"), "the detail names the call: {second}");
+        assert!(second.contains("copied to bot-hq/stale.md at ") && second.contains(", changed since)"), "{second}");
         for absent in ["scratch@1", "`plan`", "plan-eyes", "handoff-hands", "promoted-notes"] {
             assert!(!second.contains(absent), "{absent} is not an unpromoted custom doc: {second}");
         }
@@ -4842,7 +4848,13 @@ mod tests {
         assert!(live.body.contains("yes") && live.body.contains("4. push?"), "{}", live.body);
         assert_eq!(live.last_writer.as_deref(), Some("hands"), "the append stamps its writer");
         let err = write(caller(), "rewritten blind after an append", "replace").await.unwrap_err();
-        assert!(err.message.contains("was changed by `hands` at ") && err.message.contains("Nothing was changed"), "a blind append is not a read: {}", err.message);
+        assert!(
+            err.message.contains("was last changed by your own append or edit at ")
+                && err.message.contains("on a version someone else had changed after the one you last saw whole")
+                && err.message.contains("Nothing was changed"),
+            "a blind append is not a read, and the refusal says whose change sits underneath: {}",
+            err.message
+        );
         // Nor does a blind edit.
         call(caller(), "session_doc_edit", json!({ "slug": "decisions-needed", "old_string": "4. push?", "new_string": "4. push to main?" })).await.unwrap();
         let err = write(caller(), "rewritten blind after an edit", "replace").await.unwrap_err();

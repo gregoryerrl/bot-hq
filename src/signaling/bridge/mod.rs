@@ -1680,19 +1680,33 @@ impl SignalingBridge {
         // one over byte for byte.
         let unpromoted = self.unpromoted_custom_docs(session_id).await;
         if !unpromoted.is_empty() {
-            let names = unpromoted.iter().map(|d| format!("`{}`", d.slug)).collect::<Vec<_>>().join(", ");
+            let names = unpromoted
+                .iter()
+                .map(|d| match &d.promoted_to {
+                    Some(to) => format!("`{}` (changed since its copy to {to})", d.slug),
+                    None => format!("`{}`", d.slug),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
             card.push(format!(
-                "{} custom document(s) never promoted to the Context Library will archive with the \
-                 session: {names}.",
+                "{} custom document(s) not in the Context Library — never promoted, or changed since — \
+                 will archive with the session: {names}.",
                 unpromoted.len()
             ));
             detail.push(format!(
-                "Custom document(s) never promoted — for each that should outlive the session, \
-                 cl_write_file(project, file_path, session_doc: \"<slug>\") copies it byte for \
-                 byte; a scratch doc may simply archive:\n{}",
+                "Custom document(s) not in the Context Library — for each that should outlive the \
+                 session, cl_write_file(project, file_path, session_doc: \"<slug>\") copies it byte \
+                 for byte (a changed one is re-copied over its old copy); a scratch doc may simply \
+                 archive:\n{}",
                 unpromoted
                     .iter()
-                    .map(|d| format!("- `{}` ({} bytes, last written {})", d.slug, d.body.len(), d.updated_at))
+                    .map(|d| match (&d.promoted_to, &d.promoted_at) {
+                        (Some(to), Some(at)) => format!(
+                            "- `{}` ({} bytes, last written {}; copied to {to} at {at}, changed since)",
+                            d.slug, d.body.len(), d.updated_at
+                        ),
+                        _ => format!("- `{}` ({} bytes, last written {}; never promoted)", d.slug, d.body.len(), d.updated_at),
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             ));

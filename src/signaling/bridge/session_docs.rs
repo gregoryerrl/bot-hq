@@ -328,6 +328,16 @@ pub struct DocSeen {
     pub covered_to: usize,
 }
 
+/// Is the Context Library missing this doc's current content: never promoted,
+/// or changed after it was (`promoted_at` before `updated_at`, both RFC3339-Z
+/// from `now_utc`, so a string compare is a time compare)?
+pub fn doc_promotion_stale(doc: &crate::storage::SessionDocument) -> bool {
+    match (&doc.promoted_to, &doc.promoted_at) {
+        (Some(_), Some(at)) => *at < doc.updated_at,
+        _ => true,
+    }
+}
+
 /// The version of a doc the seen-map compares: its `updated_at` AND its
 /// body's hash — two writes inside one millisecond share the timestamp, and
 /// a changed body must never read as already seen.
@@ -586,20 +596,39 @@ impl SignalingBridge {
         if seen.as_deref() == Some(doc_version(current).as_str()) {
             return None;
         }
-        let who = if last_writer == USER_WRITER { "the user".to_string() } else { format!("`{last_writer}`") };
-        let since = match seen {
-            Some(v) => format!(
-                "after the version you last saw whole ({})",
-                v.split('#').next().unwrap_or(&v)
-            ),
-            None => "and you have not read it whole since".to_string(),
+        let last_seen = seen.map(|v| v.split('#').next().unwrap_or(&v).to_string());
+        let what = if last_writer == writer {
+            // The writer's own blind append or edit sits on top of a version it
+            // never saw whole (EYES): say so, rather than "changed by you".
+            match &last_seen {
+                Some(at) => format!(
+                    "`{slug}` was last changed by your own append or edit at {}, on a version someone else \
+                     had changed after the one you last saw whole ({at})",
+                    current.updated_at
+                ),
+                None => format!(
+                    "`{slug}` was last changed by your own append or edit at {}, on a version you have never \
+                     read whole",
+                    current.updated_at
+                ),
+            }
+        } else {
+            let who = if last_writer == USER_WRITER { "the user".to_string() } else { format!("`{last_writer}`") };
+            match &last_seen {
+                Some(at) => format!(
+                    "`{slug}` was changed by {who} at {} — after the version you last saw whole ({at})",
+                    current.updated_at
+                ),
+                None => format!(
+                    "`{slug}` was changed by {who} at {} and you have not read it whole since",
+                    current.updated_at
+                ),
+            }
         };
         Some(format!(
-            "`{slug}` was changed by {who} at {} — {since}. Nothing was changed. Read it whole first \
-             (session_doc_read with no lines, grep or heading; a too-long doc is read whole in line \
-             ranges from 1 to its end), then write again — or change only your part with \
-             session_doc_edit, or add to it with mode: \"append\".",
-            current.updated_at
+            "{what}. Nothing was changed. Read it whole first (session_doc_read with no lines, grep or \
+             heading; a too-long doc is read whole in line ranges from 1 to its end), then write again — \
+             or change only your part with session_doc_edit, or add to it with mode: \"append\".",
         ))
     }
 
@@ -677,10 +706,12 @@ impl SignalingBridge {
         }
     }
 
-    /// The session's CUSTOM documents never promoted to the Context Library
-    /// (feedback #73): untagged, not an archive (`@n`), not a reviewer co-doc,
-    /// not a handoff doc (per-session by design — the user declined carrying
-    /// handoffs over, #74 step 4), with no `promoted_to`. Oldest first.
+    /// The session's CUSTOM documents whose content is not in the Context
+    /// Library (feedback #73): untagged, not an archive (`@n`), not a reviewer
+    /// co-doc, not a handoff doc (per-session by design — the user declined
+    /// carrying handoffs over, #74 step 4), not empty, and either never
+    /// promoted or CHANGED since they were (`updated_at` past `promoted_at` —
+    /// EYES: the library copy is then out of date). Oldest first.
     pub async fn unpromoted_custom_docs(&self, session_id: &str) -> Vec<crate::storage::SessionDocument> {
         let Some(storage) = self.storage.lock().await.clone() else { return Vec::new() };
         let mut docs: Vec<_> = storage
@@ -690,11 +721,11 @@ impl SignalingBridge {
             .into_iter()
             .filter(|d| {
                 d.phase.is_none()
-                    && d.promoted_to.is_none()
                     && !is_archive_slug(&d.slug)
                     && crate::storage::reviewer_codoc_phase(&d.slug).is_none()
                     && crate::agents::handoff::participant_of(&d.slug).is_none()
                     && !d.body.trim().is_empty()
+                    && doc_promotion_stale(d)
             })
             .collect();
         docs.sort_by(|a, b| a.created_at.cmp(&b.created_at));

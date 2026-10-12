@@ -252,10 +252,10 @@ and in `docs/rebuild-archive/`.
 - **The close card names what would archive unnoticed.** Besides the open
   advisory findings, the recap now lists the open BLOCKING findings (the
   commit gate holds them against a commit, not against a close) and the custom
-  session documents never promoted to the Context Library — approved content
-  that lives only in a session doc, such as the key questions that once had
-  to be copied by hand at close — with the one call that carries a doc over
-  byte for byte. A doc promoted with `cl_write_file(session_doc:)` is
+  session documents never promoted to the Context Library, or changed since
+  they were — approved content that lives only in a session doc, such as the
+  key questions that once had to be copied by hand at close — with the one
+  call that carries a doc over byte for byte. A doc promoted with `cl_write_file(session_doc:)` is
   remembered as promoted, and where to. Handoff documents are left out on
   purpose: they are per-session by your decision.
 - **Renaming or deleting a project takes its search index with it, and waits
