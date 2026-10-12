@@ -65,6 +65,13 @@ and in `docs/rebuild-archive/`.
   written 05:40 — 38 minutes before this compaction") and which source wins
   for what: the summary for anything after that time, the document's own
   words for anything before it.
+- **A temporary halt can wait up to 48 hours.** `wake_after_secs` on
+  `mark_awaiting_user` and `halt` was capped at an hour, so an overnight CI run
+  or tomorrow's cron meant re-declaring every hour — and a participant that
+  did not left the session halted on you instead. The cap is now 172,800 s
+  (48 h); the session tile names the day when the wake is not today ("wakes
+  tomorrow 14:05", "wakes Oct 14 14:05"), and the banner's countdown already
+  counts hours.
 - **A long command can be handed over as a file, with a bound for its run.**
   `action_gate` takes `command_path` — an absolute path whose whole text is the
   command (up to 256 KiB, read once) — so a multi-line script no longer has to

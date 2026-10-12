@@ -265,7 +265,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "type": "object",
                 "properties": {
                     "reason": { "type": "string", "description": "Short reason why we're waiting on the user." },
-                    "wake_after_secs": { "type": "integer", "minimum": 10, "maximum": 3600, "description": "Optional — makes this a TEMPORARY HALT: you are waiting on something external with a known ETA (CI, a deploy, a cron tick). The banner shows the countdown (`TEMPORARY HALT · wakes in mm:ss`), and when it expires the session wakes YOU — a turn dealt to you with a system row — so nothing waits on the user for an external event. Re-declare if the wait continues. A user message before the instant cancels it; a paused session does not wake." }
+                    "wake_after_secs": { "type": "integer", "minimum": 10, "maximum": 172800, "description": "Optional — makes this a TEMPORARY HALT: you are waiting on something external with a known ETA (CI, a deploy, a cron tick), up to 48 hours. The banner shows the countdown (`TEMPORARY HALT · wakes in mm:ss`), and when it expires the session wakes YOU — a turn dealt to you with a system row — so nothing waits on the user for an external event. Re-declare if the wait continues. A user message before the instant cancels it; a paused session does not wake." }
                 },
                 "required": ["reason"]
             }),
@@ -298,7 +298,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "type": "object",
                 "properties": {
                     "reason": { "type": "string", "description": "Optional short note on why you're yielding — it fills the session's halt slot and shows in the halt banner above the input (a halt is not a tray row)." },
-                    "wake_after_secs": { "type": "integer", "minimum": 10, "maximum": 3600, "description": "Optional — a TEMPORARY HALT (same as on mark_awaiting_user): the banner counts down and the session wakes you with a turn when it expires; for waits on something external with a known ETA." }
+                    "wake_after_secs": { "type": "integer", "minimum": 10, "maximum": 172800, "description": "Optional — a TEMPORARY HALT (same as on mark_awaiting_user): the banner counts down and the session wakes you with a turn when it expires; for waits on something external with a known ETA, up to 48 hours." }
                 }
             }),
         },

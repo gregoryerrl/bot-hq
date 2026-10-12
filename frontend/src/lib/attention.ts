@@ -105,10 +105,19 @@ export function needsYouParts(n: NeedsYou): string[] {
   return parts;
 }
 
-/** `wakes 14:05` — a temporary halt's wake time, in the user's local clock. */
-export function wakesLabel(wakeAt: string): string {
+/** `wakes 14:05` — a temporary halt's wake time, in the user's local clock.
+ *  A halt may now run up to 48 hours (feedback #53), so a wake that is not
+ *  today says the day too: `wakes tomorrow 14:05`, `wakes Oct 14 14:05`.
+ *  `nowMs` is for tests; it defaults to the clock. */
+export function wakesLabel(wakeAt: string, nowMs: number = Date.now()): string {
   const t = new Date(parseUtcMs(wakeAt));
   const hh = String(t.getHours()).padStart(2, "0");
   const mm = String(t.getMinutes()).padStart(2, "0");
-  return `wakes ${hh}:${mm}`;
+  const now = new Date(nowMs);
+  const dayOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((dayOf(t) - dayOf(now)) / 86_400_000);
+  if (days === 0) return `wakes ${hh}:${mm}`;
+  if (days === 1) return `wakes tomorrow ${hh}:${mm}`;
+  const month = t.toLocaleString("en-US", { month: "short" });
+  return `wakes ${month} ${t.getDate()} ${hh}:${mm}`;
 }

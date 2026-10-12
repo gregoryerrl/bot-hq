@@ -311,9 +311,20 @@ fn with_repeat_halt_note(base: &str, prior: Option<&str>) -> String {
     )
 }
 
+/// The longest temporary halt, in seconds: 48 hours (feedback #53). The old
+/// hour forced a "re-declare when the wait continues" for an overnight CI run
+/// or a cron that fires tomorrow, and a participant that did not re-declare
+/// left the session halted on the user instead. The timer's wait is chunked on
+/// the wall clock (`tray::HALT_WAIT_CHUNK`), so a two-day halt survives the
+/// machine's sleep; the tile shows the date when the wake is not today.
+pub const WAKE_AFTER_MAX_SECS: u64 = 48 * 3600;
+/// The shortest temporary halt, in seconds.
+pub const WAKE_AFTER_MIN_SECS: u64 = 10;
+
 /// `wake_after_secs` on `mark_awaiting_user` / `halt` (round 12 — a TEMPORARY
-/// halt): absent = an ordinary halt; present = a wake in 10…3600 s, else
-/// INVALID_PARAMS — an out-of-range wait is a typo, not a request.
+/// halt): absent = an ordinary halt; present = a wake in
+/// [`WAKE_AFTER_MIN_SECS`]…[`WAKE_AFTER_MAX_SECS`], else INVALID_PARAMS — an
+/// out-of-range wait is a typo, not a request.
 fn parse_wake_after(args: &Value) -> Result<Option<std::time::Duration>, JsonRpcError> {
     let Some(v) = args.get("wake_after_secs") else {
         return Ok(None);
@@ -324,13 +335,16 @@ fn parse_wake_after(args: &Value) -> Result<Option<std::time::Duration>, JsonRpc
     let secs = v.as_u64().ok_or_else(|| {
         JsonRpcError::new(
             JsonRpcError::INVALID_PARAMS,
-            "wake_after_secs must be an integer number of seconds (10..=3600)",
+            format!("wake_after_secs must be an integer number of seconds ({WAKE_AFTER_MIN_SECS}..={WAKE_AFTER_MAX_SECS})"),
         )
     })?;
-    if !(10..=3600).contains(&secs) {
+    if !(WAKE_AFTER_MIN_SECS..=WAKE_AFTER_MAX_SECS).contains(&secs) {
         return Err(JsonRpcError::new(
             JsonRpcError::INVALID_PARAMS,
-            "wake_after_secs must be between 10 and 3600 (an hour); re-declare when the wait continues",
+            format!(
+                "wake_after_secs must be between {WAKE_AFTER_MIN_SECS} and {WAKE_AFTER_MAX_SECS} (48 hours); \
+                 re-declare when the wait continues"
+            ),
         ));
     }
     Ok(Some(std::time::Duration::from_secs(secs)))
@@ -3030,9 +3044,20 @@ mod tests {
     /// would wedge the session on the wrong clock. Both tools take it.
     #[tokio::test]
     async fn wake_after_secs_makes_a_temporary_halt_and_an_out_of_range_value_declares_nothing() {
+        // The schema's ceiling IS the parser's (feedback #53: 48 hours), on
+        // both tools — pinned here so neither moves without the other.
+        for tool in ["mark_awaiting_user", "halt"] {
+            let d = crate::signaling::protocol::tool_descriptors().iter().find(|t| t.name == tool).unwrap();
+            assert_eq!(
+                d.input_schema["properties"]["wake_after_secs"]["maximum"],
+                serde_json::json!(WAKE_AFTER_MAX_SECS),
+                "{tool}'s schema ceiling"
+            );
+            assert_eq!(d.input_schema["properties"]["wake_after_secs"]["minimum"], serde_json::json!(WAKE_AFTER_MIN_SECS));
+        }
         let bridge = SignalingBridge::new();
         let mut sub = bridge.subscribe();
-        for (tool, secs) in [("mark_awaiting_user", 10u64), ("halt", 3600)] {
+        for (tool, secs) in [("mark_awaiting_user", 10u64), ("halt", 3600), ("mark_awaiting_user", WAKE_AFTER_MAX_SECS)] {
             let res = dispatch(
                 req(
                     "tools/call",
@@ -3059,7 +3084,7 @@ mod tests {
         }
         for (tool, bad) in [
             ("mark_awaiting_user", json!(5)),
-            ("halt", json!(7200)),
+            ("halt", json!(WAKE_AFTER_MAX_SECS + 1)),
             ("mark_awaiting_user", json!("soon")),
         ] {
             let err = dispatch(

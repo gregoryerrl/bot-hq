@@ -66,7 +66,11 @@ describe("SessionTile", () => {
   });
 
   it("shows a temporary halt's wake time muted, not as needs-you", () => {
-    renderTile({ needs: { ...NONE, wakesAt: new Date(2026, 8, 25, 14, 5).toISOString() } });
+    // Today's 14:05: a wake on another day names the day (feedback #53), and
+    // the tile reads the real clock.
+    const today = new Date();
+    today.setHours(14, 5, 0, 0);
+    renderTile({ needs: { ...NONE, wakesAt: today.toISOString() } });
     expect(screen.queryByTestId("needs-you")).not.toBeInTheDocument();
     expect(screen.getByTestId("wakes-at")).toHaveTextContent("wakes 14:05");
   });

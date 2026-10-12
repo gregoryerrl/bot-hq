@@ -51,6 +51,16 @@ describe("needsYouBySession", () => {
 
   it("formats a wake time on the local clock", () => {
     const at = new Date(2026, 8, 25, 14, 5).toISOString();
-    expect(wakesLabel(at)).toBe("wakes 14:05");
+    const sameDay = new Date(2026, 8, 25, 9, 0).getTime();
+    expect(wakesLabel(at, sameDay)).toBe("wakes 14:05");
+  });
+
+  // Feedback #53: a halt can run two days, so a wake that is not today names
+  // the day — "tomorrow", then the date.
+  it("names the day when the wake is not today", () => {
+    const at = new Date(2026, 8, 26, 14, 5).toISOString();
+    expect(wakesLabel(at, new Date(2026, 8, 25, 23, 50).getTime())).toBe("wakes tomorrow 14:05");
+    expect(wakesLabel(at, new Date(2026, 8, 24, 9, 0).getTime())).toBe("wakes Sep 26 14:05");
+    expect(wakesLabel(at, new Date(2026, 8, 26, 0, 1).getTime())).toBe("wakes 14:05");
   });
 });
