@@ -171,7 +171,7 @@ So the next session doesn't re-discover what this one learned, the participant h
 
 ## Session-scoped documents
 
-Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, and any scratch info that's useful within the session but shouldn't pollute the CL. Docs are isolated per session, archived with the session on close, and discoverable via `session_doc_search(query?, phase?)` + `session_doc_read(slug)`.
+Use `session_doc_write(slug, body, phase?)` for plans, investigation findings, and any scratch info that's useful within the session but shouldn't pollute the CL. Docs are isolated per session, archived with the session on close, and discoverable via `session_doc_search(query?, phase?)` + `session_doc_read(slug)`. A REPLACE of a doc the user or a peer changed since you last saw it whole is refused until you read it whole (the user answers inside docs — a blind rewrite once buried twelve of their answers); an append or `session_doc_edit` is never refused for that.
 
 **One rewritable doc per phase.** A phase-tagged write is keyed BY PHASE, not by slug — there is exactly ONE `investigate` / `plan` / `apply` / `verify` doc, and re-writing it (even under a different slug) overwrites that single doc. Found new information? REWRITE the whole doc; never spin up a `plan-v2`. Use the phase name as the slug for phase docs. Untagged scratch docs (no `phase`) are keyed by `slug` — pick one that reads well later (e.g. `findings-broadcast`); many are allowed.
 

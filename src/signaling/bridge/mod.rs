@@ -405,6 +405,12 @@ pub struct SignalingBridge {
     /// session_id → optional project slug. Sessions register themselves at
     /// spawn time so policy-aware MCP tools can look up the right policy.
     session_projects: Mutex<HashMap<String, Option<String>>>,
+    /// Which version of a session doc each participant has seen WHOLE —
+    /// `(session, participant, slug)` → the doc's `updated_at` as of that read
+    /// or write, with how many leading lines of a too-long doc were read in
+    /// ranges (feedback #102: the replace guard). In memory: after a relaunch
+    /// the first replace of a doc someone else changed asks for one read.
+    doc_seen: Mutex<HashMap<(String, String, String), session_docs::DocSeen>>,
     /// session_id → "the session is waiting for user input" flag, shared with
     /// the session's `ActivityTracker` (it derives `AwaitingUser` from it) and
     /// the ring's D35 halt gate. When a halting tool (mark_awaiting_user /
@@ -675,6 +681,7 @@ impl SignalingBridge {
             violations,
             data_dir,
             session_projects: Mutex::new(HashMap::new()),
+            doc_seen: Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             session_sequencer: Mutex::new(HashMap::new()),
             session_activity: Mutex::new(HashMap::new()),

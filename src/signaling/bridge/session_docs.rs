@@ -316,6 +316,25 @@ async fn codoc_noticed_this_run(
     false
 }
 
+/// The writer a user's save in the doc's tab is stamped with (0094).
+pub const USER_WRITER: &str = "user";
+
+/// What a participant has seen of a session doc (feedback #102): the version,
+/// and how many leading lines of it were read in ranges — `usize::MAX` once it
+/// has been seen whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocSeen {
+    pub version: String,
+    pub covered_to: usize,
+}
+
+/// The version of a doc the seen-map compares: its `updated_at` AND its
+/// body's hash — two writes inside one millisecond share the timestamp, and
+/// a changed body must never read as already seen.
+pub fn doc_version(doc: &crate::storage::SessionDocument) -> String {
+    format!("{}#{}", doc.updated_at, super::action_gate::sha256_hex(&doc.body))
+}
+
 impl SignalingBridge {
     /// How one participant of a session is NAMED (rc3 D10's display rule), or
     /// `None` when storage isn't wired, the roster has no such slug, or the read
@@ -408,9 +427,30 @@ impl SignalingBridge {
     /// superseded. Filed from a live session as feedback #3, where an apply doc
     /// still cited figures three slices out of date and was the first artifact
     /// the reviewer pulled.
+    #[cfg(test)]
     pub async fn session_doc_write(
         &self,
         session_id: &str,
+        slug: &str,
+        body: &str,
+        phase: Option<&str>,
+        append: bool,
+    ) -> Result<i64> {
+        // Test convenience: no writer identity, so no stamp and no replace
+        // guard (feedback #102) — the production path is `session_doc_write_as`.
+        self.session_doc_write_as(session_id, "", slug, body, phase, append).await
+    }
+
+    /// [`Self::session_doc_write`] as `writer` (a participant's slug): the row
+    /// is stamped with the writer, the writer's view of the doc is marked
+    /// current, and a REPLACE of a doc that someone else — a peer or the user
+    /// — changed since this writer last saw it whole is refused (feedback
+    /// #102: an executor's rewrite buried the twelve answers the user had typed
+    /// into `decisions-needed`). An empty `writer` is the unguarded test path.
+    pub async fn session_doc_write_as(
+        &self,
+        session_id: &str,
+        writer: &str,
         slug: &str,
         body: &str,
         phase: Option<&str>,
@@ -458,6 +498,18 @@ impl SignalingBridge {
                     (adopted.as_deref(), slug)
                 }
             };
+            // The replace guard (feedback #102): a replace of a doc that
+            // someone else changed since this writer last saw it whole is
+            // refused, naming who and when. An append keeps every line, an
+            // unstamped row (written before 0094) cannot be attributed, and a
+            // writer with no identity (tests) is not guarded.
+            if !append && !writer.is_empty() {
+                if let Some(current) = storage.session_document_by_slug(session_id, key).await.ok().flatten() {
+                    if let Some(refusal) = self.replace_refusal(session_id, writer, key, &current).await {
+                        anyhow::bail!("{refusal}");
+                    }
+                }
+            }
             // Append only has meaning against an existing doc; appending to a
             // missing one is just a write.
             let existing = if append {
@@ -489,15 +541,117 @@ impl SignalingBridge {
                 let cap = if phase.is_some() { MAX_DOC_ARCHIVES } else { MAX_UNTAGGED_DOC_ARCHIVES };
                 Self::archive_superseded_doc(&storage, session_id, key, body, cap).await;
             }
-            storage
+            let id = storage
                 .upsert_session_document(session_id, key, body, phase)
-                .await?
+                .await?;
+            if !writer.is_empty() {
+                self.stamp_doc_writer(&storage, session_id, key, writer).await;
+            }
+            id
         };
         // Notify the UI so the doc pane refreshes without a manual tab-switch.
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
             session_id: session_id.to_string(),
         });
         Ok(id)
+    }
+
+    /// Why `writer`'s replace of `current` is refused, or `None` when it may
+    /// go ahead: the doc's last writer is someone else and the writer has not
+    /// seen the current version whole since.
+    async fn replace_refusal(
+        &self,
+        session_id: &str,
+        writer: &str,
+        slug: &str,
+        current: &crate::storage::SessionDocument,
+    ) -> Option<String> {
+        let last_writer = current.last_writer.as_deref()?;
+        if last_writer == writer {
+            return None;
+        }
+        let seen = self.doc_seen_version(session_id, writer, slug).await;
+        if seen.as_deref() == Some(doc_version(current).as_str()) {
+            return None;
+        }
+        let who = if last_writer == USER_WRITER { "the user".to_string() } else { format!("`{last_writer}`") };
+        let since = match seen {
+            Some(v) => format!(
+                "after the version you last saw whole ({})",
+                v.split('#').next().unwrap_or(&v)
+            ),
+            None => "and you have not read it whole since".to_string(),
+        };
+        Some(format!(
+            "`{slug}` was changed by {who} at {} — {since}. Nothing was changed. Read it whole first \
+             (session_doc_read with no lines, grep or heading; a too-long doc is read whole in line \
+             ranges from 1 to its end), then write again — or change only your part with \
+             session_doc_edit, or add to it with mode: \"append\".",
+            current.updated_at
+        ))
+    }
+
+    /// Stamp `slug` with its writer and mark the writer's view current.
+    async fn stamp_doc_writer(&self, storage: &crate::storage::Storage, session_id: &str, slug: &str, writer: &str) {
+        if let Err(e) = storage.set_session_document_writer(session_id, slug, writer).await {
+            tracing::warn!(?e, session_id, slug, "stamping a session doc's writer");
+        }
+        if let Ok(Some(doc)) = storage.session_document_by_slug(session_id, slug).await {
+            self.note_doc_seen_whole(session_id, writer, &doc).await;
+        }
+    }
+
+    /// `participant` has seen `doc` whole — a whole read, a search reply that
+    /// carried the body, or its own write.
+    pub async fn note_doc_seen_whole(&self, session_id: &str, participant: &str, doc: &crate::storage::SessionDocument) {
+        self.doc_seen.lock().await.insert(
+            (session_id.to_string(), participant.to_string(), doc.slug.clone()),
+            DocSeen { version: doc_version(doc), covered_to: usize::MAX },
+        );
+    }
+
+    /// `participant` read lines `from..=to` of `doc` (1-based, inclusive).
+    /// Ranges read in order from line 1 add up to a whole read; a gap starts
+    /// the count over from that range.
+    pub async fn note_doc_seen_lines(
+        &self,
+        session_id: &str,
+        participant: &str,
+        doc: &crate::storage::SessionDocument,
+        from: usize,
+        to: usize,
+    ) {
+        let total = doc.body.lines().count();
+        let version = doc_version(doc);
+        let key = (session_id.to_string(), participant.to_string(), doc.slug.clone());
+        let mut seen = self.doc_seen.lock().await;
+        let entry = seen.entry(key).or_insert(DocSeen { version: String::new(), covered_to: 0 });
+        if entry.version != version {
+            *entry = DocSeen { version, covered_to: 0 };
+        }
+        if entry.covered_to == usize::MAX {
+            return;
+        }
+        if from <= entry.covered_to + 1 && to > entry.covered_to {
+            entry.covered_to = to;
+        } else if from > entry.covered_to + 1 {
+            // A gap: only a run that starts within the covered prefix extends it.
+            return;
+        }
+        if entry.covered_to >= total {
+            entry.covered_to = usize::MAX;
+        }
+    }
+
+    /// The version (`doc_version`) of `slug` that `participant` has seen WHOLE,
+    /// if any.
+    pub async fn doc_seen_version(&self, session_id: &str, participant: &str, slug: &str) -> Option<String> {
+        self.doc_seen
+            .lock()
+            .await
+            .get(&(session_id.to_string(), participant.to_string(), slug.to_string()))
+            .filter(|s| s.covered_to == usize::MAX)
+            .map(|s| s.version.clone())
     }
 
     /// The USER's save of a CUSTOM document (round 12 — `ideas.md`: custom
@@ -530,9 +684,15 @@ impl SignalingBridge {
                     );
                 }
             }
-            storage
+            let id = storage
                 .upsert_session_document(session_id, slug, body, None)
-                .await?
+                .await?;
+            // The user's save (feedback #102): the next agent replace must
+            // read this version first.
+            if let Err(e) = storage.set_session_document_writer(session_id, slug, USER_WRITER).await {
+                tracing::warn!(?e, session_id, slug, "stamping the user's save");
+            }
+            id
         };
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
             session_id: session_id.to_string(),
@@ -651,6 +811,7 @@ impl SignalingBridge {
             let id = storage
                 .upsert_session_document(session_id, &slug, &composed, Some(phase))
                 .await?;
+            self.stamp_doc_writer(&storage, session_id, &slug, author_slug).await;
             (id, storage)
         };
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
@@ -750,6 +911,7 @@ impl SignalingBridge {
     pub async fn session_doc_edit(
         &self,
         session_id: &str,
+        writer: &str,
         slug: &str,
         old: &str,
         new: &str,
@@ -790,6 +952,9 @@ impl SignalingBridge {
             let id = storage
                 .upsert_session_document(session_id, slug, &edited, doc.phase.as_deref())
                 .await?;
+            if !writer.is_empty() {
+                self.stamp_doc_writer(&storage, session_id, slug, writer).await;
+            }
             (id, doc.phase, doc.body.len(), edited.len(), archived_as)
         };
         let _ = self.event_tx.send(SignalingEvent::DocChanged {

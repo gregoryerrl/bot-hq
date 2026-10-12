@@ -637,4 +637,9 @@ pub struct SessionDocument {
     pub created_at: String,
     pub updated_at: String,
     pub phase: Option<String>,
+    /// Who last changed it (0094): a participant's slug, `user` for a save in
+    /// the doc's tab, `None` for a row written before the column existed.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub last_writer: Option<String>,
 }

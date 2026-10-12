@@ -1449,7 +1449,16 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   `session_doc_edit` corrects a passage in place with `cl_edit_file`'s
   contract (one shared `replace_exactly`); `session_doc_write` can take its
   body from a file (`content_path`, 256 KiB); `cl_write_file(session_doc:)`
-  copies a doc to the Context Library byte for byte.
+  copies a doc to the Context Library byte for byte. Every write stamps
+  `last_writer` (a participant's slug, or `user` for a save in the doc's tab;
+  migration 0094), and a REPLACE by a participant that has not seen the
+  current version whole since someone else changed it is refused, naming who
+  and when (feedback #102: the user's answers typed into `decisions-needed`
+  were buried by the executor's rewrite). "Seen whole" is kept per
+  participant in memory (`doc_seen`, keyed by `updated_at` + body hash): a
+  whole `session_doc_read`, a `session_doc_search` reply carrying the body,
+  line ranges read from 1 to the end, or its own write. An append and
+  `session_doc_edit` are never refused for that.
 - `findings` (id PK, session_id, finding_uid UNIQUE, agent, severity,
   summary, code_ref, status, disposition_reason, disposed_by,
   created_at, updated_at) — EYES review findings backing the commit

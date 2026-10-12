@@ -1476,16 +1476,20 @@ async fn call_tool(
                     Ok(ToolCallResult::text(doc_write_reply(written.id, &written.slug, redacted, note)))
                 }
                 DocTarget::Own => {
+                    // Written AS the caller (feedback #102): the row is stamped,
+                    // and a replace of a doc a peer or the user changed since
+                    // the caller last saw it whole is refused with who and when.
                     let id = bridge
-                        .session_doc_write(
+                        .session_doc_write_as(
                             &caller.session_id,
+                            &caller.agent,
                             &slug,
                             &body,
                             phase.as_deref(),
                             append,
                         )
                         .await
-                        .map_err(internal_err_no_prefix)?;
+                        .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("{e:#}")))?;
                     Ok(ToolCallResult::text(doc_write_reply(id, &slug, redacted, None)))
                 }
             }
@@ -1505,7 +1509,7 @@ async fn call_tool(
             };
             let redacted = crate::policy::secret_scan::find_secrets(&new_string).len();
             let done = bridge
-                .session_doc_edit(&caller.session_id, &target, &old_string, &new_string, expect)
+                .session_doc_edit(&caller.session_id, &caller.agent, &target, &old_string, &new_string, expect)
                 .await
                 .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("{e:#}")))?;
             let vote_withdrawn = if codoc {
@@ -1556,6 +1560,8 @@ async fn call_tool(
             // it needs. Every row says how big the doc is.
             let budget = crate::signaling::bridge::DOC_REPLY_BUDGET_BYTES;
             let mut spent = 0usize;
+            // A body that rides the reply is a whole read (feedback #102).
+            let mut seen_whole: Vec<crate::storage::SessionDocument> = Vec::new();
             let trimmed: Vec<Value> = rows
                 .into_iter()
                 .filter(|d| include_archives || !crate::signaling::bridge::is_archive_slug(&d.slug))
@@ -1573,6 +1579,7 @@ async fn call_tool(
                     if spent + bytes <= budget {
                         spent += bytes;
                         row["body"] = json!(d.body);
+                        seen_whole.push(d.clone());
                     } else {
                         row["headings"] = json!(crate::signaling::bridge::doc_outline(&d.body));
                         row["note"] = json!(format!(
@@ -1584,6 +1591,9 @@ async fn call_tool(
                     row
                 })
                 .collect();
+            for d in &seen_whole {
+                bridge.note_doc_seen_whole(&caller.session_id, &caller.agent, d).await;
+            }
             Ok(result_json(&trimmed, "[]"))
         }
         "session_doc_read" => {
@@ -1651,6 +1661,19 @@ async fn call_tool(
                 if let Some((h, _, _)) = &section {
                     excerpt["heading"] = json!(h.text);
                 }
+                // A plain line range (no grep, no heading) counts toward a whole
+                // read of a doc too long to return at once (feedback #102).
+                if grep.is_none() && section.is_none() {
+                    // `lines` in the reply is the range actually SHOWN ("a-b",
+                    // after the budget cut), which is what was seen.
+                    let shown = excerpt["lines"]
+                        .as_str()
+                        .and_then(|r| r.split_once('-'))
+                        .and_then(|(a, b)| Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?)));
+                    if let Some((from, to)) = shown {
+                        bridge.note_doc_seen_lines(&caller.session_id, &caller.agent, &d, from, to).await;
+                    }
+                }
                 return Ok(ToolCallResult::text(with(meta, excerpt)));
             }
             // The whole body — unless it would overflow the reply (feedback
@@ -1671,6 +1694,8 @@ async fn call_tool(
                 });
                 return Ok(ToolCallResult::text(with(meta, outline)));
             }
+            // The whole body: this version is now seen (feedback #102).
+            bridge.note_doc_seen_whole(&caller.session_id, &caller.agent, &d).await;
             Ok(ToolCallResult::text(with(meta, json!({ "body": d.body }))))
         }
         "cl_index_search" => {
@@ -4729,6 +4754,71 @@ mod tests {
         write(eyes_caller(), "handoff-eyes").await.expect("its own lands");
         // `after-compact` is no participant: an ordinary custom doc, as before.
         write(eyes_caller(), "handoff-after-compact").await.expect("not a handoff doc");
+    }
+
+    /// Feedback #102: a replace of a doc someone ELSE changed since the caller
+    /// last saw it whole is refused — naming who and when — and a whole read
+    /// (session_doc_read with no part, a search reply carrying the body, or
+    /// line ranges covering the doc) lifts it. An append is never refused; the
+    /// caller's own successive writes are not; a user's save counts as
+    /// another writer. The failure this pins: the user's twelve answers typed
+    /// into `decisions-needed` were buried by the executor's rewrite.
+    #[tokio::test]
+    async fn a_replace_of_a_doc_someone_else_changed_is_refused_until_it_is_read_whole() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "test", None).await.unwrap();
+        storage
+            .ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS)
+            .await
+            .unwrap();
+        let call = |who: CallerIdentity, name: &'static str, args: Value| {
+            let bridge = &bridge;
+            async move {
+                dispatch(req("tools/call", json!({ "name": name, "arguments": args }), 1), &who, bridge).await
+            }
+        };
+        let write = |who: CallerIdentity, body: &'static str, mode: &'static str| {
+            call(who, "session_doc_write", json!({ "slug": "decisions-needed", "body": body, "mode": mode }))
+        };
+        // The executor writes, writes again (its own), the user answers inside.
+        write(caller(), "1. ship it?\n2. defer?", "replace").await.unwrap();
+        write(caller(), "1. ship it?\n2. defer?\n3. close?", "replace").await.unwrap();
+        bridge.session_doc_save_custom("s1", "decisions-needed", "1. ship it? yes\n2. defer? no\n3. close? later").await.unwrap();
+        // A blind replace is refused, naming the user and the time; nothing changed.
+        let err = write(caller(), "1. ship it?\n2. defer?\n3. close?\n4. push?", "replace").await.unwrap_err();
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("`decisions-needed` was changed by the user at "), "{}", err.message);
+        assert!(err.message.contains("after the version you last saw whole") && err.message.contains("Nothing was changed"), "{}", err.message);
+        let live = storage.session_document_by_slug("s1", "decisions-needed").await.unwrap().unwrap();
+        assert!(live.body.contains("yes") && live.last_writer.as_deref() == Some("user"), "{live:?}");
+        // An append keeps the answers and is never refused.
+        write(caller(), "4. push?", "append").await.unwrap();
+        let live = storage.session_document_by_slug("s1", "decisions-needed").await.unwrap().unwrap();
+        assert!(live.body.contains("yes") && live.body.contains("4. push?"), "{}", live.body);
+        assert_eq!(live.last_writer.as_deref(), Some("hands"), "the append stamps its writer");
+        // The user edits again; a whole read lifts the guard; a grep does not.
+        bridge.session_doc_save_custom("s1", "decisions-needed", "1. ship it? yes\n2. defer? no\n3. close? later\n4. push? yes").await.unwrap();
+        call(caller(), "session_doc_read", json!({ "slug": "decisions-needed", "grep": "push" })).await.unwrap();
+        let err = write(caller(), "folded", "replace").await.unwrap_err();
+        assert!(err.message.contains("was changed by the user"), "a grep is not a whole read: {}", err.message);
+        call(caller(), "session_doc_read", json!({ "slug": "decisions-needed" })).await.unwrap();
+        write(caller(), "folded: four yeses and a no, stated at length", "replace").await.unwrap();
+        // A peer's write is another writer too; a search reply carrying the body lifts it.
+        write(eyes_caller(), "the reviewer's note", "append").await.unwrap();
+        let err = write(caller(), "folded again", "replace").await.unwrap_err();
+        assert!(err.message.contains("was changed by `eyes` at "), "{}", err.message);
+        call(caller(), "session_doc_search", json!({ "query": "reviewer" })).await.unwrap();
+        write(caller(), "folded again", "replace").await.unwrap();
+        // Line ranges that cover the doc from line 1 to its end lift it; a
+        // range with a gap before it does not.
+        bridge.session_doc_save_custom("s1", "decisions-needed", "a\nb\nc\nd").await.unwrap();
+        call(caller(), "session_doc_read", json!({ "slug": "decisions-needed", "lines": "3-4" })).await.unwrap();
+        assert!(write(caller(), "x", "replace").await.is_err(), "lines 3-4 alone are not a whole read");
+        call(caller(), "session_doc_read", json!({ "slug": "decisions-needed", "lines": "1-2" })).await.unwrap();
+        call(caller(), "session_doc_read", json!({ "slug": "decisions-needed", "lines": "3-" })).await.unwrap();
+        write(caller(), "x", "replace").await.expect("1-2 then 3-end covers the doc");
     }
 
     #[tokio::test]

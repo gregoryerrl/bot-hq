@@ -32,7 +32,7 @@ pub fn phase_doc_slug(slug: &str) -> Option<&'static str> {
 
 /// Full column projection for a `SessionDocument` row — shared by
 /// `session_documents_for` and `session_document_by_slug`.
-const DOCUMENT_COLUMNS: &str = "id, session_id, slug, body, created_at, updated_at, phase";
+const DOCUMENT_COLUMNS: &str = "id, session_id, slug, body, created_at, updated_at, phase, last_writer";
 
 impl Storage {
     /// Upsert a per-session document by (session_id, slug). On conflict the
@@ -80,6 +80,20 @@ impl Storage {
         .with_context(|| format!("upsert session_documents session={session_id} slug={slug}"))?;
         self.sync_handoff_file(session_id, slug).await;
         Ok(row.0)
+    }
+
+    /// Record who last changed a document (0094, feedback #102): a participant's
+    /// slug, or `user`. Set right after the write that changed it; the replace
+    /// guard reads it against the writer's last whole read.
+    pub async fn set_session_document_writer(&self, session_id: &str, slug: &str, writer: &str) -> Result<()> {
+        sqlx::query("UPDATE session_documents SET last_writer = ? WHERE session_id = ? AND slug = ?")
+            .bind(writer)
+            .bind(session_id)
+            .bind(slug)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording the writer of session doc {session_id}/{slug}"))?;
+        Ok(())
     }
 
     /// Re-render the handoff FILE of the participant `slug` belongs to, from

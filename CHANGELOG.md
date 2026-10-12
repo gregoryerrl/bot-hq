@@ -249,6 +249,14 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **An agent's rewrite can no longer bury what you typed into a session
+  document.** When you answer inside a document in its tab and a participant
+  then replaces that document without having read your version, the replace
+  is now refused, naming you (or the peer) and the time of the change; the
+  participant reads the document whole and writes again, or appends, or edits
+  only its part. Every document records who last changed it. (The twelve
+  answers you wrote into `decisions-needed` on 2026-10-12 vanished this way —
+  into the archive, where they were found later.)
 - **A write to focus.md says what the file has become.** The reply to any
   `cl_write_file` of a project's `focus.md` now ends with its size, its
   line-start `SUPERSEDES:` count and how many appends it has had since its
