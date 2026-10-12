@@ -104,11 +104,41 @@ pub(super) fn is_history_file(name: &str) -> bool {
         || name.starts_with("notes-20")
 }
 
-/// Source extensions that count as "the code". A symbol living only in a
-/// changelog or a plan document is not a symbol that exists.
-const CODE_EXTENSIONS: [&str; 10] = [
-    "rs", "ts", "tsx", "js", "jsx", "sql", "toml", "json", "yaml", "yml",
-];
+/// Prose extensions, the one kind of tracked file whose BODY is not the code:
+/// a symbol living only in a changelog or a plan document is not a symbol that
+/// exists. Everything else tracked is read (feedback #100): the old allow-list
+/// of ten code extensions read 2 of STRYKA's 121 tracked files and none of a
+/// Python, shell, PHP or Makefile project, so every symbol in those libraries
+/// reported as missing.
+const PROSE_EXTENSIONS: [&str; 6] = ["md", "markdown", "mdx", "rst", "txt", "adoc"];
+
+/// A tracked file bigger than this is not read (a vendored bundle, a fixture
+/// dump, a lockfile the size of a novel); its path still counts.
+const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// What the scan read, so the report can say what "missing" was measured
+/// against.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CorpusScope {
+    /// Tracked paths, every one of which counts as an occurrence of itself.
+    pub tracked: usize,
+    /// Files whose text went into the corpus.
+    pub read: usize,
+    /// Prose files, skipped by extension.
+    pub prose: usize,
+    /// Files over [`MAX_FILE_BYTES`], skipped.
+    pub oversized: usize,
+    /// Files that are not UTF-8 (binaries, mostly), skipped.
+    pub non_utf8: usize,
+}
+
+/// The text a symbol is searched in, every tracked path, and what was read.
+#[derive(Debug)]
+pub struct Corpus {
+    pub text: String,
+    pub tracked: Vec<String>,
+    pub scope: CorpusScope,
+}
 
 /// Backticked spans on one line that are shaped like code, with retirement
 /// lines already excluded by the caller.
@@ -172,10 +202,10 @@ fn is_symbol_shaped(span: &str) -> bool {
     snake || camel
 }
 
-/// Every tracked source file's text, concatenated — the corpus a symbol is
-/// searched in — plus every tracked path, one per line.
-/// `git ls-files` so the walk inherits `.gitignore` (no `target/`, no
-/// `node_modules/`).
+/// Every tracked non-prose file's text, concatenated — the corpus a symbol is
+/// searched in — plus every tracked path, one per line, and the scope of what
+/// was read. `git ls-files` so the walk inherits `.gitignore` (no `target/`,
+/// no `node_modules/`).
 ///
 /// The stems are load-bearing: a CL claim naming a test FILE by its stem
 /// (`codebase_map_test`, for `tests/codebase_map_test.rs`) is a symbol-shaped
@@ -183,7 +213,7 @@ fn is_symbol_shaped(span: &str) -> bool {
 /// contents-only corpus reported three real files as "no occurrence in the
 /// tracked source" (round 7: 3 of the 30 hits). A file's own path is the
 /// evidence it exists (and its stem is a substring of it).
-fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), CorpusError> {
+fn source_corpus(repo_root: &Path) -> Result<Corpus, CorpusError> {
     let out = crate::core::git::hardened(repo_root)
         .args(["ls-files", "-z"])
         .output()
@@ -207,24 +237,44 @@ fn source_corpus(repo_root: &Path) -> Result<(String, Vec<String>), CorpusError>
     }
     let mut corpus = String::new();
     let mut tracked = Vec::new();
+    let mut scope = CorpusScope::default();
     for rel in listing.split('\0').filter(|p| !p.is_empty()) {
         tracked.push(rel.to_string());
+        scope.tracked += 1;
         // The path counts as an occurrence of itself — and, by substring, of
         // its stem, which is what a CL claim usually names.
         corpus.push_str(rel);
         corpus.push('\n');
-        let is_code = Path::new(rel)
+        let is_prose = Path::new(rel)
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| CODE_EXTENSIONS.contains(&e));
-        if is_code {
-            if let Ok(body) = std::fs::read_to_string(repo_root.join(rel)) {
+            .is_some_and(|e| PROSE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+        if is_prose {
+            scope.prose += 1;
+            continue;
+        }
+        let path = repo_root.join(rel);
+        // A deleted-but-still-indexed file, or one git lists that is a
+        // directory (a submodule): nothing to read, and the path still counts.
+        let Ok(meta) = std::fs::metadata(&path) else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        if meta.len() > MAX_FILE_BYTES {
+            scope.oversized += 1;
+            continue;
+        }
+        match std::fs::read(&path).map(String::from_utf8) {
+            Ok(Ok(body)) => {
+                scope.read += 1;
                 corpus.push_str(&body);
                 corpus.push('\n');
             }
+            Ok(Err(_)) => scope.non_utf8 += 1,
+            Err(_) => {}
         }
     }
-    Ok((corpus, tracked))
+    Ok(Corpus { text: corpus, tracked, scope })
 }
 
 /// Why a folder yielded no corpus to check CL claims against.
@@ -388,7 +438,10 @@ pub(crate) fn stale_in_body(
                 }
                 StaleKind::MissingFile
             } else {
-                if corpus.contains(&span) {
+                // A live bot-hq tool's name is not a claim about THIS repo: the
+                // library of any project names `cl_index_search` and friends,
+                // and only bot-hq's own source holds them (feedback #100).
+                if corpus.contains(&span) || is_live_tool_name(&span) {
                     continue;
                 }
                 StaleKind::MissingSymbol
@@ -408,11 +461,22 @@ pub(crate) fn stale_in_body(
     out
 }
 
+/// Is `span` the name of a tool bot-hq's MCP server registers right now?
+fn is_live_tool_name(span: &str) -> bool {
+    crate::signaling::protocol::tool_descriptors().iter().any(|t| t.name == span)
+}
+
+/// The claims of one scan, with the scope they were measured against.
+pub struct StaleReport {
+    pub claims: Vec<StaleClaim>,
+    pub scope: CorpusScope,
+}
+
 /// Walk a project's CL directory and report every claim naming absent code.
 ///
 /// `cl_dir` is the project's own CL folder; `repo_root` the repo it documents.
-pub fn stale_claims(cl_dir: &Path, repo_root: &Path) -> Result<Vec<StaleClaim>, CorpusError> {
-    let (corpus, tracked) = source_corpus(repo_root)?;
+pub fn stale_claims(cl_dir: &Path, repo_root: &Path) -> Result<StaleReport, CorpusError> {
+    let Corpus { text: corpus, tracked, scope } = source_corpus(repo_root)?;
     let mut out = Vec::new();
     let mut stack = vec![cl_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -451,28 +515,57 @@ pub fn stale_claims(cl_dir: &Path, repo_root: &Path) -> Result<Vec<StaleClaim>, 
         }
     }
     out.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
-    Ok(out)
+    Ok(StaleReport { claims: out, scope })
 }
 
 /// Cap on what one report prints. The point is to surface the drift, not to
 /// paste the library back at whoever asked.
 pub const REPORT_MAX: usize = 40;
 
+/// The sentence that says what "missing" was measured against (feedback
+/// #100): a reader who does not know the scan read only ten extensions — or
+/// skipped a 3 MB bundle — reads a false "missing" as a real one.
+fn scope_sentence(scope: &CorpusScope) -> String {
+    let mut skipped = Vec::new();
+    if scope.prose > 0 {
+        skipped.push(format!("{} prose file{}", scope.prose, if scope.prose == 1 { "" } else { "s" }));
+    }
+    if scope.oversized > 0 {
+        skipped.push(format!("{} over 2 MiB", scope.oversized));
+    }
+    if scope.non_utf8 > 0 {
+        skipped.push(format!("{} not UTF-8", scope.non_utf8));
+    }
+    let skipped = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!("; skipped: {}", skipped.join(", "))
+    };
+    format!(
+        "Searched the text of {} of the {} tracked files (every tracked file except prose — \
+         .md, .markdown, .mdx, .rst, .txt, .adoc — up to 2 MiB each{skipped}); every tracked \
+         path counts as present, and so does a live bot-hq tool name.",
+        scope.read, scope.tracked
+    )
+}
+
 /// The report an agent or the UI reads.
-pub fn render_report(project: &str, repo_root: &Path, claims: &[StaleClaim]) -> String {
+pub fn render_report(project: &str, repo_root: &Path, claims: &[StaleClaim], scope: &CorpusScope) -> String {
     if claims.is_empty() {
         return format!(
             "No CL claims in `{project}` name code that is missing from {}. \
              (Checked backticked paths and identifiers; lines that mark something \
              as deleted or retired are skipped, since naming a dead symbol is what \
-             they are for.)",
-            repo_root.display()
+             they are for. {})",
+            repo_root.display(),
+            scope_sentence(scope)
         );
     }
     let mut out = format!(
-        "{} CL claim(s) in `{project}` name code that is not in {}:\n\n",
+        "{} CL claim(s) in `{project}` name code that is not in {}. {}\n\n",
         claims.len(),
-        repo_root.display()
+        repo_root.display(),
+        scope_sentence(scope)
     );
     for c in claims.iter().take(REPORT_MAX) {
         out.push_str(&format!(
@@ -611,7 +704,7 @@ in the specta 2 migration.
         )
         .unwrap();
         git(&["add", "tests/codebase_map_test.rs"]);
-        let (corpus, tracked) = source_corpus(repo.path()).expect("corpus");
+        let Corpus { text: corpus, tracked, .. } = source_corpus(repo.path()).expect("corpus");
         assert!(tracked.iter().any(|t| t == "tests/codebase_map_test.rs"));
         assert!(corpus.contains("codebase_map_test"), "the stem is in the corpus");
         assert!(corpus.contains("the_map_is_complete"), "and so is the body");
@@ -667,7 +760,7 @@ in the specta 2 migration.
         assert!(msg.contains("has no tracked files") && msg.contains("sits inside the git repository at"), "{msg}");
         assert!(msg.contains("Register that repository's own folder"), "{msg}");
         // The tracked subfolder keeps its corpus (its own files, relative to it).
-        let (corpus, tracked) = source_corpus(&repo.path().join("app")).expect("a tracked subfolder scans");
+        let Corpus { text: corpus, tracked, .. } = source_corpus(&repo.path().join("app")).expect("a tracked subfolder scans");
         assert_eq!(tracked, ["src/main.rs"]);
         assert!(corpus.contains("tracked_symbol"));
         // And `stale_claims` carries the refusal through to the facade's match.
@@ -677,7 +770,7 @@ in the specta 2 migration.
             stale_claims(cl.path(), &repo.path().join("mods")),
             Err(CorpusError::NoTrackedFiles { .. })
         ));
-        assert!(stale_claims(cl.path(), &repo.path().join("app")).unwrap().is_empty());
+        assert!(stale_claims(cl.path(), &repo.path().join("app")).unwrap().claims.is_empty());
         // No repository at all is still a git error, not a configuration one.
         let bare = tempfile::tempdir().unwrap();
         assert!(matches!(source_corpus(bare.path()), Err(CorpusError::Git(_))));
@@ -702,8 +795,16 @@ in the specta 2 migration.
 
     #[test]
     fn an_empty_report_says_so_rather_than_printing_nothing() {
-        let out = render_report("bot-hq", Path::new("/repo"), &[]);
+        let scope = CorpusScope { tracked: 121, read: 100, prose: 19, oversized: 1, non_utf8: 1 };
+        let out = render_report("bot-hq", Path::new("/repo"), &[], &scope);
         assert!(out.contains("No CL claims"), "got: {out}");
+        // The scope is stated either way (feedback #100): what "missing" was
+        // measured against, and what was skipped.
+        assert!(
+            out.contains("Searched the text of 100 of the 121 tracked files (every tracked file except prose"),
+            "got: {out}"
+        );
+        assert!(out.contains("skipped: 19 prose files, 1 over 2 MiB, 1 not UTF-8"), "got: {out}");
         // And a populated one carries the do-not-auto-edit warning, because the
         // list reads like a work order otherwise (D15).
         let out = render_report(
@@ -715,8 +816,54 @@ in the specta 2 migration.
                 reference: "may_run_native".into(),
                 kind: StaleKind::MissingSymbol,
             }],
+            &CorpusScope { tracked: 2, read: 2, ..CorpusScope::default() },
         );
         assert!(out.contains("notes.md:3"), "got: {out}");
         assert!(out.contains("not a work order"), "got: {out}");
+        assert!(out.contains("Searched the text of 2 of the 2 tracked files") && !out.contains("skipped:"), "got: {out}");
+    }
+
+    /// Feedback #100: every tracked file except prose is the corpus — a shell
+    /// script, a Makefile and a PHP file count; a markdown file's body does not;
+    /// an oversized file and a binary are skipped by count; and a live bot-hq
+    /// tool name is never a missing symbol in another project's repo.
+    #[test]
+    fn the_corpus_is_every_tracked_non_prose_file_and_live_tool_names_are_present() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        let write = |rel: &str, body: &[u8]| {
+            let p = repo.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("deploy.sh", b"deploy_everything() { :; }\n");
+        write("Makefile", b"build_release_bundle:\n\t@true\n");
+        write("web/index.php", b"<?php function render_invoice_page() {}\n");
+        write("docs/PLAN.md", b"`only_in_the_plan` is coming.\n");
+        write("big.min.js", &vec![b'x'; (MAX_FILE_BYTES + 1) as usize]);
+        write("logo.png", &[0xff, 0xd8, 0xff, 0x00, 0x80, 0x81]);
+        git(&["add", "-A"]);
+        let Corpus { text, tracked, scope } = source_corpus(repo.path()).expect("corpus");
+        assert_eq!(tracked.len(), 6);
+        assert_eq!(scope, CorpusScope { tracked: 6, read: 3, prose: 1, oversized: 1, non_utf8: 1 }, "{scope:?}");
+        for present in ["deploy_everything", "build_release_bundle", "render_invoice_page"] {
+            assert!(text.contains(present), "{present} is in the corpus");
+        }
+        assert!(!text.contains("only_in_the_plan"), "a prose file's body is not the code");
+        assert!(text.contains("docs/PLAN.md"), "but its path still counts");
+        let body = "`deploy_everything` runs first; `only_in_the_plan` and `absent_everywhere` do not exist; agents call `cl_index_search` first.";
+        let claims = stale_in_body("notes.md", body, repo.path(), &text, &tracked);
+        let refs: Vec<&str> = claims.iter().map(|c| c.reference.as_str()).collect();
+        assert_eq!(refs, ["only_in_the_plan", "absent_everywhere"], "{refs:?}");
+        assert!(is_live_tool_name("cl_index_search") && !is_live_tool_name("absent_everywhere"));
     }
 }

@@ -224,6 +224,17 @@ and in `docs/rebuild-archive/`.
   sits in and what to do (register that repository's own folder, or commit
   the project's files). A folder that IS tracked inside a bigger repository
   still gets its report.
+- **The staleness report reads the whole repository, and says what it read.**
+  It used to search only ten source extensions (Rust, TypeScript, SQL, TOML,
+  JSON, YAML, …) — 2 of one project's 121 tracked files, and nothing of a
+  Python, shell, PHP or Makefile project — so every identifier in those
+  libraries came back as "missing". It now reads every tracked file except
+  prose (`.md`, `.markdown`, `.mdx`, `.rst`, `.txt`, `.adoc`), skipping files
+  over 2 MiB and files that are not text, and the report opens by saying how
+  many files it searched and what it skipped. A bot-hq tool name
+  (`cl_index_search`, say) is never reported as a symbol missing from another
+  project's code. The "code moved since written" section's lines no longer
+  run together.
 - **A model the claude CLI does not know runs at the window the registry
   says.** For a model id that is not Claude's own (OpenRouter, DeepSeek, …)
   the CLI only ever used its own 200k default, whatever the model row's

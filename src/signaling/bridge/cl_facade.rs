@@ -133,7 +133,7 @@ impl SignalingBridge {
                  CL claims against. Register one in the Context Library tab first."
             );
         };
-        let claims = tokio::task::spawn_blocking({
+        let super::cl_staleness::StaleReport { claims, scope } = tokio::task::spawn_blocking({
             let (cl_dir, repo_root) = (cl_dir.clone(), repo_root.clone());
             move || super::cl_staleness::stale_claims(&cl_dir, &repo_root)
         })
@@ -169,22 +169,15 @@ impl SignalingBridge {
                 None => Vec::new(),
             }
         };
-        let mut report = super::cl_staleness::render_report(project, &repo_root, &claims);
+        let mut report = super::cl_staleness::render_report(project, &repo_root, &claims, &scope);
         if !drifted.is_empty() {
             report.push_str(&format!(
-                "
-## Code moved since written ({} atom{})
-                 The cited identifiers still exist, but the code they describe has                  changed since the atom was indexed — behavior claims may be stale                  even though nothing above flags them:
-{}
-",
+                "\n\n## Code moved since written ({} atom{})\nThe cited identifiers still exist, but \
+                 the code they describe has changed since the atom was indexed — behavior claims \
+                 may be stale even though nothing above flags them:\n{}\n",
                 drifted.len(),
                 if drifted.len() == 1 { "" } else { "s" },
-                drifted
-                    .iter()
-                    .map(|d| format!("- {d}"))
-                    .collect::<Vec<_>>()
-                    .join("
-")
+                drifted.iter().map(|d| format!("- {d}")).collect::<Vec<_>>().join("\n")
             ));
         }
         Ok(report)
