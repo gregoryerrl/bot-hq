@@ -17,6 +17,101 @@ use super::*;
 use crate::policy::tool_gate::{self, GateMode};
 use crate::policy::ViolationOutcome;
 
+/// The most a `command_path` file may hold (feedback #82): a long body for
+/// `$SHELL -c`, not a payload — the same ceiling as a session document's
+/// `content_path`.
+pub const COMMAND_FILE_MAX_BYTES: usize = 256 * 1024;
+
+/// The longest bound an agent may ask for an approved command's run
+/// (feedback #66b, `action_gate(timeout_secs)`): the push re-run's own bound,
+/// the longest the gate has ever waited on a command.
+pub const RUN_TIMEOUT_MAX_SECS: u64 = 600;
+
+/// Where an `action_gate` command's text came from, when it was a file
+/// (`command_path`): named in the reply, so the agent can check that the
+/// text parked is the file it meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSource {
+    pub path: String,
+    pub bytes: usize,
+    pub sha256: String,
+}
+
+/// What `action_gate` was asked to run, and how (feedback #82 / #66b).
+#[derive(Debug, Clone, Default)]
+pub struct GateRequest {
+    /// The command text — typed inline, or the whole text of `command_path`.
+    /// Everything downstream (the zsh lint, the listed-read check, the keyword
+    /// match, the outward classification, the run) sees this text and nothing
+    /// else: a file is only a way to hand over a long body.
+    pub command: String,
+    pub source: Option<CommandSource>,
+    pub require_approval: bool,
+    pub approve_after: Option<String>,
+    /// A bound for the run, `1..=RUN_TIMEOUT_MAX_SECS`, validated by the caller.
+    pub run_timeout_secs: Option<u64>,
+}
+
+/// Lower-case hex SHA-256 of `text`.
+pub fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
+/// The command text a `command_path` names (feedback #82): an absolute path
+/// to a UTF-8 file of at most [`COMMAND_FILE_MAX_BYTES`], read ONCE, here —
+/// what is parked is this text, and a later edit of the file changes nothing
+/// about what runs. Each refusal names its cause.
+pub fn command_from_file(path: &str) -> Result<(String, CommandSource)> {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        anyhow::bail!("command_path must be an absolute path (got `{path}`)");
+    }
+    let meta = std::fs::metadata(p).map_err(|e| anyhow::anyhow!("command_path `{path}`: {e}"))?;
+    if !meta.is_file() {
+        anyhow::bail!("command_path `{path}` is not a file");
+    }
+    if meta.len() > COMMAND_FILE_MAX_BYTES as u64 {
+        anyhow::bail!(
+            "command_path `{path}` is {} bytes; at most {COMMAND_FILE_MAX_BYTES} are read",
+            meta.len()
+        );
+    }
+    let bytes = std::fs::read(p).map_err(|e| anyhow::anyhow!("command_path `{path}`: {e}"))?;
+    let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("command_path `{path}` is not UTF-8"))?;
+    if text.trim().is_empty() {
+        anyhow::bail!("command_path `{path}` is empty");
+    }
+    let source = CommandSource { path: path.to_string(), bytes: text.len(), sha256: sha256_hex(&text) };
+    Ok((text, source))
+}
+
+/// The `timeout_secs` argument, validated: `1..=RUN_TIMEOUT_MAX_SECS`.
+pub fn validate_run_timeout(secs: u64) -> Result<u64> {
+    if (1..=RUN_TIMEOUT_MAX_SECS).contains(&secs) {
+        Ok(secs)
+    } else {
+        anyhow::bail!("timeout_secs must be between 1 and {RUN_TIMEOUT_MAX_SECS} (got {secs})")
+    }
+}
+
+/// The lines a reply adds for a request's source and bound: where the text
+/// came from (with its size and hash) and how long the run may take.
+fn request_extras(req: &GateRequest) -> String {
+    let mut out = String::new();
+    if let Some(s) = &req.source {
+        out.push_str(&format!(
+            "\nThe command is the text of `{}` as read now ({} bytes, sha256 {}); that text is what \
+             runs — editing the file later changes nothing about this gate.",
+            s.path, s.bytes, s.sha256
+        ));
+    }
+    if let Some(secs) = req.run_timeout_secs {
+        out.push_str(&format!("\nThe run is bounded at {secs} s."));
+    }
+    out
+}
+
 impl SignalingBridge {
     /// Entry point for the `action_gate` MCP tool. `command` is the exact Bash
     /// string the gate blocked. Returns combined output text (executed) or a
@@ -43,6 +138,22 @@ impl SignalingBridge {
         require_approval: bool,
         approve_after: Option<String>,
     ) -> Result<String> {
+        self.action_gate_request(
+            session_id,
+            agent,
+            GateRequest { command, require_approval, approve_after, ..GateRequest::default() },
+        )
+        .await
+    }
+
+    /// [`Self::action_gate_with`] for a full [`GateRequest`]: the command text
+    /// (inline or read from `command_path` — classified and run exactly like
+    /// inline text, through the gate's shell), the agent's bound for the run,
+    /// and the reply lines that name both.
+    pub async fn action_gate_request(&self, session_id: String, agent: String, req: GateRequest) -> Result<String> {
+        let command = req.command.clone();
+        let approve_after = req.approve_after.clone();
+        let extras = request_extras(&req);
         // The zsh `$var:x` trap (feedback #96) is refused before anything is
         // parked or run (s-d43b3630 plan review, point 11): a trapped command
         // parked for approval would spend the user's Approve and then run
@@ -51,6 +162,10 @@ impl SignalingBridge {
         if let Some(refusal) = crate::policy::shell_lint::zsh_trap(&tool_gate::gate_shell(), &command) {
             anyhow::bail!("{refusal}");
         }
+        let bound = req
+            .run_timeout_secs
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(tool_gate::DEFAULT_TIMEOUT);
         // **`require_approval` parks unconditionally** (round 12, EYES F19):
         // the keyword resolve below runs an unmatched / auto_allow command
         // outright, which is right for a command the Tool Gate blocked and
@@ -62,11 +177,12 @@ impl SignalingBridge {
         // listed production or staging reads parks for the user's approval —
         // read by the reviewer first — whatever the keyword list says.
         let listed = self.data_read_in(&session_id, &command).await.is_some();
-        if require_approval || listed {
+        if req.require_approval || listed {
             let outcome = self
                 .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
                 .await?;
-            return Ok(park_outcome_text(&outcome, &command));
+            self.record_run_timeout(&outcome, req.run_timeout_secs).await;
+            return Ok(park_outcome_text(&outcome, &command) + &extras);
         }
         // Two-tier resolve (session snapshot → global fallback) — previously
         // this read only the global list, so a gear-tab session override was
@@ -79,14 +195,37 @@ impl SignalingBridge {
             // No keyword, or an explicit auto_allow → run with no prompt. (In
             // normal flow the hook only routes `gate` commands here; auto_allow
             // / no-match are handled defensively so a direct call still works.)
-            None | Some(GateMode::AutoAllow) => {
-                self.execute_gated(&session_id, &command).await.map(|run| run.text)
-            }
+            None | Some(GateMode::AutoAllow) => self
+                .execute_gated_with(&session_id, &command, bound, &[])
+                .await
+                .map(|run| run.text + &extras),
             Some(GateMode::Gate) => {
                 let outcome = self
                     .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
                     .await?;
-                Ok(park_outcome_text(&outcome, &command))
+                self.record_run_timeout(&outcome, req.run_timeout_secs).await;
+                Ok(park_outcome_text(&outcome, &command) + &extras)
+            }
+        }
+    }
+
+    /// Record the agent's bound on the gate the park produced (0093), so the
+    /// run at approval time honours it however long the user takes. A re-park
+    /// of an identical command returns the EXISTING gate, whose bound stands.
+    async fn record_run_timeout(&self, outcome: &ParkOutcome, secs: Option<u64>) {
+        let Some(secs) = secs else { return };
+        let (gate_id, existing) = match outcome {
+            ParkOutcome::Parked { gate_id, existing, .. } | ParkOutcome::Queued { gate_id, existing } => {
+                (gate_id, *existing)
+            }
+        };
+        if existing {
+            return;
+        }
+        let storage = self.storage.lock().await.clone();
+        if let Some(storage) = storage {
+            if let Err(e) = storage.set_tray_run_timeout_secs(gate_id, secs).await {
+                tracing::warn!(gate_id = %gate_id, error = %e, "the gate's run bound was not recorded");
             }
         }
     }
@@ -494,6 +633,18 @@ impl SignalingBridge {
         let Some(command) = row.command_text.as_deref() else {
             return Ok(Self::approval_status_text(&row));
         };
+        // The parked text's hash and bound ride every answer (feedback #82 /
+        // #66b): an agent that handed the command over as a file, or a
+        // reviewer, compares the hash with the file's instead of trusting that
+        // the right text was parked.
+        let footer = format!(
+            "\n(command sha256 {}{})",
+            sha256_hex(command),
+            match row.run_timeout_secs {
+                Some(secs) => format!("; run bounded at {secs} s"),
+                None => String::new(),
+            }
+        );
         Ok(match row.status.as_str() {
             "queued" => format!(
                 "queued — `{command}` is an outward publish waiting for the reviewer to read \
@@ -568,7 +719,7 @@ impl SignalingBridge {
                 ),
                 None => format!("{other} — `{command}` did not run (gate is no longer pending)."),
             },
-        })
+        } + &footer)
     }
 
     /// `gate_status` wording for a command-less approval — a parked
@@ -1753,6 +1904,163 @@ mod tests {
             .unwrap();
         assert!(out.contains("exit 0"), "{out}");
         assert!(marker.exists());
+    }
+
+    /// Feedback #82: `command_path` is read once, as an absolute UTF-8 file
+    /// under the cap, and its text is the command — with its size and hash for
+    /// the reply. Each refusal names its cause.
+    #[test]
+    fn a_command_file_is_read_once_under_the_cap_and_hashed() {
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("deploy.sh");
+        std::fs::write(&script, "set -e\necho one\necho two\n").unwrap();
+        let (text, source) = command_from_file(script.to_str().unwrap()).unwrap();
+        assert_eq!(text, "set -e\necho one\necho two\n");
+        assert_eq!(source.bytes, text.len());
+        assert_eq!(source.sha256, sha256_hex(&text));
+        assert_eq!(source.sha256.len(), 64);
+        assert_eq!(sha256_hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        let err = |p: &str| command_from_file(p).unwrap_err().to_string();
+        assert!(err("relative/deploy.sh").contains("absolute"), "{}", err("relative/deploy.sh"));
+        let missing = dir.path().join("nope.sh");
+        assert!(err(missing.to_str().unwrap()).contains("nope.sh"));
+        assert!(err(dir.path().to_str().unwrap()).contains("not a file"));
+        let big = dir.path().join("big.sh");
+        std::fs::write(&big, vec![b'x'; COMMAND_FILE_MAX_BYTES + 1]).unwrap();
+        assert!(err(big.to_str().unwrap()).contains("at most"), "{}", err(big.to_str().unwrap()));
+        let binary = dir.path().join("bin");
+        std::fs::write(&binary, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(err(binary.to_str().unwrap()).contains("not UTF-8"));
+        let empty = dir.path().join("empty.sh");
+        std::fs::write(&empty, "  \n").unwrap();
+        assert!(err(empty.to_str().unwrap()).contains("empty"));
+        // The bound: 1..=600.
+        assert_eq!(validate_run_timeout(1).unwrap(), 1);
+        assert_eq!(validate_run_timeout(RUN_TIMEOUT_MAX_SECS).unwrap(), 600);
+        assert!(validate_run_timeout(0).is_err() && validate_run_timeout(601).is_err());
+    }
+
+    /// EYES P4 (s-42bf34b3): the text of a `command_path` file is classified
+    /// like inline text — a file holding `gh issue comment …` is an OUTWARD
+    /// publish and queues for the reviewer exactly as the inline command does;
+    /// the reply names the file, its size and its hash; `gate_status` carries
+    /// the hash and, when asked for, the bound; the bound is recorded on the
+    /// row the run reads.
+    #[tokio::test]
+    async fn a_command_file_is_classified_like_inline_text_and_its_hash_and_bound_are_reported() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, body_path, _body) = outward_fixture(&data, &repo).await;
+        // The live Tool Gate gates `gh`; without a keyword an unmatched command
+        // runs at once, which is the inline behaviour too.
+        tool_gate::save(data.path(), &[gk("gh", GateMode::Gate)]).unwrap();
+        let mut ring = ring_for(&bridge).await;
+        drain(&mut ring);
+        let script = repo.path().join("publish.sh");
+        let text = format!("gh issue comment 5 --body-file {body_path}\n");
+        std::fs::write(&script, &text).unwrap();
+        let (command, source) = command_from_file(script.to_str().unwrap()).unwrap();
+        let reply = bridge
+            .action_gate_request(
+                "s1".into(),
+                "hands".into(),
+                GateRequest {
+                    command: command.clone(),
+                    source: Some(source.clone()),
+                    require_approval: false,
+                    approve_after: None,
+                    run_timeout_secs: Some(300),
+                },
+            )
+            .await
+            .unwrap();
+        // Queued, not parked and not run: the outward classification saw the
+        // file's text.
+        assert!(reply.starts_with("action_gate: QUEUED"), "{reply}");
+        assert!(reply.contains(&format!("the text of `{}` as read now ({} bytes, sha256 {})", source.path, source.bytes, source.sha256)), "{reply}");
+        assert!(reply.contains("The run is bounded at 300 s."), "{reply}");
+        let cmds = drain(&mut ring);
+        assert_eq!(summons_in(&cmds), vec![eyes], "the reviewer is summoned, as for the inline command");
+        let gate_id = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).expect("a gate id").to_string();
+        let row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "queued");
+        assert_eq!(row.command_text.as_deref(), Some(command.as_str()), "the parked command IS the file's text");
+        assert_eq!(row.run_timeout_secs, Some(300), "the bound is on the row the run reads");
+        let status = bridge.gate_status(&gate_id).await.unwrap();
+        assert!(status.starts_with("queued"), "{status}");
+        assert!(status.ends_with(&format!("(command sha256 {}; run bounded at 300 s)", source.sha256)), "{status}");
+        // An identical re-issue returns the existing gate, whose bound stands.
+        let again = bridge
+            .action_gate_request(
+                "s1".into(),
+                "hands".into(),
+                GateRequest { command, run_timeout_secs: Some(10), ..GateRequest::default() },
+            )
+            .await
+            .unwrap();
+        assert!(again.contains("ALREADY"), "{again}");
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().run_timeout_secs, Some(300));
+    }
+
+    /// Feedback #66b: an approved gate runs under the bound the agent asked
+    /// for — the running mark says so — and a gate parked without one keeps
+    /// the default; a direct (unmatched) run takes the bound too.
+    #[tokio::test]
+    async fn an_approved_gate_runs_under_the_bound_it_was_parked_with() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let marker = repo.path().join("ran.txt");
+        let cmd = format!("touch {}", posix_path(&marker));
+        let reply = bridge
+            .action_gate_request(
+                "s1".into(),
+                "hands".into(),
+                GateRequest { command: cmd.clone(), require_approval: true, run_timeout_secs: Some(45), ..GateRequest::default() },
+            )
+            .await
+            .unwrap();
+        let gate_id = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).expect("a gate id").to_string();
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().run_timeout_secs, Some(45));
+        let status = bridge.gate_status(&gate_id).await.unwrap();
+        assert!(status.contains("run bounded at 45 s"), "{status}");
+        // Approve: the run happens under that bound (the running mark is the
+        // observable: `note_gate_running` is told the limit).
+        let outcome = bridge.resolve_choice(&gate_id, "Approve".into()).await.unwrap();
+        match outcome {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => assert!(body.contains("exit 0"), "{body}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(marker.exists());
+        // No bound asked: nothing recorded, the default applies, and the
+        // status footer says only the hash.
+        let reply = bridge
+            .action_gate_request(
+                "s1".into(),
+                "hands".into(),
+                GateRequest { command: "true".into(), require_approval: true, ..GateRequest::default() },
+            )
+            .await
+            .unwrap();
+        let plain = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string();
+        assert_eq!(storage.get_tray_entry(&plain).await.unwrap().unwrap().run_timeout_secs, None);
+        let status = bridge.gate_status(&plain).await.unwrap();
+        assert!(status.ends_with(&format!("(command sha256 {})", sha256_hex("true"))), "{status}");
+        assert!(!reply.contains("bounded"), "{reply}");
+        // A direct run (no keyword, no forced park) takes the bound too and
+        // says so in its reply.
+        let out = bridge
+            .action_gate_request(
+                "s1".into(),
+                "hands".into(),
+                GateRequest { command: "echo direct".into(), run_timeout_secs: Some(5), ..GateRequest::default() },
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("direct") && out.contains("The run is bounded at 5 s."), "{out}");
     }
 
     /// Feedback #96: under a zsh gate shell, a command carrying the

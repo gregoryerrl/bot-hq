@@ -65,6 +65,17 @@ and in `docs/rebuild-archive/`.
   written 05:40 — 38 minutes before this compaction") and which source wins
   for what: the summary for anything after that time, the document's own
   words for anything before it.
+- **A long command can be handed over as a file, with a bound for its run.**
+  `action_gate` takes `command_path` — an absolute path whose whole text is the
+  command (up to 256 KiB, read once) — so a multi-line script no longer has to
+  be squeezed into inline text. The file's text is treated exactly like a typed
+  command: the same shell lint, the same approval rules (a file holding a
+  `gh issue comment` still waits for the reviewer's read), the same shell runs
+  it, and editing the file after parking changes nothing. The reply names the
+  file, its size and its sha256, and `gate_status` repeats the hash on every
+  gate so what was parked can be checked against the file. `timeout_secs`
+  (1–600) bounds an approved command's run; the default stays 120 s, and the
+  running mark and `gate_status` say the bound.
 - **What you said comes back word for word after a compaction.** Beside the
   handoff document, bot-hq now puts back everything you typed, staged or
   answered in the tray since that document was last written (the whole

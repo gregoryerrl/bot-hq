@@ -1483,11 +1483,22 @@ impl SignalingBridge {
         if !matches!(gate_verdict(picked), crate::policy::ViolationOutcome::Approved) {
             return None;
         }
+        // The gate's row: the body hash its review covered (0084), for an
+        // edit the live body its reviewer's diff was made against (0088), and
+        // the bound the agent asked for (0093).
+        let row = match self.storage.lock().await.clone() {
+            Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
+            None => None,
+        };
         let push_rerun = crate::policy::push_rerun_refspecs(command);
         let limit = if push_rerun.is_some() {
             PUSH_RERUN_TIMEOUT
         } else {
-            crate::policy::tool_gate::DEFAULT_TIMEOUT
+            row.as_ref()
+                .and_then(|r| r.run_timeout_secs)
+                .and_then(|s| u64::try_from(s).ok())
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(crate::policy::tool_gate::DEFAULT_TIMEOUT)
         };
         // F9: while this runs the session is WAITING, not idle — the watchdog
         // reads the mark; the guard clears it whichever way we leave.
@@ -1533,12 +1544,6 @@ impl SignalingBridge {
                 }
             });
         }
-        // The gate's row: the body hash its review covered (0084) and, for an
-        // edit, the live body its reviewer's diff was made against (0088).
-        let row = match self.storage.lock().await.clone() {
-            Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
-            None => None,
-        };
         // Feedback #22: the review covered the body FILES as they were when
         // this parked; an edit since then would publish content nobody read.
         // Re-hash and refuse on any change or a missing file (0084). A row
@@ -1646,11 +1651,9 @@ impl SignalingBridge {
         }
         body.push_str("Output:\n");
         let env_refs: Vec<(&str, &str)> = envs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        let executed = if envs.is_empty() {
-            self.execute_gated(session_id, command).await
-        } else {
-            self.execute_gated_with(session_id, command, crate::policy::tool_gate::DEFAULT_TIMEOUT, &env_refs).await
-        };
+        // `limit` is the bound the running mark announced: the agent's
+        // `timeout_secs` when the row carries one, else the default.
+        let executed = self.execute_gated_with(session_id, command, limit, &env_refs).await;
         Some(match executed {
             Ok(run) => {
                 // Group K (EYES): a data read's answer can be megabytes — a

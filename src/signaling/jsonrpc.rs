@@ -1045,7 +1045,26 @@ async fn call_tool(
             Ok(ToolCallResult::text(msg))
         }
         "action_gate" => {
-            let command = arg_required_str(&args, "command")?;
+            use crate::signaling::bridge::{command_from_file, validate_run_timeout, GateRequest};
+            let invalid_params = |m: &str| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, m.to_string());
+            // Feedback #82: `command_path` hands over a long body as a file.
+            // Its text REPLACES `command` here, before any classification, so
+            // the lint, the listed-read check, the keyword match and the
+            // outward queue all see the text — a file is never a way around
+            // them — and it runs exactly as inline text would.
+            let inline = args.get("command").and_then(Value::as_str).map(str::to_string);
+            let path = args.get("command_path").and_then(Value::as_str);
+            let (command, source) = match (inline, path) {
+                (Some(_), Some(_)) => {
+                    return Err(invalid_params("give either `command` or `command_path`, not both"))
+                }
+                (None, None) => return Err(invalid_params("`command` (or `command_path`) is required")),
+                (Some(c), None) => (c, None),
+                (None, Some(p)) => {
+                    let (text, source) = command_from_file(p).map_err(|e| invalid_params(&e.to_string()))?;
+                    (text, Some(source))
+                }
+            };
             // Round 12: the agent may force the park — a command that must not
             // run unapproved regardless of the Tool Gate keyword list.
             let require_approval = args
@@ -1054,13 +1073,20 @@ async fn call_tool(
                 .unwrap_or(false);
             // Feedback #94: a line the user's card shows, "approve only after X".
             let approve_after = args.get("approve_after").and_then(Value::as_str).map(str::to_string);
+            // Feedback #66b: the agent's bound for the run, at most 600 s.
+            let run_timeout_secs = match args.get("timeout_secs") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_u64()
+                        .ok_or_else(|| invalid_params("timeout_secs must be a whole number of seconds"))
+                        .and_then(|s| validate_run_timeout(s).map_err(|e| invalid_params(&e.to_string())))?,
+                ),
+            };
             let output = bridge
-                .action_gate_with(
+                .action_gate_request(
                     caller.session_id.clone(),
                     caller.agent.clone(),
-                    command,
-                    require_approval,
-                    approve_after,
+                    GateRequest { command, source, require_approval, approve_after, run_timeout_secs },
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
@@ -2566,6 +2592,48 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, JsonRpcError::METHOD_NOT_FOUND);
+    }
+
+    /// Feedback #82 / #66b at the dispatch: `command` and `command_path` are
+    /// alternatives (both or neither is INVALID_PARAMS, naming the choice), a
+    /// file that cannot be read is INVALID_PARAMS with the cause, and
+    /// `timeout_secs` outside 1..=600 is INVALID_PARAMS — nothing parks or runs
+    /// on a refused argument.
+    #[tokio::test]
+    async fn action_gate_takes_command_or_command_path_and_a_bounded_timeout() {
+        let bridge = SignalingBridge::new();
+        let call = |arguments: serde_json::Value| {
+            req("tools/call", json!({ "name": "action_gate", "arguments": arguments }), 1)
+        };
+        let code_and_text = |r: Result<Option<JsonRpcResponse>, JsonRpcError>| -> (i32, String) {
+            match r {
+                Err(e) => (e.code, e.message),
+                Ok(Some(res)) => {
+                    let v = serde_json::to_value(&res).unwrap();
+                    (0, v["result"]["content"][0]["text"].as_str().unwrap_or("").to_string())
+                }
+                Ok(None) => (0, String::new()),
+            }
+        };
+        let (code, text) = code_and_text(dispatch(call(json!({})), &caller(), &bridge).await);
+        assert_eq!(code, JsonRpcError::INVALID_PARAMS, "{text}");
+        assert!(text.contains("command_path"), "{text}");
+        let (code, text) =
+            code_and_text(dispatch(call(json!({ "command": "true", "command_path": "/tmp/x" })), &caller(), &bridge).await);
+        assert_eq!(code, JsonRpcError::INVALID_PARAMS);
+        assert!(text.contains("not both"), "{text}");
+        let (code, text) =
+            code_and_text(dispatch(call(json!({ "command_path": "relative.sh" })), &caller(), &bridge).await);
+        assert_eq!(code, JsonRpcError::INVALID_PARAMS);
+        assert!(text.contains("absolute"), "{text}");
+        let (code, text) =
+            code_and_text(dispatch(call(json!({ "command": "true", "timeout_secs": 601 })), &caller(), &bridge).await);
+        assert_eq!(code, JsonRpcError::INVALID_PARAMS);
+        assert!(text.contains("between 1 and 600"), "{text}");
+        let (code, text) =
+            code_and_text(dispatch(call(json!({ "command": "true", "timeout_secs": "soon" })), &caller(), &bridge).await);
+        assert_eq!(code, JsonRpcError::INVALID_PARAMS);
+        assert!(text.contains("whole number"), "{text}");
     }
 
     #[tokio::test]

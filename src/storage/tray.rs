@@ -9,7 +9,8 @@ use super::*;
 /// `tray_entries_for_session` and `get_tray_entry` so the two can't drift.
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
-     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind";
+     body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
+     run_timeout_secs";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -361,6 +362,18 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("marking gate {choice_id} as {kind}"))?;
+        Ok(())
+    }
+
+    /// Record the bound an approved gate's command runs under (0093): the
+    /// agent's `timeout_secs`, already validated by the caller (1..=600).
+    pub async fn set_tray_run_timeout_secs(&self, choice_id: &str, secs: u64) -> Result<()> {
+        sqlx::query("UPDATE session_tray SET run_timeout_secs = ? WHERE choice_id = ?")
+            .bind(secs as i64)
+            .bind(choice_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("recording gate {choice_id}'s run bound"))?;
         Ok(())
     }
 

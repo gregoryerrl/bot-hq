@@ -334,6 +334,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub exec_kind: Option<String>,
+    /// The bound the approved command runs under, in seconds, when the agent
+    /// asked for one (0093, `action_gate(timeout_secs)`, at most 600). NULL
+    /// means the default bound.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub run_timeout_secs: Option<i64>,
 }
 
 impl SessionTrayEntry {

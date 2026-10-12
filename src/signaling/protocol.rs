@@ -418,7 +418,15 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The exact Bash command the gate blocked (e.g., 'gh issue comment 41 --body-file /tmp/x'). bot-hq runs it verbatim in your working repo on approval."
+                        "description": "The exact Bash command the gate blocked (e.g., 'gh issue comment 41 --body-file /tmp/x'). bot-hq runs it verbatim in your working repo on approval. Give this or command_path."
+                    },
+                    "command_path": {
+                        "type": "string",
+                        "description": "Absolute path of a UTF-8 file (at most 256 KiB) whose whole text IS the command — for a long script, instead of inline text. Read once, now: that text is what is classified, parked and run, exactly as inline text would be; the reply and gate_status carry its sha256."
+                    },
+                    "timeout_secs": {
+                        "type": "integer",
+                        "description": "Optional bound for the run, 1–600 s (default 120). The running mark and gate_status say it."
                     },
                     "require_approval": {
                         "type": "boolean",
@@ -429,7 +437,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                         "description": "Optional: what must happen first; the card shows \"Approve only after: …\"."
                     }
                 },
-                "required": ["command"]
+                "required": []
             }),
         },
         ToolDescriptor {
@@ -1179,8 +1187,19 @@ mod tests {
     /// registry. Those parameters are how an agent avoids a 476 KB reply, so
     /// they are worth their ~360 tokens; `session_doc_edit` itself stays
     /// behind ToolSearch.
-    const HANDS_ALWAYS_LOADED_BUDGET: usize = 25_000;
-    const EYES_ALWAYS_LOADED_BUDGET: usize = 17_000;
+    ///
+    /// Raised a second time, 2026-10-12 (s-42bf34b3), the ONE deliberate raise
+    /// of the feedback-queue scope, sized for every addition that scope
+    /// planned: `action_gate` gained `command_path` and `timeout_secs`
+    /// (feedback #82 / #66b — a long script handed over as a file, and a bound
+    /// for its run), which took the executor's set from 24,930 to 25,410 bytes
+    /// of a 57,465-byte registry; the sentences #53 (`wake_after_secs` up to
+    /// 48 h), #83 (`gh api` GET reads run unapproved), #87b
+    /// (`check_open_findings` lists advisories) and #102 (`session_doc_write`
+    /// refuses a stale replace) add to both sets after it. The ceilings leave
+    /// those sentences room, not a tool.
+    const HANDS_ALWAYS_LOADED_BUDGET: usize = 26_500;
+    const EYES_ALWAYS_LOADED_BUDGET: usize = 17_500;
 
 
     /// **The canonical docs list every registered tool** (audit M-F10/M-T1).
