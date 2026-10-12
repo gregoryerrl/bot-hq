@@ -1282,6 +1282,16 @@ async fn call_tool(
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(result))
         }
+        "get_finding" => {
+            // Scoped to the caller's session; ungated (a finding about the
+            // session's work is every participant's to read).
+            let finding_id = arg_required_str(&args, "finding_id")?;
+            let result = bridge
+                .get_finding(&caller.session_id, &finding_id)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(result))
+        }
         "override_reviewer_block" => {
             let reason = arg_required_str(&args, "reason")?;
             let result = bridge

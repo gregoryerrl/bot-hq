@@ -249,6 +249,16 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **Open advisory findings are listed in full, and one can be read whole.**
+  `check_open_findings` named only a count of open advisories, and the close
+  card showed the start of each one with no way to read the rest. The commit
+  check now lists each open advisory with its id and full text (they still
+  never block), the close recap no longer cuts them at 140 characters, and a
+  new `get_finding(id)` returns one finding whole — its text, where it points,
+  who filed it, its status and disposition. And the close card says when the
+  participant that asked to close is still acting on the recap's detail, so an
+  Approve is not mistaken for a safe one while it finishes — a marker, not a
+  hold.
 - **The close-out staleness sweep reports terms, not vocabulary.** It flagged
   263 lines at one close — "follow-up", "byte-identical", "re-read", "1st",
   found in other projects' notes — none of them a thing to fix. Now a plain

@@ -1594,13 +1594,9 @@ impl SignalingBridge {
         let mut lines: Vec<String> = open
             .iter()
             .take(SHOWN)
-            .map(|f| {
-                let mut s = f.summary.replace('\n', " ");
-                if s.chars().count() > 140 {
-                    s = format!("{}…", s.chars().take(140).collect::<String>());
-                }
-                format!("- [{}] {}", f.finding_uid, s)
-            })
+            // Whole, not cut at 140 characters (feedback #87 b): the start of
+            // a finding's text was all the executor could see of it.
+            .map(|f| format!("- [{}] {}", f.finding_uid, f.summary.replace('\n', " ")))
             .collect();
         if open.len() > SHOWN {
             lines.push(format!("… and {} more (see the findings list)", open.len() - SHOWN));

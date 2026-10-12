@@ -52,10 +52,17 @@ export function ApprovalGate({
   onResolve,
   onCancel,
   onViewFile,
+  isActing,
 }: {
   /** Pending approvals, oldest first. Never empty — the caller decides to
    *  render this at all. */
   rows: readonly TrayRow[];
+  /** Is this participant (by slug) mid-turn right now? A close card whose
+   *  declarer is still acting on the recap's detail says so (feedback #87 c):
+   *  the user once approved the close before the executor had finished, and
+   *  an advisory finding archived undispositioned. A marker, not a hold —
+   *  the Approve stays live. */
+  isActing?: (agent: string) => boolean;
   /** slug → what to print for it (rc3 D10/D20). */
   label?: (agent: string) => string;
   /** Label → hue token (rc3 D20). Absent falls back to the label hash. */
@@ -157,6 +164,15 @@ export function ApprovalGate({
       <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-on-surface">
         {gatePrompt(row)}
       </p>
+      {row.kind === "close" && isActing?.(row.agent) && (
+        <p
+          data-testid="close-still-acting"
+          className="mt-1.5 rounded border border-tertiary/50 bg-tertiary-container/30 px-2 py-1 text-xs text-on-surface"
+        >
+          ⏳ {who} is still acting on the recap's detail — approving now may close the
+          session before it finishes.
+        </p>
+      )}
 
       {/* The command verbatim. Never truncated — approving something you were
           shown half of is not approval. It scrolls VERTICALLY; the page does

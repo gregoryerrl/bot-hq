@@ -295,6 +295,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `check_commit_message(message)` | Pre-commit grep of a proposed message against the project's forbidden-words policy. Returns `ok` or `forbidden_word:<w>`. |
 | `flag_finding(severity, summary, …)` | Needs `file_finding`. File a review finding; a `blocking` one gates the executor's next `git commit` and `git push` until resolved. (`eyes_flag` is the pre-1.0 name, accepted as an alias.) |
 | `disposition_finding(finding_id, status, reason)` | Needs `disposition_finding`. Resolve a finding (`fixed` / `rebutted`), clearing the commit gate. |
+| `get_finding(finding_id)` | Read one finding of this session whole (its full text, where it points, who filed it, status, disposition) by its id or 8+ characters of it. The lists elsewhere abbreviate. Ungated. |
 | `check_open_findings()` | Check for unresolved blocking findings before committing. Returns `ok` or the blocking list. |
 | `override_reviewer_block()` | Needs `override_reviewer_block`. Escape valve for the fail-closed "reviewer is down" commit block. |
 | `approve_finding(finding_id)` | Needs `approve_finding`. Sign off that an escalated fix the executor marked fixed is genuinely resolved. |

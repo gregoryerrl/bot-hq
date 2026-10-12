@@ -293,13 +293,45 @@ impl SignalingBridge {
         }
         // T13: advisories don't gate, but a clean "ok" that never names them
         // is how open nits vanish at close. Visibility only — the verdict is
-        // still ok and nothing blocks.
-        match storage.open_advisory_count(session_id).await {
-            Ok(n) if n > 0 => Ok(format!(
-                "ok — {n} advisory finding(s) open (non-blocking; visible in the findings list)"
-            )),
-            _ => Ok("ok".to_string()),
-        }
+        // still ok and nothing blocks. Listed in full (feedback #87 b): a
+        // bare count sent the executor to a close card that showed only the
+        // start of each one, with no way to read the rest.
+        let advisories: Vec<Finding> = storage
+            .findings_for_session(session_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|f| f.severity == "advisory" && f.status == "open")
+            .collect();
+        Ok(render_open_advisories(&advisories))
+    }
+
+    /// One finding of the caller's session by its id or an 8+ character prefix
+    /// of it (`get_finding`, feedback #87 b): the whole text, where it points,
+    /// who filed it, its status and disposition — what `check_open_findings`'s
+    /// list and the close card abbreviate.
+    pub async fn get_finding(&self, session_id: &str, finding_id: &str) -> Result<String> {
+        let storage = self.findings_storage().await?;
+        let all = storage.findings_for_session(session_id).await?;
+        let exact: Vec<&Finding> = all.iter().filter(|f| f.finding_uid == finding_id).collect();
+        let found: Vec<&Finding> = if !exact.is_empty() {
+            exact
+        } else if finding_id.len() >= FINDING_ID_PREFIX_MIN {
+            all.iter().filter(|f| f.finding_uid.starts_with(finding_id)).collect()
+        } else {
+            return Ok(format!(
+                "get_finding: no finding `{finding_id}` in this session (give the full id, or at least \
+                 {FINDING_ID_PREFIX_MIN} characters of it)"
+            ));
+        };
+        Ok(match found.as_slice() {
+            [] => format!("get_finding: no finding `{finding_id}` in this session"),
+            [f] => render_finding(f),
+            many => format!(
+                "get_finding: `{finding_id}` is the start of {} ids in this session — give more of it",
+                many.len()
+            ),
+        })
     }
 
     /// All findings for a session — backs the `list_session_findings` Tauri
@@ -308,6 +340,60 @@ impl SignalingBridge {
         let storage = self.findings_storage().await?;
         storage.findings_for_session(session_id).await
     }
+}
+
+/// The shortest prefix `get_finding` resolves — the eight characters a
+/// finding is quoted with in chat.
+const FINDING_ID_PREFIX_MIN: usize = 8;
+
+/// The `ok` verdict with the open advisories listed in full, labelled, so they
+/// are handled during the work rather than at the door (feedback #87 b).
+fn render_open_advisories(advisories: &[Finding]) -> String {
+    if advisories.is_empty() {
+        return "ok".to_string();
+    }
+    let list = advisories
+        .iter()
+        .map(|f| {
+            let r = f.code_ref.as_deref().map(|r| format!(" ({r})")).unwrap_or_default();
+            format!("- advisory [{}] {}{}", f.finding_uid, f.summary.trim(), r)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "ok — {} advisory finding(s) open (non-blocking; they archive undispositioned at close — \
+         disposition each with disposition_finding, or read one whole with get_finding):\n{list}",
+        advisories.len()
+    )
+}
+
+/// One finding, whole, for `get_finding`.
+fn render_finding(f: &Finding) -> String {
+    let mut out = format!(
+        "[{}] {} finding by {}, filed {}, status: {}\n{}",
+        f.finding_uid,
+        f.severity,
+        f.agent,
+        f.created_at,
+        f.status,
+        f.summary.trim()
+    );
+    if let Some(r) = f.code_ref.as_deref() {
+        out.push_str(&format!("\nWhere: {r}"));
+    }
+    if let Some(gate) = f.gate_id.as_deref() {
+        out.push_str(&format!("\nAbout queued publish: {gate}"));
+    }
+    if f.raise_count > 1 {
+        out.push_str(&format!("\nRaised {} times.", f.raise_count));
+    }
+    if let (Some(by), Some(reason)) = (f.disposed_by.as_deref(), f.disposition_reason.as_deref()) {
+        out.push_str(&format!("\nDispositioned by {by}: {reason}"));
+    }
+    if f.reviewer_approved == 1 {
+        out.push_str("\nThe reviewer approved the resolution.");
+    }
+    out
 }
 
 /// Format the open-blocking-findings list into the gate's response string.
@@ -624,6 +710,28 @@ mod tests {
             verdict.contains("1 advisory finding(s) open"),
             "…but they are named: {verdict}"
         );
+        // Feedback #87 b: named IN FULL, labelled, with the way to read one
+        // whole — not a count the close card then abbreviates.
+        assert!(verdict.contains("- advisory [") && verdict.contains("] nit: rename a variable"), "{verdict}");
+        assert!(verdict.contains("get_finding"), "{verdict}");
+        let uid = verdict.split("- advisory [").nth(1).and_then(|r| r.split(']').next()).unwrap().to_string();
+        let whole = bridge.get_finding("s1", &uid).await.unwrap();
+        assert!(whole.starts_with(&format!("[{uid}] advisory finding by eyes, filed ")), "{whole}");
+        assert!(whole.contains("status: open\nnit: rename a variable"), "{whole}");
+        // An 8+ character prefix resolves; a short one and a stranger do not;
+        // another session cannot read it.
+        assert_eq!(bridge.get_finding("s1", &uid[..8]).await.unwrap(), whole);
+        assert!(bridge.get_finding("s1", &uid[..4]).await.unwrap().contains("at least 8 characters"));
+        assert!(bridge.get_finding("s1", "ffffffffffff").await.unwrap().starts_with("get_finding: no finding"));
+        assert!(bridge.get_finding("s2", &uid).await.unwrap().starts_with("get_finding: no finding"));
+        // A dispositioned one shows its disposition.
+        bridge
+            .disposition_finding("s1".into(), uid.clone(), FindingStatus::Rebutted, "the name is right".into(), "hands".into())
+            .await
+            .unwrap();
+        let whole = bridge.get_finding("s1", &uid).await.unwrap();
+        assert!(whole.contains("status: rebutted") && whole.contains("Dispositioned by hands: the name is right"), "{whole}");
+        assert_eq!(bridge.check_open_findings("s1").await.unwrap(), "ok", "a rebutted advisory is no longer listed");
     }
 
     /// T1 (dissect #5): a truncated id used to answer with a success-shaped

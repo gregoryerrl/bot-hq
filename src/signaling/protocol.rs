@@ -530,7 +530,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "check_open_findings",
-            description: "Check whether this session is clear to commit. Returns 'ok' if clear; 'blocked: <N> unresolved blocking finding(s)' plus the list (each with its finding id) when the reviewer has filed `blocking` findings you have not dispositioned — the pre-commit / pre-push git hooks enforce THAT verdict mechanically too; or 'blocked: reviewer down — …' when the session's reviewer is Stalled/Dead and nothing has been reviewed recently — an ADVISORY verdict (the hooks cannot see liveness), lifted by a user-approved `override_reviewer_block` ('ok (reviewer-down overridden: …)'). ALWAYS call this BEFORE `git commit`: if it's not 'ok', resolve each finding via `disposition_finding` (fix or rebut) first. Checking here lets you resolve cleanly instead of hitting a blocked commit.",
+            description: "Check whether this session is clear to commit. Returns 'ok' if clear; 'blocked: <N> unresolved blocking finding(s)' plus the list (each with its finding id) when the reviewer has filed `blocking` findings you have not dispositioned — the pre-commit / pre-push git hooks enforce THAT verdict mechanically too; or 'blocked: reviewer down — …' when the session's reviewer is Stalled/Dead and nothing has been reviewed recently — an ADVISORY verdict (the hooks cannot see liveness), lifted by a user-approved `override_reviewer_block` ('ok (reviewer-down overridden: …)'). ALWAYS call this BEFORE `git commit`: if it's not 'ok', resolve each finding via `disposition_finding` (fix or rebut) first. Checking here lets you resolve cleanly instead of hitting a blocked commit. An 'ok' also lists the open ADVISORY findings in full (they never block; `get_finding(id)` reads one whole).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {},
@@ -772,6 +772,17 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     }
                 },
                 "required": ["project", "query"]
+            }),
+        },
+        ToolDescriptor {
+            name: "get_finding",
+            description: "Read ONE finding of this session whole, by its id (or 8+ characters of it): the full text, where it points, who filed it, its status and any disposition. The lists elsewhere (check_open_findings, the close card) abbreviate; this is how you read the rest before dispositioning or rebutting.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "finding_id": { "type": "string", "description": "The finding id from flag_finding / check_open_findings, or at least its first 8 characters." }
+                },
+                "required": ["finding_id"]
             }),
         },
         ToolDescriptor {

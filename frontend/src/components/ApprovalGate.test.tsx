@@ -33,6 +33,36 @@ describe("ApprovalGate", () => {
     expect(screen.getByText("gh pr create --base main")).toBeInTheDocument();
   });
 
+  // Feedback #87 c: the executor's close card said the recap's detail was
+  // "yours to act on while the card is up", and the user approved before it
+  // had finished. The card now says when its declarer is still mid-turn — a
+  // marker, not a hold: the buttons stay live.
+  it("marks a close card whose declarer is still acting, and nothing else", () => {
+    const close = approval({
+      kind: "close",
+      command_text: null,
+      prompt: "Close session?\nCL learnings delta: written this session.",
+    });
+    const { rerender } = render(
+      <ApprovalGate
+        rows={[close]}
+        label={(a) => (a === "hands" ? "HANDS · Opus" : a)}
+        onResolve={resolved()}
+        isActing={(agent) => agent === "hands"}
+      />,
+    );
+    expect(screen.getByTestId("close-still-acting")).toHaveTextContent(
+      "HANDS · Opus is still acting on the recap's detail",
+    );
+    expect(screen.getByRole("button", { name: /^approve$/i })).not.toBeDisabled();
+    // Its turn ended: the marker goes.
+    rerender(<ApprovalGate rows={[close]} onResolve={resolved()} isActing={() => false} />);
+    expect(screen.queryByTestId("close-still-acting")).not.toBeInTheDocument();
+    // A gated command's card never carries it, busy or not.
+    rerender(<ApprovalGate rows={[approval()]} onResolve={resolved()} isActing={() => true} />);
+    expect(screen.queryByTestId("close-still-acting")).not.toBeInTheDocument();
+  });
+
   it("never scrolls the command sideways — a half-read command is a half-read approval", () => {
     // The house rule is vertical-only scrolling, and this is the surface where
     // breaking it costs the most: the user approves what they can SEE, and a

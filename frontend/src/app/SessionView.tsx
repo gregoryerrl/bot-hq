@@ -971,6 +971,14 @@ export function SessionView() {
                 rows={pendingApprovals}
                 label={(agent) => authorLabel(agent, labels)}
                 hues={hues}
+                // The busy map is slot-keyed; a close card names its declarer
+                // by slug (feedback #87 c).
+                isActing={(agent) =>
+                  Object.entries(busy ?? {}).some(
+                    ([key, isBusy]) =>
+                      isBusy && (Object.hasOwn(slugs, key) ? slugs[key] : key) === agent,
+                  )
+                }
                 onResolve={async (choiceId, picked, confirmStale = false) => {
                   const res = await invoke<ResolveResult>("resolve_choice", {
                     choiceId,
