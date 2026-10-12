@@ -1876,6 +1876,9 @@ async fn call_tool(
                 args.get("content_path").and_then(Value::as_str),
                 args.get("session_doc").and_then(Value::as_str),
             );
+            // The session doc a `session_doc:` copy came from, marked promoted
+            // once the write lands (0095, feedback #73).
+            let mut promoted_doc: Option<String> = None;
             let content = match sources {
                 (Some(c), None, None) => c.to_string(),
                 (None, Some(p), None) => {
@@ -1885,6 +1888,7 @@ async fn call_tool(
                     }
                 }
                 (None, None, Some(slug)) => {
+                    promoted_doc = Some(slug.to_string());
                     match bridge
                         .session_doc_read(&caller.session_id, slug)
                         .await
@@ -1932,6 +1936,7 @@ async fn call_tool(
                 .get("confirm_overwrite")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            let promoted_to = format!("{project}/{file_path}");
             let msg = bridge
                 .cl_write_file_with(
                     caller.session_id.clone(),
@@ -1945,6 +1950,9 @@ async fn call_tool(
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
+            if let Some(slug) = promoted_doc {
+                bridge.mark_session_doc_promoted(&caller.session_id, &slug, &promoted_to).await;
+            }
             Ok(ToolCallResult::text(msg))
         }
         "cl_edit_file" => {
@@ -2350,12 +2358,15 @@ mod tests {
                 && second.contains("uid-a2"),
             "the card's recap counts the open advisories and the detail names them; got: {second}"
         );
+        // Feedback #73: an open BLOCKING finding is named too — the commit
+        // gate does not hold a close, so it would archive undispositioned.
         assert!(
-            !second.contains("uid-b1"),
-            "blocking findings are not advisories and have their own gate; got: {second}"
+            second.contains("1 open BLOCKING finding(s)") && second.contains("uid-b1"),
+            "the recap names the open blocking finding; got: {second}"
         );
         let card = pending_close_card(&storage).await.expect("card parked");
         assert!(card.prompt.contains("2 open advisory finding(s)"), "the user reads the count on the card");
+        assert!(card.prompt.contains("1 open BLOCKING finding(s)"), "{}", card.prompt);
 
         // A session with NO open advisories gets a recap without the line.
         storage.create_session("s2", "t", None).await.unwrap();
@@ -2478,6 +2489,21 @@ mod tests {
         let storage = crate::storage::Storage::memory().await.unwrap();
         storage.create_session("s1", "close", None).await.unwrap();
         bridge.set_storage(storage.clone()).await;
+        // Feedback #73: custom docs never promoted are named on the card;
+        // phase docs, archives, a reviewer co-doc, a handoff doc and a
+        // promoted doc are not.
+        for (slug, body, phase) in [
+            ("key-questions", "the approved questions", None),
+            ("eyes-handoff", "the reviewer's hand-over", None),
+            ("scratch@1", "an archive", None),
+            ("plan", "the plan", Some("plan")),
+            ("plan-eyes", "the review", Some("plan")),
+            ("handoff-hands", "my handoff", None),
+            ("promoted-notes", "already in the CL", None),
+        ] {
+            storage.upsert_session_document("s1", slug, body, phase).await.unwrap();
+        }
+        storage.mark_session_document_promoted("s1", "promoted-notes", "bot-hq/notes.md").await.unwrap();
         let mut sub = bridge.subscribe();
 
         let first = close_text(&bridge, 1).await;
@@ -2487,6 +2513,14 @@ mod tests {
         let second = close_text(&bridge, 2).await;
         assert!(second.contains("close PARKED"), "got: {second}");
         assert!(second.contains("CL learnings delta: NOT written"), "got: {second}");
+        assert!(
+            second.contains("2 custom document(s) never promoted to the Context Library will archive with the session: `key-questions`, `eyes-handoff`."),
+            "got: {second}"
+        );
+        assert!(second.contains("cl_write_file(project, file_path, session_doc: \"<slug>\")"), "the detail names the call: {second}");
+        for absent in ["scratch@1", "`plan`", "plan-eyes", "handoff-hands", "promoted-notes"] {
+            assert!(!second.contains(absent), "{absent} is not an unpromoted custom doc: {second}");
+        }
         assert!(!second.contains("close requested"));
         let card = pending_close_card(&storage).await.expect("a pending close card");
         assert!(card.prompt.contains("Close this session?"));
@@ -4607,6 +4641,12 @@ mod tests {
         .unwrap();
         assert!(reply.starts_with("created 'plans/eyes-handoff.md'"), "{reply}");
         assert_eq!(std::fs::read_to_string(proj.join("plans/eyes-handoff.md")).unwrap(), body);
+        // The doc is marked promoted, to where (feedback #73), so the close
+        // recap stops naming it.
+        let doc = storage.session_document_by_slug("s1", "eyes-handoff").await.unwrap().unwrap();
+        assert_eq!(doc.promoted_to.as_deref(), Some("bot-hq/plans/eyes-handoff.md"));
+        assert!(doc.promoted_at.is_some());
+        assert!(bridge.unpromoted_custom_docs("s1").await.iter().all(|d| d.slug != "eyes-handoff"));
 
         let unknown = tool(&bridge, caller(), "cl_write_file", json!({"project": "bot-hq", "file_path": "x.md", "session_doc": "nope"}))
             .await

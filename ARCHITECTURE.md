@@ -1461,7 +1461,10 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   append and `session_doc_edit` are never refused for that — and neither
   counts as having seen the doc unless the writer had already seen the
   version it changed, so a blind append cannot make the next replace
-  acceptable.
+  acceptable. `promoted_to` / `promoted_at` (migration 0095) record where
+  `cl_write_file(session_doc:)` copied a doc; the close recap lists the custom
+  docs still unpromoted (handoff docs excepted), beside the open advisory AND
+  blocking findings (feedback #73).
 - `findings` (id PK, session_id, finding_uid UNIQUE, agent, severity,
   summary, code_ref, status, disposition_reason, disposed_by,
   created_at, updated_at) — EYES review findings backing the commit

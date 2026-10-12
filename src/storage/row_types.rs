@@ -642,4 +642,12 @@ pub struct SessionDocument {
     #[serde(default)]
     #[sqlx(default)]
     pub last_writer: Option<String>,
+    /// Where `cl_write_file(session_doc:)` copied it in the Context Library
+    /// (`<project>/<file path>`) and when (0095); `None` = never promoted.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub promoted_to: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub promoted_at: Option<String>,
 }

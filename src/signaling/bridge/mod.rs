@@ -1650,6 +1650,50 @@ impl SignalingBridge {
             ));
             detail.push(adv);
         }
+        // Open BLOCKING findings too (feedback #73): the commit gate holds
+        // them against a commit, not against a close, so an undispositioned
+        // one archives with the session unless the recap names it.
+        if let Some(storage) = self.storage.lock().await.clone() {
+            let blocking = storage.open_blocking_findings_for_session(session_id).await.unwrap_or_default();
+            if !blocking.is_empty() {
+                card.push(format!(
+                    "{} open BLOCKING finding(s) will archive undispositioned with the session.",
+                    blocking.len()
+                ));
+                let list = blocking
+                    .iter()
+                    .map(|f| format!("- [{}] {}", f.finding_uid, f.summary.replace('\n', " ")))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                detail.push(format!(
+                    "Open blocking finding(s) — disposition each via disposition_finding (fixed / \
+                     rebutted) before the close, or they archive as they stand:\n{list}"
+                ));
+            }
+        }
+        // Custom documents never promoted to the Context Library (feedback
+        // #73): approved content that lives only in a session doc archives
+        // with the session; the recap names them and the one call that carries
+        // one over byte for byte.
+        let unpromoted = self.unpromoted_custom_docs(session_id).await;
+        if !unpromoted.is_empty() {
+            let names = unpromoted.iter().map(|d| format!("`{}`", d.slug)).collect::<Vec<_>>().join(", ");
+            card.push(format!(
+                "{} custom document(s) never promoted to the Context Library will archive with the \
+                 session: {names}.",
+                unpromoted.len()
+            ));
+            detail.push(format!(
+                "Custom document(s) never promoted — for each that should outlive the session, \
+                 cl_write_file(project, file_path, session_doc: \"<slug>\") copies it byte for \
+                 byte; a scratch doc may simply archive:\n{}",
+                unpromoted
+                    .iter()
+                    .map(|d| format!("- `{}` ({} bytes, last written {})", d.slug, d.body.len(), d.updated_at))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
         let (cl_written, _) = self.close_gate_flags(session_id).await;
         card.push(if cl_written {
             "CL learnings delta: written this session.".to_string()

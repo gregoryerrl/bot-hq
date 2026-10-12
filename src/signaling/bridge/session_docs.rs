@@ -668,6 +668,39 @@ impl SignalingBridge {
         }
     }
 
+    /// Record that `slug` was promoted to the Context Library as `to` (0095,
+    /// feedback #73). Best-effort: the CL write already landed.
+    pub async fn mark_session_doc_promoted(&self, session_id: &str, slug: &str, to: &str) {
+        let Some(storage) = self.storage.lock().await.clone() else { return };
+        if let Err(e) = storage.mark_session_document_promoted(session_id, slug, to).await {
+            tracing::warn!(?e, session_id, slug, "marking a session doc promoted");
+        }
+    }
+
+    /// The session's CUSTOM documents never promoted to the Context Library
+    /// (feedback #73): untagged, not an archive (`@n`), not a reviewer co-doc,
+    /// not a handoff doc (per-session by design — the user declined carrying
+    /// handoffs over, #74 step 4), with no `promoted_to`. Oldest first.
+    pub async fn unpromoted_custom_docs(&self, session_id: &str) -> Vec<crate::storage::SessionDocument> {
+        let Some(storage) = self.storage.lock().await.clone() else { return Vec::new() };
+        let mut docs: Vec<_> = storage
+            .session_documents_for(session_id, None, None)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| {
+                d.phase.is_none()
+                    && d.promoted_to.is_none()
+                    && !is_archive_slug(&d.slug)
+                    && crate::storage::reviewer_codoc_phase(&d.slug).is_none()
+                    && crate::agents::handoff::participant_of(&d.slug).is_none()
+                    && !d.body.trim().is_empty()
+            })
+            .collect();
+        docs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        docs
+    }
+
     /// The version (`doc_version`) of `slug` that `participant` has seen WHOLE,
     /// if any.
     pub async fn doc_seen_version(&self, session_id: &str, participant: &str, slug: &str) -> Option<String> {

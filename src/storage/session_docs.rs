@@ -32,7 +32,8 @@ pub fn phase_doc_slug(slug: &str) -> Option<&'static str> {
 
 /// Full column projection for a `SessionDocument` row — shared by
 /// `session_documents_for` and `session_document_by_slug`.
-const DOCUMENT_COLUMNS: &str = "id, session_id, slug, body, created_at, updated_at, phase, last_writer";
+const DOCUMENT_COLUMNS: &str =
+    "id, session_id, slug, body, created_at, updated_at, phase, last_writer, promoted_to, promoted_at";
 
 impl Storage {
     /// Upsert a per-session document by (session_id, slug). On conflict the
@@ -93,6 +94,24 @@ impl Storage {
             .execute(&self.pool)
             .await
             .with_context(|| format!("recording the writer of session doc {session_id}/{slug}"))?;
+        Ok(())
+    }
+
+    /// Record that `slug` was promoted to the Context Library as `to`
+    /// (`<project>/<file path>`; 0095, feedback #73). Set by
+    /// `cl_write_file(session_doc:)` after its write; the close recap lists the
+    /// custom documents still unpromoted.
+    pub async fn mark_session_document_promoted(&self, session_id: &str, slug: &str, to: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE session_documents SET promoted_to = ?, promoted_at = ? WHERE session_id = ? AND slug = ?",
+        )
+        .bind(to)
+        .bind(now_utc())
+        .bind(session_id)
+        .bind(slug)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("marking session doc {session_id}/{slug} promoted to {to}"))?;
         Ok(())
     }
 
