@@ -142,7 +142,13 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    /// The model's reasoning. Never posted: `translate` drops it, so what an
+    /// agent "wrote" here reaches neither the user nor its peers (feedback
+    /// #46 — the texts a participant missed from the chat were these). Both
+    /// fields default: a redacted thinking block carries no `thinking`, and a
+    /// message that fails to parse would lose its text blocks with it.
     Thinking {
+        #[serde(default)]
         thinking: String,
         #[serde(default)]
         signature: Option<String>,

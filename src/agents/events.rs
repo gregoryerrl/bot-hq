@@ -581,6 +581,24 @@ mod tests {
         assert!(matches!(translate(quoting, &mut carry).as_slice(), [AgentEvent::Text(_)]));
     }
 
+    /// Feedback #46: a thinking block is never posted — the texts a participant
+    /// missed from the chat were its reasoning — and a thinking block with no
+    /// `thinking` field (a redacted one) must not take the message's text blocks
+    /// down with it.
+    #[test]
+    fn thinking_is_never_posted_and_a_redacted_block_keeps_the_texts_beside_it() {
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let mut carry = None;
+        let with_thinking = parse(
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"thinking","thinking":"Current state, as of 02:17Z: pushed.","signature":"s"},{"type":"text","text":"Pushed."}]}}"#,
+        );
+        assert!(matches!(translate(with_thinking, &mut carry).as_slice(), [AgentEvent::Text(t)] if t == "Pushed."));
+        let redacted = parse(
+            r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"thinking","signature":"redacted"},{"type":"text","text":"Still here."}]}}"#,
+        );
+        assert!(matches!(translate(redacted, &mut carry).as_slice(), [AgentEvent::Text(t)] if t == "Still here."));
+    }
+
     /// A HELPER's messages — claude-code streams a subagent's assistant
     /// messages and tool results on the parent's stdout, tagged with the Agent
     /// call that launched it — are not the participant's: no text, no tool row,

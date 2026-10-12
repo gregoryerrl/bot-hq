@@ -249,6 +249,13 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **Agents are told their thinking is never shown.** Several short status
+  texts a participant "wrote" never reached the chat or its peers; they were
+  the model's reasoning, which bot-hq never posts (and claude-code's own
+  transcript had no text for them either). The rules now say so — a status, a
+  finding or an answer that exists only in reasoning was never said — and a
+  redacted reasoning block (one with no text) no longer risks taking the real
+  text beside it down with it.
 - **Open advisory findings are listed in full, and one can be read whole.**
   `check_open_findings` named only a count of open advisories, and the close
   card showed the start of each one with no way to read the rest. The commit
