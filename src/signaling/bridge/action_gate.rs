@@ -960,7 +960,15 @@ impl SignalingBridge {
         command: &str,
     ) -> Option<Result<(String, Vec<(String, Vec<u8>)>), String>> {
         use sha2::{Digest, Sha256};
-        let files = super::outward_body::extract(command).ok()?.files;
+        let mut files = super::outward_body::extract(command).map(|b| b.files).unwrap_or_default();
+        // The scripts the command RUNS are pinned the same way (feedback #55):
+        // `bash /tmp/check.sh` approved a path, not the commands in it, and
+        // nothing stopped the file changing between park and approval.
+        for script in super::outward_body::executed_scripts(command) {
+            if !files.contains(&script) {
+                files.push(script);
+            }
+        }
         if files.is_empty() {
             return None;
         }
@@ -1122,6 +1130,19 @@ fn card_extra(
         out.push_str(&format!(
             "\n\nThis command only writes text into `{file}` — nothing in that text runs when you \
              approve (a keyword may have matched inside the text)."
+        ));
+    }
+    // Feedback #55: the scripts the command runs are named, so the approver
+    // knows the Approve is for the file as it is NOW — bot-hq re-hashes it at
+    // approval and refuses to run a changed one.
+    let scripts = super::outward_body::executed_scripts(command);
+    if !scripts.is_empty() {
+        out.push_str(&format!(
+            "\n\nRuns the script{} {} as {} now — pinned by hash when this parked; a change before \
+             your Approve is refused at run time.",
+            if scripts.len() == 1 { "" } else { "s" },
+            scripts.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", "),
+            if scripts.len() == 1 { "it is" } else { "they are" },
         ));
     }
     if let Some(read) = listed {
@@ -2268,6 +2289,66 @@ mod tests {
         let plain = park("psql -h prod.db -c 'select 1'").await;
         let row = storage.get_tray_entry(&plain).await.unwrap().unwrap();
         assert!(!row.prompt.contains("only writes text"), "{}", row.prompt);
+    }
+
+    /// Feedback #55: a gated command that runs a local script pins the script
+    /// by hash when it parks (the card says so); at approval the script is
+    /// re-hashed and a changed one is refused ("NOT RUN: the script changed
+    /// after it was parked"), an unchanged one runs, and a missing one is
+    /// named. gate_status carries the refusal.
+    #[tokio::test]
+    async fn a_script_changed_after_its_gate_parked_is_not_run() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let script = repo.path().join("check.sh");
+        let marker = repo.path().join("ran-v1.txt");
+        std::fs::write(&script, format!("touch {}\n", posix_path(&marker))).unwrap();
+        let park = |cmd: String| {
+            let bridge = bridge.clone();
+            async move {
+                let reply = bridge.action_gate("s1".into(), "hands".into(), cmd, true).await.unwrap();
+                reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string()
+            }
+        };
+        let cmd = format!("bash {}", posix_path(&script));
+        let gate = park(cmd.clone()).await;
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert!(row.body_sha256.is_some(), "the script is hashed at park");
+        assert!(row.prompt.contains(&format!("Runs the script `{}` as it is now — pinned by hash", posix_path(&script))), "{}", row.prompt);
+        // The script changes before the Approve: refused, nothing runs.
+        let other = repo.path().join("ran-v2.txt");
+        std::fs::write(&script, format!("touch {}\n", posix_path(&other))).unwrap();
+        match bridge.resolve_choice(&gate, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => {
+                assert!(body.contains("NOT RUN: the script changed after it was parked"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!marker.exists() && !other.exists(), "neither version ran");
+        let status = bridge.gate_status(&gate).await.unwrap();
+        assert!(status.contains("approved but NOT RUN") && status.contains("the script changed after it was parked"), "{status}");
+        // Re-issued (the same text, a new park once the first is answered): the
+        // current script is pinned and runs on approval.
+        let gate2 = park(cmd.clone()).await;
+        assert_ne!(gate2, gate);
+        match bridge.resolve_choice(&gate2, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => assert!(body.contains("exit 0"), "{body}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(other.exists(), "the re-pinned script ran");
+        // A script missing at approval is named.
+        let gate3 = park(cmd).await;
+        std::fs::remove_file(&script).unwrap();
+        match bridge.resolve_choice(&gate3, "Approve".into()).await.unwrap() {
+            ResolveOutcome::DeliveredOutOfBand { body, .. } => {
+                assert!(body.contains("NOT RUN: the script `") && body.contains("is missing at approval"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// Feedback #88: the ledger lists the session's gates newest first with

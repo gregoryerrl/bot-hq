@@ -1554,7 +1554,18 @@ impl SignalingBridge {
         let mut approved_files: Vec<(String, Vec<u8>)> = Vec::new();
         if let Some(current) = self.body_files_snapshot(session_id, command).await {
             let recorded = row.as_ref().and_then(|r| r.body_sha256.clone());
+            // A script the command runs is pinned like a body file (feedback
+            // #55); the wording names which kind went missing or changed.
+            let scripts = super::outward_body::executed_scripts(command);
+            let is_script = |p: &str| scripts.iter().any(|s| s == p);
             let refusal = match (&recorded, &current) {
+                (_, Err(path)) if is_script(path) => Some((
+                    format!(
+                        "NOT RUN: the script `{path}` this command runs is missing at approval. \
+                         Re-issue the command once it exists."
+                    ),
+                    format!("the script `{path}` was missing at approval"),
+                )),
                 (_, Err(path)) => Some((
                     format!(
                         "NOT RUN: the body file `{path}` is missing at approval, so nothing was \
@@ -1562,13 +1573,27 @@ impl SignalingBridge {
                     ),
                     format!("the body file `{path}` was missing at approval"),
                 )),
-                (Some(then), Ok((now, _))) if then != now => Some((
-                    "NOT RUN: a body file of this command changed after it was reviewed, so \
-                     nothing was published — the approved card no longer matches what would go \
-                     out. Re-issue the command; the reviewer reads the new body first."
-                        .to_string(),
-                    "a body file changed after it was reviewed".to_string(),
-                )),
+                (Some(then), Ok((now, _))) if then != now => {
+                    if !scripts.is_empty() {
+                        Some((
+                            format!(
+                                "NOT RUN: the script changed after it was parked ({}), so the approved \
+                                 card no longer matches what would run. Re-issue the command to park the \
+                                 script as it is now.",
+                                scripts.iter().map(|s| format!("`{s}`")).collect::<Vec<_>>().join(", ")
+                            ),
+                            "the script changed after it was parked".to_string(),
+                        ))
+                    } else {
+                        Some((
+                            "NOT RUN: a body file of this command changed after it was reviewed, so \
+                             nothing was published — the approved card no longer matches what would go \
+                             out. Re-issue the command; the reviewer reads the new body first."
+                                .to_string(),
+                            "a body file changed after it was reviewed".to_string(),
+                        ))
+                    }
+                }
                 _ => None,
             };
             if let Some((refusal, short)) = refusal {

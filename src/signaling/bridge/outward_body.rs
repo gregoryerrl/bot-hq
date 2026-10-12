@@ -701,6 +701,79 @@ fn is_gh_api_get(c: &Cmd) -> bool {
     }
 }
 
+/// Interpreters whose first positional argument is a script FILE to run.
+const SCRIPT_RUNNERS: &[&str] = &["python", "python3", "node", "ruby", "perl", "php", "deno", "bun"];
+
+/// The local script files `command` RUNS, as written (feedback #55): `bash
+/// X` / `sh X` (and the other shells), `python3 X` and the like, `source X` /
+/// `. X`, and a path executed directly (`./deploy.sh`, `/tmp/check.sh`,
+/// `~/bin/x`). Only a literal word that looks like a file — a slash or an
+/// extension — counts; `bash -c '…'`, `python3 -c`, `python3 -m mod`, a
+/// stdin script and a bare command name do not. Flags before the script are
+/// skipped (`bash -x X`, `bash -o pipefail X`). Each is hashed when the gate
+/// parks and re-hashed at approval, like a publish's body files, so the user
+/// approves the script as it was, not whatever the path holds later.
+pub(crate) fn executed_scripts(command: &str) -> Vec<String> {
+    let looks_like_file = |w: &str| w.contains('/') || w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()));
+    let mut out: Vec<String> = Vec::new();
+    for c in simple_commands(command, 0) {
+        let args: Vec<&Word> = c.args.iter().filter(|w| !w.op).collect();
+        let tool = c.tool.as_str();
+        if SHELLS.contains(&tool) || SCRIPT_RUNNERS.contains(&tool) {
+            let mut i = 0;
+            let mut file: Option<&Word> = None;
+            while i < args.len() {
+                let a = args[i].text.as_str();
+                if a == "--" {
+                    file = args.get(i + 1).copied();
+                    break;
+                }
+                if a.starts_with('-') {
+                    // `-c`, `-m`, `-e`, `-s`: the script is inline, a module,
+                    // an expression or stdin — no file. `-o OPT` takes a value.
+                    if matches!(a, "-c" | "-m" | "-e" | "-s" | "--command" | "--module") {
+                        file = None;
+                        break;
+                    }
+                    if a == "-o" || a == "-O" {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    continue;
+                }
+                file = Some(args[i]);
+                break;
+            }
+            if let Some(w) = file {
+                if !w.dynamic && looks_like_file(&w.text) {
+                    out.push(w.text.clone());
+                }
+            }
+        } else if tool == "source" || tool == "." {
+            if let Some(w) = args.first() {
+                if !w.dynamic && looks_like_file(&w.text) {
+                    out.push(w.text.clone());
+                }
+            }
+        }
+    }
+    // Directly executed paths: a command word with a slash (`./x.sh`,
+    // `/tmp/x.sh`, `~/bin/x`) at the start of a segment or after `&&`/`;`/`|`.
+    for seg in segments(command) {
+        let Some(head) = seg.words.iter().find(|w| !w.op && !w.text.contains('=')) else { continue };
+        if head.dynamic {
+            continue;
+        }
+        let t = head.text.as_str();
+        if (t.starts_with("./") || t.starts_with('/') || t.starts_with("~/") || t.starts_with("../")) && !out.contains(&head.text) {
+            out.push(head.text.clone());
+        }
+    }
+    out.dedup();
+    out
+}
+
 /// Is `command` a pure `gh api` READ (feedback #83, the user's standing
 /// decision of 2026-10-12): ONE `gh api` GET, piped at most into the
 /// read-only filters `read_gate` allows — no continuation, no redirection, no
@@ -1761,6 +1834,34 @@ mod tests {
         assert!(is_outward("gh api repos/o/r && gh issue comment 5 -b x"));
         assert!(is_outward("gh api repos/o/r | sh"), "a shell fed from the read is opaque");
         assert!(!is_outward("gh api repos/o/r | jq .name"));
+    }
+
+    /// Feedback #55: the scripts a command RUNS — a shell or interpreter given a
+    /// file, `source`, a path executed directly — and nothing that is not a
+    /// file: an inline `-c`, a module, stdin, a bare name.
+    #[test]
+    fn the_scripts_a_command_runs_are_found_and_nothing_else_is() {
+        let scripts = |c: &str| executed_scripts(c);
+        assert_eq!(scripts("bash /tmp/hardcheck.sh"), ["/tmp/hardcheck.sh"]);
+        assert_eq!(scripts("bash -x -o pipefail scripts/deploy.sh --dry"), ["scripts/deploy.sh"]);
+        assert_eq!(scripts("sh ./check.sh && python3 tools/report.py out.json"), ["./check.sh", "tools/report.py"]);
+        assert_eq!(scripts("./deploy.sh prod"), ["./deploy.sh"]);
+        assert_eq!(scripts("cd x && ../bin/run.sh"), ["../bin/run.sh"]);
+        assert_eq!(scripts("source ./env.sh && node scripts/x.mjs"), ["./env.sh", "scripts/x.mjs"]);
+        assert_eq!(scripts("ENV=prod /tmp/finalcheck.sh | tee out.txt"), ["/tmp/finalcheck.sh"]);
+        for none in [
+            "bash -c 'echo hi'",
+            "python3 -c 'print(1)'",
+            "python3 -m pytest",
+            "bash deploy",
+            "bash",
+            "cat x.sh | sh",
+            "gh issue comment 5 --body-file notes.md",
+            "bash $SCRIPT",
+            "ls -la",
+        ] {
+            assert!(scripts(none).is_empty(), "{none}: {:?}", scripts(none));
+        }
     }
 
     /// Feedback #83 (item 4): the card says "only writes text" for exactly the

@@ -249,6 +249,14 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A gated command that runs a script approves the script as it is, not the
+  path.** `bash /tmp/check.sh` used to show you one line and run whatever the
+  file held when you approved. The scripts a command runs (`bash X`, `sh X`,
+  `python3 X`, `source X`, `./X` and the like) are now hashed when the gate
+  parks — the card names them — and re-hashed at approval: a script changed
+  in between is refused ("NOT RUN: the script changed after it was parked";
+  re-issue to pin the new version), and a missing one is named. Inline
+  `-c` text, modules and stdin scripts are not files and are not pinned.
 - **A session's gates have a ledger.** `gate_history` lists the session's
   gated commands newest first — each one's short id, time, issuer, state
   (queued for the reviewer, pending your approval, approved with its exit code,
