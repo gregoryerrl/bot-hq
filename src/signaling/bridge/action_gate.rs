@@ -1127,8 +1127,9 @@ impl SignalingBridge {
     /// against the session's working repo — where `execute_gated` runs it.
     pub(super) async fn resolve_body_path(&self, session_id: &str, p: &str) -> PathBuf {
         // `~/x` is the user's home (EYES d8c8c3a4: it used to resolve to
-        // `<repo>/~/x`, which no file ever matched).
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        // `<repo>/~/x`, which no file ever matched). `paths::home_dir` — the
+        // one resolver — because `HOME` is unset in a native Windows app.
+        if let Ok(home) = crate::paths::home_dir() {
             if let Some(expanded) = expand_home(p, &home) {
                 return expanded;
             }
