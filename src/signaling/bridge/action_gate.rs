@@ -785,18 +785,39 @@ impl SignalingBridge {
             }
         );
         let command = &*super::util::command_excerpt(full_command);
-        Ok(match row.status.as_str() {
-            "queued" => format!(
+        // A queued publish an open advisory holds for a revision (feedback
+        // #69; EYES cd098697) is not "waiting for the reviewer": it waits for
+        // the executor, and `gate_status` must say so and name the ways out.
+        let revise = match row.status.as_str() {
+            "queued" => storage
+                .findings_for_session(&row.session_id)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .find(|f| revises_queued_gate(f, &row)),
+            _ => None,
+        };
+        Ok(match (row.status.as_str(), revise) {
+            ("queued", Some(f)) => format!(
+                "queued, HELD for a revision — the reviewer read `{command}` and filed advisory finding {} \
+                 ({}). It will not park for the user on its own. Change the body file and re-issue the \
+                 identical command (the new body is re-posted for the reviewer and the finding is \
+                 settled as fixed), or rebut the finding with disposition_finding to let it park \
+                 unchanged.",
+                &f.finding_uid[..8],
+                f.summary.replace('\n', " ")
+            ),
+            ("queued", None) => format!(
                 "queued — `{command}` is an outward publish waiting for the reviewer to read \
                  its body (posted to the channel; the reviewer is summoned). It parks for the \
                  user on its own after their turn, or is withdrawn if they file a blocking \
                  finding. Do not re-issue it."
             ),
-            "pending" => format!(
+            ("pending", _) => format!(
                 "pending — `{command}` is still awaiting the user's approval. Do not \
                  re-issue it; the outcome will arrive as an out-of-band message."
             ),
-            "answered" => {
+            ("answered", _) => {
                 let picked = row.picked_option.as_deref().unwrap_or("");
                 let approved = matches!(gate_verdict(picked), ViolationOutcome::Approved);
                 if let (true, Some(refusal)) = (approved, row.run_refusal.as_deref()) {
@@ -853,7 +874,7 @@ impl SignalingBridge {
             }
             // A withdrawn or superseded gate: say why when the row holds a
             // reason (a queued publish withdrawn by a finding or by its issuer).
-            other => match row.picked_option.as_deref().filter(|r| !r.is_empty()) {
+            (other, _) => match row.picked_option.as_deref().filter(|r| !r.is_empty()) {
                 Some(reason) => format!(
                     "{other} — `{command}` did not run (gate is no longer pending): {reason}."
                 ),
@@ -3874,6 +3895,12 @@ mod tests {
         let row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap();
         assert_eq!(row.status, "queued", "held for the revision, neither withdrawn nor parked");
         assert!(gate_opened_in(&drain(&mut ring)).is_empty());
+        // The executor is told (EYES cd098697): a row when the hold starts, and
+        // a gate_status that names the finding and both ways out.
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains(&format!("⏸ Queued publish {} is HELD for a revision by advisory finding {}", &gate_id[..8], &finding[..8]))), "{:?}", rows.iter().map(|m| &m.content).collect::<Vec<_>>());
+        let status = bridge.gate_status(&gate_id).await.unwrap();
+        assert!(status.starts_with("queued, HELD for a revision") && status.contains(&finding[..8]) && status.contains("rebut the finding"), "{status}");
         // A re-issue with the SAME body re-posts nothing and settles nothing.
         let (same, existing) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
         assert!(existing && same == gate_id);

@@ -103,6 +103,29 @@ impl SignalingBridge {
                 gate.as_deref(),
             )
             .await?;
+        // A REVISE (feedback #69; EYES cd098697): the executor is told once,
+        // in the channel, that its publish is held and the two ways out —
+        // `gate_status` says the same until it moves.
+        if let (FindingSeverity::Advisory, Some(gate)) = (severity, gate.as_deref().filter(|g| *g != "none")) {
+            let text = format!(
+                "⏸ Queued publish {} is HELD for a revision by advisory finding {} ({summary}). It will \
+                 not park for the user on its own. Two ways out: change the body file and re-issue the \
+                 identical command — the new body is re-posted for the reviewer and this finding is \
+                 settled as fixed — or rebut the finding with disposition_finding to let the publish \
+                 park unchanged.",
+                &gate[..gate.len().min(8)],
+                &uid[..8]
+            );
+            crate::core::post_system_notice(
+                &storage,
+                Some(self),
+                &session_id,
+                crate::storage::MessageKind::SystemNotice,
+                text,
+                None,
+            )
+            .await;
+        }
         let _ = self
             .event_tx
             .send(SignalingEvent::FindingsChanged { session_id });
