@@ -9,6 +9,23 @@
 //! tray row, or sets the session's awaiting-halt flag.
 
 use super::util::{gate_verdict, oob_resolution_body, outcome_from_picked, parse_tray_ts, user_words_of_answer};
+
+/// The longest one wait of a temporary halt's timer runs before it re-reads
+/// the wall clock and the halt slot (see `arm_temporary_halt`).
+pub const HALT_WAIT_CHUNK: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long the temporary-halt timer waits next, at wall-clock `now` for a
+/// halt due at `wake`: the time left, capped at [`HALT_WAIT_CHUNK`]; `None`
+/// once the instant has passed, which is the signal to fire. Pure, so the
+/// chunking that bounds the sleep-clock drift is pinned by a test rather
+/// than by closing a laptop lid.
+pub fn halt_wait_chunk(
+    now: chrono::DateTime<chrono::Utc>,
+    wake: chrono::DateTime<chrono::Utc>,
+) -> Option<std::time::Duration> {
+    let left = (wake - now).to_std().ok().filter(|d| !d.is_zero())?;
+    Some(left.min(HALT_WAIT_CHUNK))
+}
 use super::*;
 use crate::storage::MessageKind;
 use uuid::Uuid;
@@ -1900,11 +1917,19 @@ impl SignalingBridge {
         prior
     }
 
-    /// Spawn the timer for a temporary halt: sleep until `wake_at` (or fire now
+    /// Spawn the timer for a temporary halt: wait until `wake_at` (or fire now
     /// if it is past), then [`Self::fire_temporary_halt`]. Keyed by the instant,
     /// not the session — a later declaration writes a different instant, and
     /// the fire re-reads the slot and no-ops on a mismatch, so a replaced halt
     /// simply lets its old timer expire into nothing.
+    ///
+    /// The wait is in chunks of at most [`HALT_WAIT_CHUNK`], each recomputed
+    /// from the WALL clock (EYES S8/P13, s-079dec53): one `tokio::time::sleep`
+    /// for the whole delay runs on the monotonic clock, which stands still
+    /// while a Mac sleeps, so a 30-minute halt declared before the lid closed
+    /// woke 30 minutes after it reopened. Re-reading `Utc::now()` each chunk
+    /// bounds that drift to one chunk, and re-reading the slot each chunk lets
+    /// a replaced halt's timer end early instead of idling to its instant.
     fn arm_temporary_halt(self: &Arc<Self>, session_id: String, agent: String, wake_at: String) {
         let bridge = Arc::clone(self);
         let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
@@ -1912,12 +1937,23 @@ impl SignalingBridge {
             return;
         };
         handle.spawn(async move {
-            let delay = chrono::DateTime::parse_from_rfc3339(&wake_at)
+            let wake = chrono::DateTime::parse_from_rfc3339(&wake_at)
                 .ok()
-                .map(|t| t.with_timezone(&chrono::Utc))
-                .and_then(|t| (t - chrono::Utc::now()).to_std().ok())
-                .unwrap_or_default();
-            tokio::time::sleep(delay).await;
+                .map(|t| t.with_timezone(&chrono::Utc));
+            while let Some(chunk) = wake.and_then(|w| halt_wait_chunk(chrono::Utc::now(), w)) {
+                tokio::time::sleep(chunk).await;
+                // Still this halt? A replaced or released one ends its timer here.
+                let storage = bridge.storage.lock().await.clone();
+                if let Some(storage) = storage {
+                    match storage.session_halt_wake_at(&session_id).await {
+                        Ok(Some(current)) if current == wake_at => {}
+                        _ => {
+                            tracing::debug!(session_id, wake_at, "temporary halt replaced or released mid-wait; its timer ends");
+                            return;
+                        }
+                    }
+                }
+            }
             bridge.fire_temporary_halt(&session_id, &agent, &wake_at).await;
         });
     }
@@ -1975,7 +2011,9 @@ impl SignalingBridge {
                     session_id,
                     crate::storage::MessageKind::SystemNotice,
                     format!(
-                        "[System: {agent}'s temporary halt expired, but an approval gate has been                          pending for five minutes — the wake was skipped; the halt stands until                          the gate is answered.]"
+                        "[System: {agent}'s temporary halt expired, but an approval gate has been \
+                         pending for five minutes — the wake was skipped; the halt stands until \
+                         the gate is answered.]"
                     ),
                     None,
                 )
@@ -2942,6 +2980,28 @@ mod tests {
             }
         }
         assert!(cleared, "the UI is told the halt cleared");
+    }
+
+    /// The timer's wait is chunked on the WALL clock (EYES S8/P13): a halt an
+    /// hour out waits a minute at a time and recomputes from `Utc::now()`, so a
+    /// Mac that slept mid-halt wakes the session at most one chunk late rather
+    /// than the whole sleep late; the last chunk is the exact remainder; a
+    /// passed instant means fire now.
+    #[test]
+    fn a_temporary_halts_wait_is_chunked_on_the_wall_clock() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 10, 12, 8, 0, 0).unwrap();
+        let hour = now + chrono::Duration::hours(1);
+        assert_eq!(halt_wait_chunk(now, hour), Some(HALT_WAIT_CHUNK));
+        assert_eq!(halt_wait_chunk(now, now + chrono::Duration::seconds(90)), Some(HALT_WAIT_CHUNK));
+        assert_eq!(
+            halt_wait_chunk(now, now + chrono::Duration::seconds(25)),
+            Some(std::time::Duration::from_secs(25)),
+            "the last chunk is the remainder"
+        );
+        assert_eq!(halt_wait_chunk(now, now), None, "due now: fire");
+        assert_eq!(halt_wait_chunk(now, now - chrono::Duration::minutes(30)), None, "overdue (the Mac slept): fire");
+        assert_eq!(HALT_WAIT_CHUNK, std::time::Duration::from_secs(60));
     }
 
     #[tokio::test]

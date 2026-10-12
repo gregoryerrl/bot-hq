@@ -235,6 +235,14 @@ and in `docs/rebuild-archive/`.
   (`cl_index_search`, say) is never reported as a symbol missing from another
   project's code. The "code moved since written" section's lines no longer
   run together.
+- **A temporary halt wakes on time after the Mac sleeps.** Its timer used to
+  be one sleep for the whole delay on a clock that stands still while the
+  machine sleeps, so a 30-minute halt declared before the lid closed woke 30
+  minutes after it reopened. The timer now waits a minute at a time and
+  re-reads the wall clock, so a session wakes at most a minute late, and a
+  halt that was replaced or released ends its timer early. The row posted
+  when a wake is skipped behind an open approval gate no longer runs its
+  words together.
 - **A model the claude CLI does not know runs at the window the registry
   says.** For a model id that is not Claude's own (OpenRouter, DeepSeek, …)
   the CLI only ever used its own 200k default, whatever the model row's
