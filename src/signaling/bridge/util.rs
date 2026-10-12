@@ -576,8 +576,10 @@ pub(super) fn oob_resolution_body(
         // verdict line; round 7's A5 concern (repeating a long command into
         // the user-voice channel) loses to a channel that misrepresents what
         // ran.
+        // A LONG command (a script handed over as a file) is excerpted here
+        // too (EYES 63ec61dd): every participant reads this row.
         let full = if command.lines().count() > 1 {
-            format!("```\n{}\n```\n", command.trim_end())
+            format!("```\n{}\n```\n", command_excerpt(command.trim_end()))
         } else {
             String::new()
         };
@@ -596,6 +598,52 @@ pub(super) fn oob_resolution_body(
         "Tray answer {id8} — Q: {question}\nPicked: {picked}\n\
          {free_text_block}{stale_block}{mooting_block}"
     )
+}
+
+/// A command longer than this many lines, or than [`COMMAND_ECHO_MAX_BYTES`],
+/// is echoed as an excerpt wherever agents read it (EYES 63ec61dd): a 256 KiB
+/// script handed over with `command_path` echoed in full in the park reply,
+/// in every `gate_status` and in the answer row every participant reads cost
+/// about 64k tokens per participant per approval. The user's approval card
+/// keeps the full text — the excerpt names its size and sha256, which the
+/// reply and `gate_status` already carry, so what ran stays identifiable.
+pub(super) const COMMAND_ECHO_MAX_LINES: usize = 12;
+pub(super) const COMMAND_ECHO_MAX_BYTES: usize = 2_000;
+/// How many lines an excerpt keeps.
+const COMMAND_ECHO_HEAD_LINES: usize = 8;
+
+/// `command` as agents see it echoed: whole when short, else its first lines
+/// and a line naming what was left out, with the whole text's size and hash.
+pub(super) fn command_excerpt(command: &str) -> std::borrow::Cow<'_, str> {
+    let lines = command.lines().count();
+    if lines <= COMMAND_ECHO_MAX_LINES && command.len() <= COMMAND_ECHO_MAX_BYTES {
+        return std::borrow::Cow::Borrowed(command);
+    }
+    // The head: up to COMMAND_ECHO_HEAD_LINES lines within half the byte
+    // limit; a first line that alone exceeds it is cut on a char boundary.
+    let room = COMMAND_ECHO_MAX_BYTES / 2;
+    let mut head: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for line in command.lines().take(COMMAND_ECHO_HEAD_LINES) {
+        if used + line.len() > room {
+            if head.is_empty() {
+                let cut = crate::text::floor_char_boundary(line, room);
+                head.push(format!("{}…", &line[..cut]));
+            }
+            break;
+        }
+        used += line.len() + 1;
+        head.push(line.to_string());
+    }
+    let shown = head.len();
+    std::borrow::Cow::Owned(format!(
+        "{}\n… [bot-hq] {} more line{} not echoed ({} bytes in all; sha256 {}) — the full text is on the approval card",
+        head.join("\n"),
+        lines.saturating_sub(shown),
+        if lines.saturating_sub(shown) == 1 { "" } else { "s" },
+        command.len(),
+        super::action_gate::sha256_hex(command),
+    ))
 }
 
 /// The user's own words in a tray answer — what `session_user_words` records
@@ -632,6 +680,31 @@ pub(super) fn user_words_of_answer(choice_id: &str, question: &str, picked: &str
 
 #[cfg(test)]
 mod tests {
+    /// EYES 63ec61dd: a short command echoes whole; a long one (many lines or
+    /// many bytes) echoes as its first lines plus a line naming the rest, with
+    /// the whole text's size and hash, so an agent never pays for a 256 KiB
+    /// script three times over.
+    #[test]
+    fn a_long_command_is_echoed_as_an_excerpt_with_its_size_and_hash() {
+        use super::{command_excerpt, COMMAND_ECHO_MAX_BYTES, COMMAND_ECHO_MAX_LINES};
+        let short = "set -e\necho one\necho two";
+        assert_eq!(command_excerpt(short), short);
+        let twelve = (1..=COMMAND_ECHO_MAX_LINES).map(|i| format!("echo {i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(command_excerpt(&twelve), twelve, "at the line limit: whole");
+        let many = (1..=40).map(|i| format!("echo line {i}")).collect::<Vec<_>>().join("\n");
+        let out = command_excerpt(&many);
+        assert!(out.starts_with("echo line 1\necho line 2\n") && out.contains("echo line 8\n"), "{out}");
+        assert!(!out.contains("echo line 9"), "{out}");
+        assert!(out.contains("32 more lines not echoed") && out.contains(&format!("({} bytes in all; sha256 {})", many.len(), super::super::action_gate::sha256_hex(&many))), "{out}");
+        assert!(out.ends_with("the full text is on the approval card"), "{out}");
+        let wide = format!("echo {}\necho tail", "x".repeat(COMMAND_ECHO_MAX_BYTES + 10));
+        let out = command_excerpt(&wide);
+        assert!(out.contains("1 more line not echoed") && out.len() < wide.len(), "{}", out.len());
+        // The answer row carries the excerpt, not the whole script.
+        let body = super::oob_resolution_body("a1b2c3d4e5", "", &[], "Approve", true, None, Some(&many), &[]);
+        assert!(body.contains("Gate a1b2c3d4 approved: `echo line 1`") && body.contains("32 more lines not echoed") && !body.contains("echo line 40"), "{body}");
+    }
+
     /// The user's words of an answer: the pick with its question, the verdict
     /// with its command — a long question or command cut to its first line.
     #[test]

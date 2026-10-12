@@ -3015,7 +3015,9 @@ mod tests {
     /// jumps past the instant (the Mac slept), it fires within one chunk of
     /// paused time rather than two hours later; a slot that stops holding this
     /// halt ends it with `false`; a storage read that fails keeps it waiting.
-    /// Putting back the single `sleep(delay)` turns the first assertion red.
+    /// A single `sleep(delay)` put back INSIDE `wait_until_halt_instant` turns
+    /// the first assertion red; that `arm_temporary_halt` calls the function
+    /// is read in the code, not pinned here.
     /// (Time is paused AFTER the storage opens: an opening pool waits on a
     /// blocking thread, and paused time auto-advances past its acquire
     /// timeout while nothing else runs.)

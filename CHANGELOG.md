@@ -75,7 +75,11 @@ and in `docs/rebuild-archive/`.
   file, its size and its sha256, and `gate_status` repeats the hash on every
   gate so what was parked can be checked against the file. `timeout_secs`
   (1–600) bounds an approved command's run; the default stays 120 s, and the
-  running mark and `gate_status` say the bound.
+  running mark and `gate_status` say the bound. A long command is echoed to the
+  agents as its first lines plus its size and hash — in the reply, in
+  `gate_status` and in the answer row — while your approval card keeps the
+  full text, so a 256 KiB script no longer costs every participant its whole
+  length three times over.
 - **What you said comes back word for word after a compaction.** Beside the
   handoff document, bot-hq now puts back everything you typed, staged or
   answered in the tray since that document was last written (the whole

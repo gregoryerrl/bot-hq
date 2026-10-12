@@ -96,8 +96,11 @@ pub fn validate_run_timeout(secs: u64) -> Result<u64> {
 }
 
 /// The lines a reply adds for a request's source and bound: where the text
-/// came from (with its size and hash) and how long the run may take.
-fn request_extras(req: &GateRequest) -> String {
+/// came from (with its size and hash) and how long the run may take. `bound`
+/// is the bound that STANDS for the gate the reply is about — the request's
+/// for a fresh park, the existing gate's for an identical re-issue (EYES
+/// 3096c6f4: the reply said "10 s" while the gate kept 300).
+fn request_extras(req: &GateRequest, bound: Bound) -> String {
     let mut out = String::new();
     if let Some(s) = &req.source {
         out.push_str(&format!(
@@ -106,10 +109,32 @@ fn request_extras(req: &GateRequest) -> String {
             s.path, s.bytes, s.sha256
         ));
     }
-    if let Some(secs) = req.run_timeout_secs {
-        out.push_str(&format!("\nThe run is bounded at {secs} s."));
+    match bound {
+        Bound::Requested(secs) => out.push_str(&format!("\nThe run is bounded at {secs} s.")),
+        Bound::Existing(Some(secs)) => out.push_str(&format!(
+            "\nThe existing gate keeps its bound of {secs} s; the {} s asked for now does not apply.",
+            req.run_timeout_secs.map(|s| s.to_string()).unwrap_or_default()
+        )),
+        Bound::Existing(None) => out.push_str(&format!(
+            "\nThe existing gate keeps the default bound of {} s; the {} s asked for now does not apply.",
+            tool_gate::DEFAULT_TIMEOUT.as_secs(),
+            req.run_timeout_secs.map(|s| s.to_string()).unwrap_or_default()
+        )),
+        Bound::Default => {}
     }
     out
+}
+
+/// Which bound a reply speaks of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    /// A fresh gate, or a direct run, with the agent's bound.
+    Requested(u64),
+    /// An identical re-issue: the existing gate's bound stands (its row's
+    /// value, `None` = the default) and the request's is ignored.
+    Existing(Option<u64>),
+    /// No bound asked for.
+    Default,
 }
 
 impl SignalingBridge {
@@ -153,7 +178,7 @@ impl SignalingBridge {
     pub async fn action_gate_request(&self, session_id: String, agent: String, req: GateRequest) -> Result<String> {
         let command = req.command.clone();
         let approve_after = req.approve_after.clone();
-        let extras = request_extras(&req);
+        let requested = req.run_timeout_secs.map_or(Bound::Default, Bound::Requested);
         // The zsh `$var:x` trap (feedback #96) is refused before anything is
         // parked or run (s-d43b3630 plan review, point 11): a trapped command
         // parked for approval would spend the user's Approve and then run
@@ -181,8 +206,8 @@ impl SignalingBridge {
             let outcome = self
                 .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
                 .await?;
-            self.record_run_timeout(&outcome, req.run_timeout_secs).await;
-            return Ok(park_outcome_text(&outcome, &command) + &extras);
+            let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
+            return Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound));
         }
         // Two-tier resolve (session snapshot → global fallback) — previously
         // this read only the global list, so a gear-tab session override was
@@ -198,36 +223,50 @@ impl SignalingBridge {
             None | Some(GateMode::AutoAllow) => self
                 .execute_gated_with(&session_id, &command, bound, &[])
                 .await
-                .map(|run| run.text + &extras),
+                .map(|run| run.text + &request_extras(&req, requested)),
             Some(GateMode::Gate) => {
                 let outcome = self
                     .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
                     .await?;
-                self.record_run_timeout(&outcome, req.run_timeout_secs).await;
-                Ok(park_outcome_text(&outcome, &command) + &extras)
+                let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
+                Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound))
             }
         }
     }
 
     /// Record the agent's bound on the gate the park produced (0093), so the
-    /// run at approval time honours it however long the user takes. A re-park
-    /// of an identical command returns the EXISTING gate, whose bound stands.
-    async fn record_run_timeout(&self, outcome: &ParkOutcome, secs: Option<u64>) {
-        let Some(secs) = secs else { return };
+    /// run at approval time honours it however long the user takes, and say
+    /// which bound stands. A re-park of an identical command returns the
+    /// EXISTING gate, whose bound stands whatever this request asked. Written
+    /// right after the park, as `exec_kind` is for a prod_read: an Approve in
+    /// that fraction of a second would run under the default bound.
+    async fn record_run_timeout(&self, outcome: &ParkOutcome, secs: Option<u64>) -> Bound {
+        let Some(secs) = secs else { return Bound::Default };
         let (gate_id, existing) = match outcome {
             ParkOutcome::Parked { gate_id, existing, .. } | ParkOutcome::Queued { gate_id, existing } => {
                 (gate_id, *existing)
             }
         };
-        if existing {
-            return;
-        }
         let storage = self.storage.lock().await.clone();
+        if existing {
+            let standing = match storage {
+                Some(storage) => storage
+                    .get_tray_entry(gate_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|r| r.run_timeout_secs)
+                    .and_then(|s| u64::try_from(s).ok()),
+                None => None,
+            };
+            return Bound::Existing(standing);
+        }
         if let Some(storage) = storage {
             if let Err(e) = storage.set_tray_run_timeout_secs(gate_id, secs).await {
                 tracing::warn!(gate_id = %gate_id, error = %e, "the gate's run bound was not recorded");
             }
         }
+        Bound::Requested(secs)
     }
 
     /// The project's listed data read `command` runs, if any (group K) — read
@@ -630,21 +669,23 @@ impl SignalingBridge {
         // `ask_user_choice_inner` sets `command_text` for that kind alone. A
         // parked `request_approval` (push_gate / per_action) has none, so the
         // command-shaped wording would assert an execution that never happened.
-        let Some(command) = row.command_text.as_deref() else {
+        let Some(full_command) = row.command_text.as_deref() else {
             return Ok(Self::approval_status_text(&row));
         };
         // The parked text's hash and bound ride every answer (feedback #82 /
         // #66b): an agent that handed the command over as a file, or a
         // reviewer, compares the hash with the file's instead of trusting that
-        // the right text was parked.
+        // the right text was parked. The hash is of the WHOLE text; the echo
+        // below is an excerpt when the command is long (EYES 63ec61dd).
         let footer = format!(
             "\n(command sha256 {}{})",
-            sha256_hex(command),
+            sha256_hex(full_command),
             match row.run_timeout_secs {
                 Some(secs) => format!("; run bounded at {secs} s"),
                 None => String::new(),
             }
         );
+        let command = &*super::util::command_excerpt(full_command);
         Ok(match row.status.as_str() {
             "queued" => format!(
                 "queued — `{command}` is an outward publish waiting for the reviewer to read \
@@ -960,6 +1001,7 @@ pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> 
     } else {
         "action_gate: QUEUED for the reviewer"
     };
+    let command = super::util::command_excerpt(command);
     format!(
         "{lead} (gate_id: {gate_id}): `{command}`.\n\
          This is an OUTWARD publish and the reviewer has not read its content yet. \
@@ -1660,6 +1702,7 @@ fn parked_gate_text(
     // precondition, and the agent must see that the guard was not watching)
     // or a COVERAGE note naming the rows the reviewer already received.
     let note_line = note.map(|n| format!("\n{n}")).unwrap_or_default();
+    let command = super::util::command_excerpt(command);
     format!(
         "{lead} (gate_id: {gate_id}).{note_line}\n\
          `{command}` runs when the user approves; its output arrives as an \
@@ -2000,6 +2043,31 @@ mod tests {
             .unwrap();
         assert!(again.contains("ALREADY"), "{again}");
         assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().run_timeout_secs, Some(300));
+        // …and the reply says so, rather than echoing the bound it ignored
+        // (EYES 3096c6f4).
+        assert!(again.contains("The existing gate keeps its bound of 300 s; the 10 s asked for now does not apply."), "{again}");
+        assert!(!again.contains("bounded at 10 s"), "{again}");
+        // A long script handed over as a file is echoed as an excerpt in the
+        // reply and in gate_status (EYES 63ec61dd); the hash is of the whole.
+        let long = (1..=60).map(|i| format!("echo step {i}")).collect::<Vec<_>>().join("\n");
+        let script2 = repo.path().join("long.sh");
+        std::fs::write(&script2, &long).unwrap();
+        let (command2, source2) = command_from_file(script2.to_str().unwrap()).unwrap();
+        let reply = bridge
+            .action_gate_request(
+                "s1".into(),
+                "hands".into(),
+                GateRequest { command: command2, source: Some(source2.clone()), require_approval: true, ..GateRequest::default() },
+            )
+            .await
+            .unwrap();
+        assert!(reply.contains("echo step 1\n") && reply.contains("52 more lines not echoed") && !reply.contains("echo step 60"), "{reply}");
+        assert!(reply.contains(&format!("sha256 {}", source2.sha256)), "{reply}");
+        let gate2 = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string();
+        let status = bridge.gate_status(&gate2).await.unwrap();
+        assert!(status.contains("52 more lines not echoed") && !status.contains("echo step 60"), "{status}");
+        assert!(status.ends_with(&format!("(command sha256 {})", source2.sha256)), "the hash is of the whole text: {status}");
+        assert_eq!(storage.get_tray_entry(&gate2).await.unwrap().unwrap().command_text.as_deref(), Some(long.as_str()), "the parked text is whole");
     }
 
     /// Feedback #66b: an approved gate runs under the bound the agent asked
