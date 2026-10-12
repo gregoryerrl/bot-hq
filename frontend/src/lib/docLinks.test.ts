@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { docSlugsIn } from "./docLinks";
+import { docSlugsIn, docTabTarget } from "./docLinks";
 
 describe("docSlugsIn", () => {
   const slugs = ["key-questions", "plan", "decisions-needed", "eyes-handoff"];
@@ -20,5 +20,20 @@ describe("docSlugsIn", () => {
 
   it("matches a phase doc's slug too", () => {
     expect(docSlugsIn("The `plan` doc has B0–B5.", slugs)).toEqual(["plan"]);
+  });
+});
+
+describe("docTabTarget", () => {
+  const docs = [
+    { slug: "plan", phase: "plan" },
+    { slug: "plan-eyes", phase: "plan" },
+    { slug: "key-questions", phase: null },
+  ];
+
+  it("opens a phase doc and the reviewer's notes in the phase tab, a custom doc in its own", () => {
+    expect(docTabTarget("plan", docs)).toEqual({ phase: "plan" });
+    expect(docTabTarget("plan-eyes", docs)).toEqual({ phase: "plan" });
+    expect(docTabTarget("key-questions", docs)).toEqual({ custom: "key-questions" });
+    expect(docTabTarget("nope", docs)).toBeNull();
   });
 });

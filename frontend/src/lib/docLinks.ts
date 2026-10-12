@@ -13,3 +13,17 @@ export function docSlugsIn(prompt: string, slugs: readonly string[]): string[] {
   }
   return out;
 }
+
+/** Where a doc link opens (EYES 13f5caad): a doc with a phase tag — the
+ *  phase doc itself (`plan`) or the reviewer's notes (`plan-eyes`) — lives in
+ *  that phase's tab, and ONLY an untagged doc is a custom tab. Sending a
+ *  tagged slug to the custom tab opened a blank pane. `null` for a slug that
+ *  is no live doc. */
+export function docTabTarget(
+  slug: string,
+  docs: readonly { slug: string; phase: string | null }[],
+): { phase: string } | { custom: string } | null {
+  const doc = docs.find((d) => d.slug === slug);
+  if (!doc) return null;
+  return doc.phase ? { phase: doc.phase } : { custom: slug };
+}

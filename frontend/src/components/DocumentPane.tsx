@@ -5,8 +5,7 @@ import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
-import { docSlugsIn } from "../lib/docLinks";
-import { PHASE_NAMES } from "../lib/phase";
+import { docSlugsIn, docTabTarget } from "../lib/docLinks";
 import { isTrayItem } from "./HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
@@ -334,12 +333,17 @@ export const DocumentPane = memo(function DocumentPane({
             // links to that doc's tab — a phase doc's or a custom one's.
             docSlugs={allDocs.filter((d) => !isArchivedVersion(d.slug)).map((d) => d.slug)}
             onOpenDoc={(slug) => {
+              // A phase-tagged doc (the phase doc or the reviewer's notes)
+              // lives in its phase's tab; only an untagged one is a custom tab
+              // (EYES 13f5caad: `plan-eyes` sent to the custom tab was blank).
+              const target = docTabTarget(slug, allDocs);
+              if (!target) return;
               setShowTray(false);
-              if ((PHASE_NAMES as readonly string[]).includes(slug)) {
+              if ("phase" in target) {
                 setCustomSlug(null);
-                setActivePhase(slug as Phase);
+                setActivePhase(target.phase as Phase);
               } else {
-                setCustomSlug(slug);
+                setCustomSlug(target.custom);
               }
             }}
           />
