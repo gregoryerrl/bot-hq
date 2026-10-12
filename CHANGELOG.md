@@ -249,6 +249,14 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The reviewer reads the close recap before you see the close card.** An
+  agent's `close_session` used to park the card for you at once, so an
+  advisory the reviewer would have raised, or a correction it had not relayed
+  yet, raced your Approve. With a reviewer in the session the close is now
+  queued for its read first — the recap is posted to it and it is summoned —
+  and the card parks for you only after the reviewer's turn ends with the
+  recap read; a blocking finding naming the close keeps the session open
+  instead. A session with no reviewer parks the card as before.
 - **A gate id in the chat shows the gate's state beside it.** An agent's
   "waiting on your approval of `236473a7`" used to stand after you had already
   approved it. An 8-character gate id quoted in a chat message now carries a

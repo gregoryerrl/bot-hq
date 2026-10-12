@@ -1790,7 +1790,7 @@ impl SignalingBridge {
 
     /// The reviewer a queued outward publish waits on: the first roster
     /// participant holding the finding capability who is not the executor.
-    async fn queued_reviewer(
+    pub(super) async fn queued_reviewer(
         &self,
         session_id: &str,
         agent: &str,
@@ -1852,17 +1852,20 @@ impl SignalingBridge {
             if findings.iter().any(|f| revises_queued_gate(f, &row)) {
                 continue;
             }
-            self.promote_queued_row(
-                &storage,
-                session_id,
-                &row,
+            let notice = if row.kind == crate::storage::QuestionKind::Close.as_str() {
+                format!(
+                    "✅ The close card {} is now PARKED for the user (the reviewer read the recap and \
+                     filed nothing blocking).",
+                    row.choice_id
+                )
+            } else {
                 format!(
                     "✅ Queued outward publish {} is now PARKED for the user's approval (the \
                      reviewer read it and filed nothing blocking): `{command}`",
                     row.choice_id
-                ),
-            )
-            .await;
+                )
+            };
+            self.promote_queued_row(&storage, session_id, &row, notice).await;
         }
     }
 
@@ -1932,18 +1935,31 @@ impl SignalingBridge {
         let command = row.command_text.clone().unwrap_or_default();
         self.set_session_awaiting(session_id, &row.agent, false).await;
         self.notify_ring_gate(session_id, &row.choice_id, true).await;
+        // A queued CLOSE card (feedback #73 (2)) promotes with the close card's
+        // own approval context, so the UI renders it as the close it is.
+        let is_close = row.kind == crate::storage::QuestionKind::Close.as_str();
+        let approval = if is_close {
+            ApprovalContext {
+                kind: ViolationKind::GenericApproval,
+                action: "close_session".to_string(),
+                detail: Some("close-card".to_string()),
+                command: None,
+            }
+        } else {
+            ApprovalContext {
+                kind: ViolationKind::ToolBlocklist,
+                action: command,
+                detail: Some("tool-gate".to_string()),
+                command: None,
+            }
+        };
         let _ = self.event_tx.send(SignalingEvent::PendingChoice(PendingChoice {
             choice_id: row.choice_id.clone(),
             session_id: session_id.to_string(),
             agent: row.agent.clone(),
             question: row.prompt.clone(),
             options: vec!["Approve".to_string(), "Reject".to_string()],
-            approval: Some(ApprovalContext {
-                kind: ViolationKind::ToolBlocklist,
-                action: command,
-                detail: Some("tool-gate".to_string()),
-                command: None,
-            }),
+            approval: Some(approval),
         }));
         let _ = crate::core::post_system_notice(
             storage,
@@ -3869,6 +3885,59 @@ mod tests {
     /// not READ (cursor short of it) leaves the row queued; once the reviewer's
     /// cursor passes it, settlement promotes it to the user's card with the
     /// latch and the awaiting flag a fresh park has.
+    /// Feedback #73 (2), the user's pick: with a reviewer in the session an
+    /// agent's close is QUEUED for the reviewer's read — the recap posted,
+    /// the reviewer summoned — and parks for the user only after the reviewer's
+    /// turn ends with the recap read; a blocking finding naming it withdraws
+    /// it instead. A second close while one is queued returns the same card.
+    #[tokio::test]
+    async fn an_agents_close_is_read_by_the_reviewer_before_it_parks_for_the_user() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let mut ring = ring_for(&bridge).await;
+        drain(&mut ring);
+        let card = bridge
+            .queue_close_card("s1", "hands", "CL learnings delta: written this session.", "nothing open")
+            .await
+            .unwrap()
+            .expect("a reviewer exists: queued");
+        let row = storage.get_tray_entry(&card).await.unwrap().unwrap();
+        assert_eq!((row.status.as_str(), row.kind.as_str()), ("queued", "close"));
+        assert!(row.command_text.is_none());
+        let body_row = row.body_row_id.expect("the recap is the body row");
+        let posted = message_by_id(&storage, body_row).await;
+        assert!(posted.content.contains("📋 Close recap queued for review") && posted.content.contains("nothing open"), "{}", posted.content);
+        assert_eq!(summons_in(&drain(&mut ring)), vec![eyes]);
+        assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty(), "nothing parked for the user yet");
+        // A second close while queued: the same card.
+        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), Some(card.clone()));
+        // Not read: stays queued. Read: parks for the user as a close card.
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&card).await.unwrap().unwrap().status, "queued");
+        storage.commit_delivery(eyes, &[(body_row, None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        let row = storage.get_tray_entry(&card).await.unwrap().unwrap();
+        assert_eq!((row.status.as_str(), row.kind.as_str()), ("pending", "close"));
+        assert_eq!(gate_opened_in(&drain(&mut ring)), vec![card.clone()]);
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("The close card") && m.content.contains("is now PARKED for the user")), "{:?}", rows.last().map(|m| &m.content));
+        // While a close card is pending, a further close returns it too.
+        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), Some(card.clone()));
+        bridge.resolve_choice(&card, "Reject".into()).await.unwrap();
+        // A queued close a blocking finding names is withdrawn: the session keeps working.
+        let card2 = bridge.queue_close_card("s1", "hands", "second try", "").await.unwrap().unwrap();
+        let body2 = storage.get_tray_entry(&card2).await.unwrap().unwrap().body_row_id.unwrap();
+        storage.commit_delivery(eyes, &[(body2, None)]).await.unwrap();
+        bridge
+            .eyes_flag_for_gate("s1".into(), "eyes".into(), crate::storage::FindingSeverity::Blocking, "the plan doc is not folded yet".into(), None, Some(card2.clone()))
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&card2).await.unwrap().unwrap().status, "withdrawn");
+        assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
+    }
+
     /// Feedback #69: an ADVISORY finding that names a queued publish is a
     /// "revise": the gate stays queued (not withdrawn, not parked) after the
     /// reviewer's read; the executor edits the body and re-issues the same

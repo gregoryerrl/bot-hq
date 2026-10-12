@@ -1720,6 +1720,78 @@ impl SignalingBridge {
         CloseRecap { card: card.join("\n"), detail: detail.join("\n\n") }
     }
 
+    /// Queue an AGENT's close for the REVIEWER's read before the user's card
+    /// (feedback #73 (2), the user's pick): the recap — the card text and its
+    /// detail — is posted as the body row the reviewer must read, the reviewer
+    /// is summoned, and the row sits QUEUED (kind `close`) until the reviewer's
+    /// turn ends: `settle_queued_outward` then parks it for the user, or a
+    /// blocking finding naming it withdraws it and the session keeps working.
+    /// `None` when the agent has no reviewer in the session (a solo roster): the
+    /// caller parks the card directly, as before. An existing queued or
+    /// pending close card is returned instead of a second one.
+    pub async fn queue_close_card(
+        &self,
+        session_id: &str,
+        agent: &str,
+        recap_card: &str,
+        recap_detail: &str,
+    ) -> Result<Option<String>> {
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+        let Some(reviewer) = self.queued_reviewer(session_id, agent).await else {
+            return Ok(None);
+        };
+        let close_kind = crate::storage::QuestionKind::Close.as_str();
+        if let Some(existing) = storage
+            .queued_gates_for_session(session_id)
+            .await?
+            .into_iter()
+            .chain(storage.tray_entries_for_session(session_id).await?.into_iter().filter(|r| r.status == "pending"))
+            .find(|r| r.kind == close_kind)
+        {
+            return Ok(Some(existing.choice_id));
+        }
+        let choice_id = uuid::Uuid::new_v4().to_string();
+        let question = crate::policy::secret_scan::redact_string(format!(
+            "Close this session? {agent} says the work is done.\n\n{recap_card}\n\n\
+             Approve closes it (the close-out epilogue runs as usual); Reject keeps it \
+             open — anything you type with the Reject is the next instruction."
+        ));
+        storage.insert_queued_close(session_id, &choice_id, agent, &question).await?;
+        let detail = if recap_detail.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n\nDetail behind the recap:\n{recap_detail}")
+        };
+        let notice = format!(
+            "📋 Close recap queued for review (gate {choice_id}) — {agent} asks to close the \
+             session:\n{recap_card}{detail}\n\n[Reviewer: read the recap on this turn — what would \
+             archive, what is still open. To keep the session open, file a `blocking` finding with \
+             gate_id \"{choice_id}\" saying what must happen first; anything else lets the close \
+             card park for the user after your turn.]"
+        );
+        let Some(row) = crate::core::post_system_notice(
+            &storage,
+            Some(self),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            notice,
+            None,
+        )
+        .await
+        else {
+            let _ = storage.withdraw_queued_gate(&choice_id, "recap row could not be posted").await;
+            anyhow::bail!("the close could not be queued: the recap row was not posted");
+        };
+        storage.set_tray_body_row(&choice_id, row.message_id()).await?;
+        self.summon_participant(session_id, reviewer.id).await;
+        Ok(Some(choice_id))
+    }
+
     /// Park an AGENT's close for the user's word (0081): a `close` card in the
     /// gate slot — canonical Approve/Reject, the ring latched while it is up.
     /// Approve closes the session through the ordinary `SessionCloseRequest`;

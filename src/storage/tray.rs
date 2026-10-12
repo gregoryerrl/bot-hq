@@ -209,6 +209,31 @@ impl Storage {
         Ok(ids)
     }
 
+    /// Insert an agent's CLOSE card as a QUEUED row (feedback #73 (2)): the
+    /// reviewer reads the recap before the user sees the card. Kind `close`,
+    /// no command; promoted or withdrawn by the same settlement as a queued
+    /// publish.
+    pub async fn insert_queued_close(&self, session_id: &str, choice_id: &str, agent: &str, prompt: &str) -> Result<i64> {
+        let prompt = crate::policy::secret_scan::redact(prompt);
+        let res = sqlx::query(
+            "INSERT INTO session_tray \
+                (session_id, choice_id, agent, kind, prompt, options_json, command_text, asked_at, status) \
+             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+        )
+        .bind(session_id)
+        .bind(choice_id)
+        .bind(agent)
+        .bind(QuestionKind::Close.as_str())
+        .bind(prompt.as_ref())
+        .bind(GATE_OPTIONS_JSON)
+        .bind(now_utc())
+        .bind(TRAY_STATUS_QUEUED)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("queueing close card {choice_id} for session {session_id}"))?;
+        Ok(res.last_insert_rowid())
+    }
+
     /// Read the RENDERABLE tray entries for a session, ordered oldest-first —
     /// every status in [`TRAY_VISIBLE_STATUSES`], never `queued`. Use for the
     /// in-chat tray (filter to status=pending in the UI) and the dashboard

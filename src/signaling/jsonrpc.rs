@@ -1158,15 +1158,33 @@ async fn call_tool(
                 ));
             }
             let recap = bridge.close_recap(&caller.session_id).await;
-            let card = bridge
-                .park_close_card(&caller.session_id, &caller.agent, &recap.card)
-                .await
-                .map_err(internal_err_no_prefix)?;
             let detail = if recap.detail.is_empty() {
                 String::new()
             } else {
                 format!("\n\nDetail behind the recap (yours to act on while the card is up):\n{}", recap.detail)
             };
+            // Feedback #73 (2), the user's pick: the reviewer reads the recap
+            // BEFORE the user sees the card. With a reviewer in the session the
+            // close is queued for its read and parks after its turn; without
+            // one it parks directly, as before.
+            if let Some(card) = bridge
+                .queue_close_card(&caller.session_id, &caller.agent, &recap.card, &recap.detail)
+                .await
+                .map_err(internal_err_no_prefix)?
+            {
+                return Ok(ToolCallResult::text(format!(
+                    "close QUEUED for the reviewer's read (card {card}) — the recap is posted for \
+                     them; after their turn the card parks for the user's approval on its own, or a \
+                     blocking finding naming it keeps the session open. The session closes on the \
+                     user's Approve; on Reject a system row tells you to keep working. No further \
+                     close_session call is needed. Recap on the card:\n{}{detail}",
+                    recap.card
+                )));
+            }
+            let card = bridge
+                .park_close_card(&caller.session_id, &caller.agent, &recap.card)
+                .await
+                .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(format!(
                 "close PARKED for the user's approval (card {card}) — the session closes on \
                  their Approve; on Reject a system row tells you to keep working, and their \
