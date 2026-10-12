@@ -32,6 +32,7 @@ import { PHASE_NAMES } from "../lib/phase";
 import { SessionFindingsBanner } from "../components/SessionFindingsBanner";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
 import { cn } from "../lib/cn";
+import { GateChipsContext, gateChipsOf } from "../lib/gateChips";
 import {
   ATTENTION_IDLE_LABEL,
   ATTENTION_IDLE_TOOLTIP,
@@ -241,6 +242,7 @@ export function SessionView() {
     () => trayRows.filter((r) => r.status === "pending" && isApproval(r)),
     [trayRows],
   );
+  const gateChips = useMemo(() => gateChipsOf(trayRows), [trayRows]);
   // rc3 D34: tray picks staged to travel with the next Send. Pruned against
   // the pending rows at Send time — a row answered or superseded elsewhere
   // must not be re-answered by a stale stage.
@@ -944,7 +946,11 @@ export function SessionView() {
           {/* Chat history + live batches — virtualized, and a render boundary:
               per-batch re-renders stop inside ChatPane instead of re-rendering
               this whole view (header, subtabs, DocumentPane). */}
-          <ChatPane sessionId={sessionId} onViewFile={onViewFile} />
+          {/* Feedback #61: an 8-hex token in a chat message that resolves to a
+              gate of THIS session renders with the gate's state beside it. */}
+          <GateChipsContext.Provider value={gateChips}>
+            <ChatPane sessionId={sessionId} onViewFile={onViewFile} />
+          </GateChipsContext.Provider>
 
           <div className="border-t border-outline-variant">
             {/* Round 10 (B4): a closed session's history is read-only — the

@@ -12,6 +12,9 @@ export type TrayRow = {
   prompt: string;
   options: string[];
   status: string;
+  /** The user's answer on an answered row (`Approve`, or their words); absent
+   *  on the fixtures that never answer. Read by the gate chips (feedback #61). */
+  picked_option?: string | null;
   asked_at: string;
   /** The gated command awaiting approval; null for an ordinary question. This
    *  is the discriminator between "somebody is blocked on this RIGHT NOW" and

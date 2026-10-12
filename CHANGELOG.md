@@ -249,6 +249,13 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A gate id in the chat shows the gate's state beside it.** An agent's
+  "waiting on your approval of `236473a7`" used to stand after you had already
+  approved it. An 8-character gate id quoted in a chat message now carries a
+  small chip — pending, approved, rejected or withdrawn — read from this
+  session's gates, so a stale status line is contradicted where it is read.
+  Only a token that is one of this session's gates gets a chip; a short commit
+  sha, which shares the shape, does not.
 - **A tray question that names a session document links to it.** When an
   agent parks a question and writes the document's name in backticks
   ("Approve the key questions? They are in `key-questions`"), the tray card

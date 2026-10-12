@@ -1,7 +1,8 @@
-import { memo } from "react";
+import { memo, useContext } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "../lib/cn";
+import { GateChipsContext, looksLikeGateId } from "../lib/gateChips";
 
 interface MarkdownProps {
   /** Raw markdown source to render. */
@@ -16,6 +17,39 @@ interface MarkdownProps {
  * identical markdown — GFM tables, task lists, autolinks; code blocks get a
  * contained scroll; links open in a new tab.
  */
+/** Inline code, with a gate-state chip when the text is an 8-hex token that
+ *  resolves to a gate of the session being rendered (feedback #61): "waiting
+ *  on `236473a7`" reads as stale right where it is written once the gate has
+ *  been approved. Tokens that resolve to nothing — a short git sha — get no
+ *  chip (EYES P9). */
+function InlineCode({ children }: { children: React.ReactNode }) {
+  const chips = useContext(GateChipsContext);
+  const text = typeof children === "string" ? children : Array.isArray(children) && children.every((c) => typeof c === "string") ? children.join("") : null;
+  const chip = text && looksLikeGateId(text) ? chips.get(text.trim().toLowerCase()) : undefined;
+  return (
+    <>
+      <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.78rem] text-on-surface">
+        {children}
+      </code>
+      {chip && (
+        <span
+          data-testid="gate-chip"
+          title={`gate ${chip.choiceId}: ${chip.state}`}
+          className={cn(
+            "ml-1 rounded px-1 py-0.5 align-middle font-label-caps text-label-caps",
+            chip.state === "approved" && "bg-primary/15 text-primary",
+            chip.state === "pending" && "bg-tertiary-container/40 text-on-surface",
+            chip.state === "rejected" && "bg-error-container/40 text-on-error-container",
+            chip.state === "withdrawn" && "bg-surface-container-high text-on-surface-variant",
+          )}
+        >
+          {chip.state}
+        </span>
+      )}
+    </>
+  );
+}
+
 export const Markdown = memo(function Markdown({
   children,
   className,
@@ -50,11 +84,7 @@ const markdownComponents: Components = {
         </pre>
       );
     }
-    return (
-      <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.78rem] text-on-surface">
-        {children}
-      </code>
-    );
+    return <InlineCode>{children}</InlineCode>;
   },
   pre: ({ children }) => <>{children}</>,
   a: ({ href, children }) => (
