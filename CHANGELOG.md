@@ -249,6 +249,15 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The reviewer can ask for a revision of a queued publish without blocking
+  it.** An advisory finding that names a queued outward publish now holds it
+  queued — not withdrawn, not parked for you — until the executor changes the
+  body and re-issues the same command; the new body is re-posted for the
+  reviewer's read, the advisory is settled as fixed with that on the record,
+  and the publish parks for you once read. One approval publishes the
+  corrected text instead of a publish and a second gated edit; blocking
+  findings stay reserved for real defects. A re-issue with the body unchanged
+  re-posts nothing.
 - **A gated command that runs a script approves the script as it is, not the
   path.** `bash /tmp/check.sh` used to show you one line and run whatever the
   file held when you approved. The scripts a command runs (`bash X`, `sh X`,

@@ -480,6 +480,13 @@ impl SignalingBridge {
             let storage = self.storage.lock().await.clone();
             if let Some(storage) = storage {
                 if let Ok(Some(existing)) = storage.queued_gate_for_command(session_id, command).await {
+                    // The identical command is already queued: a re-issue with
+                    // a changed body is the revision step of feedback #69
+                    // (re-posted for the reviewer, the advisory settled); with
+                    // the body unchanged this is the plain dedupe.
+                    if let Some(reviewer) = self.queued_reviewer(session_id, agent).await {
+                        self.repost_revised_body(&storage, session_id, agent, &existing, command, reviewer.id).await;
+                    }
                     return Ok(ParkOutcome::Queued { gate_id: existing, existing: true });
                 }
             }
@@ -1196,7 +1203,9 @@ impl ParkOutcome {
 /// collided with "every stop declares itself" and produced the #32 deadlock.
 pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> String {
     let lead = if existing {
-        "action_gate: an identical outward command is ALREADY queued for review"
+        "action_gate: an identical outward command is ALREADY queued for review — if its body \
+         files changed since, the new body was just re-posted for the reviewer and the advisory \
+         that asked for the revision is settled; if not, nothing was re-posted"
     } else {
         "action_gate: QUEUED for the reviewer"
     };
@@ -1588,6 +1597,12 @@ impl SignalingBridge {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
         if let Some(existing) = storage.queued_gate_for_command(session_id, command).await? {
+            // A re-issue of a queued command with a CHANGED body is a revision
+            // (feedback #69): the body is re-hashed and re-posted for the
+            // reviewer's read, the advisory findings that asked for the
+            // revision are settled as fixed, and the reviewer is summoned
+            // again. With the body unchanged it is the plain dedupe.
+            self.repost_revised_body(&storage, session_id, agent, &existing, command, reviewer_id).await;
             return Ok((existing, true));
         }
         let gate_id = uuid::Uuid::new_v4().to_string();
@@ -1657,6 +1672,72 @@ impl SignalingBridge {
         storage.set_tray_body_row(&gate_id, row.message_id()).await?;
         self.summon_participant(session_id, reviewer_id).await;
         Ok((gate_id, false))
+    }
+
+    /// The revision step of feedback #69: when the body files of a QUEUED
+    /// command have changed since its body was posted, re-record the digest,
+    /// post the new body as a fresh row the queue points at, settle every open
+    /// advisory finding that named the gate (`fixed`, by the re-issuing
+    /// agent, with the reason on the record), and summon the reviewer.
+    /// Nothing happens when the body is unchanged or has no files.
+    async fn repost_revised_body(
+        &self,
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        agent: &str,
+        gate_id: &str,
+        command: &str,
+        reviewer_id: i64,
+    ) {
+        let Ok(Some(row)) = storage.get_tray_entry(gate_id).await else { return };
+        let Some(Ok(now_sha)) = self.body_files_digest(session_id, command).await else { return };
+        if row.body_sha256.as_deref() == Some(now_sha.as_str()) {
+            return;
+        }
+        if let Err(e) = storage.set_tray_body_sha(gate_id, &now_sha).await {
+            tracing::warn!(%gate_id, error = %e, "could not record the revised body's hash");
+            return;
+        }
+        let body = self.queued_body_text(session_id, command).await;
+        let notice = format!(
+            "📨 Revised outward publish re-queued for review (gate {gate_id}) — {agent} changed the \
+             body and re-issued:\n`{command}`\n\n{body}\n\n[Reviewer: the earlier body of this \
+             gate was revised; read this one on this turn. To stop THIS publish, file a `blocking` \
+             finding with gate_id \"{gate_id}\"; to ask for another revision, an `advisory` one with \
+             that gate_id. Anything else lets it park for the user after your turn.]"
+        );
+        let Some(posted) = crate::core::post_system_notice(
+            storage,
+            Some(self),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            notice,
+            None,
+        )
+        .await
+        else {
+            return;
+        };
+        if let Err(e) = storage.set_tray_body_row(gate_id, posted.message_id()).await {
+            tracing::warn!(%gate_id, error = %e, "could not point the queued gate at its revised body");
+        }
+        // The advisories that asked for the revision are answered by it.
+        if let Ok(findings) = storage.findings_for_session(session_id).await {
+            for f in findings.iter().filter(|f| revises_queued_gate(f, &row)) {
+                let reason = format!(
+                    "the body was revised and re-posted for review (re-issued by {agent}, message {})",
+                    posted.message_id()
+                );
+                if let Err(e) = storage
+                    .disposition_finding(session_id, &f.finding_uid, crate::storage::FindingStatus::Fixed, Some(&reason), agent)
+                    .await
+                {
+                    tracing::warn!(finding = %f.finding_uid, error = %e, "could not settle a revise finding");
+                }
+            }
+            let _ = self.event_tx.send(SignalingEvent::FindingsChanged { session_id: session_id.to_string() });
+        }
+        self.summon_participant(session_id, reviewer_id).await;
     }
 
     /// Ask the ring to deal `participant_id` next, without resetting the
@@ -1741,6 +1822,13 @@ impl SignalingBridge {
             let command = row.command_text.clone().unwrap_or_default();
             if let Some(veto) = findings.iter().find(|f| vetoes_queued_gate(f, &row)) {
                 self.withdraw_vetoed_row(&storage, session_id, &row, veto).await;
+                continue;
+            }
+            // A "revise" (feedback #69): an open ADVISORY finding naming this
+            // gate holds it queued — neither withdrawn nor parked for the user
+            // — until the executor re-issues the command with a changed body,
+            // which re-posts it for review and settles the advisory.
+            if findings.iter().any(|f| revises_queued_gate(f, &row)) {
                 continue;
             }
             self.promote_queued_row(
@@ -1975,6 +2063,20 @@ fn vetoes_queued_gate(
         Some("none") => false,
         Some(gate) => gate == row.choice_id,
     }
+}
+
+/// Does this finding ask for a REVISION of this queued publish (feedback
+/// #69)? An OPEN ADVISORY finding that names exactly this gate: the publish
+/// stays queued, neither withdrawn (that is a blocking finding's job) nor
+/// parked for the user, until the body changes and the command is re-issued.
+/// An advisory naming no gate, or `"none"`, holds nothing.
+fn revises_queued_gate(
+    f: &crate::storage::Finding,
+    row: &crate::storage::SessionTrayEntry,
+) -> bool {
+    f.severity == "advisory"
+        && f.status == "open"
+        && f.gate_id.as_deref().is_some_and(|g| g != "none" && g == row.choice_id)
 }
 
 /// "row #12" / "rows #12, #15" — the message ids a coverage hit cites.
@@ -3746,6 +3848,58 @@ mod tests {
     /// not READ (cursor short of it) leaves the row queued; once the reviewer's
     /// cursor passes it, settlement promotes it to the user's card with the
     /// latch and the awaiting flag a fresh park has.
+    /// Feedback #69: an ADVISORY finding that names a queued publish is a
+    /// "revise": the gate stays queued (not withdrawn, not parked) after the
+    /// reviewer's read; the executor edits the body and re-issues the same
+    /// command, which re-posts the body for review and settles the advisory as
+    /// fixed; the reviewer's next read then promotes it. A re-issue with the
+    /// body unchanged re-posts nothing.
+    #[tokio::test]
+    async fn an_advisory_on_a_queued_publish_holds_it_for_a_revision() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let mut ring = ring_for(&bridge).await;
+        let cmd = format!("gh pr create --title t --body-file {path}");
+        let (gate_id, _) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        let first_body_row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap().body_row_id.unwrap();
+        drain(&mut ring);
+        // The reviewer reads the body and asks for a wording change.
+        storage.commit_delivery(eyes, &[(first_body_row, None)]).await.unwrap();
+        let finding = bridge
+            .eyes_flag_for_gate("s1".into(), "eyes".into(), crate::storage::FindingSeverity::Advisory, "revise: the bucket clause is unverified".into(), None, Some(gate_id.clone()))
+            .await
+            .unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        let row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "queued", "held for the revision, neither withdrawn nor parked");
+        assert!(gate_opened_in(&drain(&mut ring)).is_empty());
+        // A re-issue with the SAME body re-posts nothing and settles nothing.
+        let (same, existing) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        assert!(existing && same == gate_id);
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().body_row_id, Some(first_body_row));
+        assert_eq!(storage.findings_for_session("s1").await.unwrap().iter().find(|f| f.finding_uid == finding).unwrap().status, "open");
+        // The executor fixes the body and re-issues: re-hashed, re-posted, the
+        // advisory settled as fixed with the reason, the reviewer summoned.
+        std::fs::write(repo.path().join("draft.md"), "The deletion rule is conditional on Martin's answer.\nSecond line, verified.").unwrap();
+        let (again, existing) = queued(bridge.park_gated_command("s1", "hands", &cmd).await.unwrap());
+        assert!(existing && again == gate_id, "the same gate, revised");
+        let row = storage.get_tray_entry(&gate_id).await.unwrap().unwrap();
+        let second_body_row = row.body_row_id.unwrap();
+        assert!(second_body_row > first_body_row, "a fresh body row");
+        assert!(message_by_id(&storage, second_body_row).await.content.contains("Revised outward publish re-queued") , "the revised body is posted");
+        let f = storage.findings_for_session("s1").await.unwrap().into_iter().find(|f| f.finding_uid == finding).unwrap();
+        assert_eq!(f.status, "fixed");
+        assert!(f.disposition_reason.as_deref().unwrap_or("").contains("revised and re-posted"), "{f:?}");
+        assert_eq!(summons_in(&drain(&mut ring)), vec![eyes], "the reviewer is summoned again");
+        // Not yet read: still queued. Read: promoted.
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().status, "queued");
+        storage.commit_delivery(eyes, &[(second_body_row, None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&gate_id).await.unwrap().unwrap().status, "pending", "revised, read, promoted");
+    }
+
     #[tokio::test]
     async fn a_queued_publish_parks_only_after_the_reviewer_reads_the_body() {
         let data = tempdir().unwrap();

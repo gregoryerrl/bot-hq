@@ -34,7 +34,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
-pub use action_gate::{command_from_file, validate_run_timeout, GateRequest, GATE_HISTORY_DEFAULT, GATE_HISTORY_MAX};
+pub use action_gate::{command_from_file, validate_run_timeout, GateRequest, GATE_HISTORY_DEFAULT};
 pub(crate) use action_gate::ParkOutcome;
 mod cl_facade;
 mod cl_push;
