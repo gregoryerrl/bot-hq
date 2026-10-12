@@ -180,10 +180,16 @@ and in `docs/rebuild-archive/`.
   what the working participant is running instead, in the tool call's own
   words, with how long it has run. Launch bot-hq with
   `CLAUDE_CODE_SILENT_TURN_REMINDER` set to keep the reminder.
-- **The context warning repeats after a compaction.** The rows at 85 % and
-  95 % used to appear once per session, so a second approach to the limit came
-  with no warning. They now appear each time the context fills again, and say
-  when the participant's handoff document was last written.
+- **The context warning comes while the handoff can still be written, and
+  repeats after a compaction.** The rows came at 85 % and 95 % of the window,
+  once per session. claude-code compacts 33,000 tokens short of the window
+  (96.7 % of 1M, 83.5 % of 200k), so on a 200k window neither row ever came
+  before the compaction, and on 1M one long turn often ran from under 95 %
+  straight past it. The rows are now timed from that point: the first about
+  6 % of the window before it (907,000 of 1M, 142,000 of 200k), a last call
+  about 2 % before it (947,000, 152,000). They appear each time the context
+  fills again, and say how far off the compaction is and when the
+  participant's handoff document was last written.
 
 ### Fixed
 

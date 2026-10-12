@@ -181,7 +181,7 @@ To promote a session doc to the shared CL — only when the user asks — write 
 
 ## Context compaction — your handoff doc
 
-claude-code compacts your context when it fills: everything before becomes a summary, and an instruction the user gave an hour ago survives only if the summary kept it. bot-hq does three things about that. It posts a channel row when a participant's context passes 85 % and 95 %, again after each compaction. It posts a row when any participant's context is compacted. And it puts ONE document back into the compacted participant's context: the custom session doc `handoff-<your slug>` (your slug is in the roster block — the name in backticks beside your role).
+claude-code compacts your context when it fills: everything before becomes a summary, and an instruction the user gave an hour ago survives only if the summary kept it. bot-hq does three things about that. It posts a channel row when a participant's context comes within about 6 % of its window of the point where claude-code compacts it (at least 25,000 tokens before it), and a last call at about 2 % (at least 15,000), again after each compaction. It posts a row when any participant's context is compacted. And it puts ONE document back into the compacted participant's context: the custom session doc `handoff-<your slug>` (your slug is in the roster block — the name in backticks beside your role).
 
 - **Write it early and keep it current.** `session_doc_write(slug: \"handoff-<your slug>\", body)` with no `phase`. Rewrite it at each phase boundary and when a context row names you. About the first 8 KB is put back inline and the rest is one `session_doc_read` away, so lead with what matters.
 - **What goes in it:** the user's standing instructions and corrections, verbatim; decisions and who made them; what is done and verified, and where the evidence is; what is in flight and the next step; parked questions and gates by id; anything you were told NOT to do.
@@ -486,7 +486,6 @@ mod tests {
         for needle in [
             "`handoff-<your slug>`",
             "with no `phase`",
-            "85 % and 95 %",
             "again after each compaction",
             "marked `[bot-hq]`",
             "Trust it over the summary",
@@ -499,6 +498,27 @@ mod tests {
             !section.contains("handoff-hands") && !section.contains("handoff-eyes"),
             "the section names the pattern, not one roster's slugs"
         );
+    }
+
+    /// EYES D6: the rule states the context rows' timing in numbers, and the
+    /// numbers live in `core::pump`. The two are pinned together here, so a
+    /// change to either side without the other turns this red (the old needle
+    /// "85 % and 95 %" pinned the prose alone, and the constant could move
+    /// without it).
+    #[test]
+    fn the_handoff_rule_states_the_context_rows_the_pump_posts() {
+        use crate::core::pump::{
+            group_thousands, FIRST_ROW_FLOOR_TOKENS, FIRST_ROW_PERCENT, LAST_ROW_FLOOR_TOKENS,
+            LAST_ROW_PERCENT,
+        };
+        let sentence = format!(
+            "comes within about {FIRST_ROW_PERCENT} % of its window of the point where claude-code \
+             compacts it (at least {} tokens before it), and a last call at about {LAST_ROW_PERCENT} % \
+             (at least {})",
+            group_thousands(FIRST_ROW_FLOOR_TOKENS),
+            group_thousands(LAST_ROW_FLOOR_TOKENS),
+        );
+        assert!(GENERAL_RULES.contains(&sentence), "the rule no longer states the pump's rows: {sentence}");
     }
 
     #[test]

@@ -501,36 +501,80 @@ pub fn window_mismatch_notice(
     ))
 }
 
-/// The context-occupancy bands, in percent, at which a participant's pump
-/// posts one channel row each (F2d, week 35). 85 is where a hand-off still
-/// has room to be written; 95 is the last call before claude-code compacts.
-pub const CONTEXT_NOTICE_BANDS: [u8; 2] = [85, 95];
+/// Tokens claude-code keeps free below a participant's window: it compacts at
+/// `window − min(max output, 20,000) − 13,000` (claude 2.1.291 `QK` / `E2`,
+/// read in the source by EYES in s-079dec53), and the agents here run with a
+/// max output of at least 20,000 (the user's `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
+/// is 32,000). Observed in 41 compaction rows: 966,368–976,620 tokens of a 1M
+/// window, 167,018–170,870 of a 200k one. A smaller max output moves the real
+/// point LATER, so the rows below then come a little early, never late.
+pub const COMPACT_RESERVE_TOKENS: u64 = 33_000;
 
-/// A context reading below this many percent RE-ARMS the band rows. Only a
-/// compaction (or a fresh process) takes a meter that reached 85 % back under
-/// it, so the latch re-arms once per fill and a session hovering between the
-/// bands cannot make the row repeat.
-pub const CONTEXT_REARM_BELOW: u8 = 70;
+/// The first context row comes this many percent of the window before the
+/// compaction point — at least [`FIRST_ROW_FLOOR_TOKENS`] before it. It is the
+/// row a participant can still act on after a big turn: one executor turn
+/// above 600k of a 1M window grew 44.6k tokens at p95 (s-079dec53), and the
+/// row only reaches the participant at its NEXT turn, behind that turn's batch.
+pub const FIRST_ROW_PERCENT: u64 = 6;
+/// The first row's minimum distance before the compaction point, in tokens: a
+/// batch plus a handoff write, on a window where 6 % is too little.
+pub const FIRST_ROW_FLOOR_TOKENS: u64 = 25_000;
+/// The last call comes this many percent of the window before the compaction
+/// point — at least [`LAST_ROW_FLOOR_TOKENS`] before it — for the freshest
+/// handoff when a turn happens to end that close to the limit.
+pub const LAST_ROW_PERCENT: u64 = 2;
+/// The last call's minimum distance before the compaction point, in tokens.
+pub const LAST_ROW_FLOOR_TOKENS: u64 = 15_000;
 
-/// The one-per-band channel row for a participant whose context has crossed
-/// a [`CONTEXT_NOTICE_BANDS`] threshold. `last_band` is the highest band
-/// already announced by this pump for the CURRENT fill: the row fires when the
-/// reading's band is ABOVE it, and the latch then ratchets up to that band.
+/// Where claude-code compacts a window of `window` tokens — an estimate from
+/// [`COMPACT_RESERVE_TOKENS`]; zero for a window no bigger than the reserve.
+pub fn compaction_point(window: u64) -> u64 {
+    window.saturating_sub(COMPACT_RESERVE_TOKENS)
+}
+
+/// The context rows' thresholds for a window, in tokens used, lowest first:
+/// the first row, then the last call. Timed from the compaction point, not the
+/// window: at 85 % and 95 % of the window, the rows this replaced never fired
+/// on a 200k window (it compacts at 83.5 %), and on a 1M one the 95 % row
+/// missed 8 of 13 executor fills because one turn ran from under 95 % past
+/// the compaction at 96.7 % (s-079dec53).
 ///
-/// **The latch re-arms after a compaction** (feedback #81, reversing F2d's
-/// "never lowered"): a reading under [`CONTEXT_REARM_BELOW`] resets it, and so
-/// does the pump on a `Compacted` event. It used to stay up for the life of
-/// the pump, so a session's SECOND approach to the limit arrived with no row at
-/// all — the participant has no other way to read its own context, and the
-/// row is what tells it to bring its handoff doc up to date. Hysteresis rather
-/// than the event alone, so the re-arm does not depend on claude-code sending
-/// the boundary. A respawn starts the latch at zero: a new process is a new
-/// window.
+/// 1M → 907,000 and 947,000; 200k → 142,000 and 152,000. A window too small
+/// for both gets the last call alone (when the first row would land under half
+/// the compaction point), and one too small for even that gets none.
+pub fn context_row_thresholds(window: u64) -> Vec<u64> {
+    let at = compaction_point(window);
+    let before = |percent: u64, floor: u64| at.saturating_sub((window / 100 * percent).max(floor));
+    let last = before(LAST_ROW_PERCENT, LAST_ROW_FLOOR_TOKENS);
+    if last == 0 {
+        return Vec::new();
+    }
+    let first = before(FIRST_ROW_PERCENT, FIRST_ROW_FLOOR_TOKENS);
+    if first < at / 2 {
+        return vec![last];
+    }
+    vec![first, last]
+}
+
+/// The one-per-threshold channel row for a participant whose context has
+/// crossed one of its window's [`context_row_thresholds`]. `announced` is the
+/// highest threshold this pump has already announced for the CURRENT fill (0
+/// for none): the row fires when the reading crosses a higher one, and the
+/// latch then ratchets up to it. Tokens, not rounded percents.
+///
+/// **The latch re-arms after a compaction** (feedback #81): the pump resets it
+/// on a `Compacted` event, and a reading under HALF the first threshold resets
+/// it too — hysteresis, so the re-arm does not depend on claude-code sending
+/// the boundary, and far enough below the first row that a reading hovering
+/// just under it can never re-fire it every turn (EYES D2: the old "under
+/// 70 %" re-arm did exactly that once a row sat below 70 % of a small window).
+/// A respawn starts the latch at zero: a new process is a new window.
 ///
 /// `None` when there is no usable reading, the reported window is zero (the
 /// non-zero promise on `reported_window` is a doc comment, not a type — a
-/// hand-built report can carry one), or no new band was crossed. Pure, so the
-/// bands and the wording are pinned by tests instead of by a live session.
+/// hand-built report can carry one), or no new threshold was crossed. Pure, so
+/// the thresholds and the wording are pinned by tests instead of by a live
+/// session.
 ///
 /// The wording is a STATE line about the named participant, not an
 /// instruction: every participant reads the channel, and an imperative
@@ -540,30 +584,34 @@ pub const CONTEXT_REARM_BELOW: u8 = 70;
 pub fn context_threshold_notice(
     slug: &str,
     report: &crate::agents::spawn::ContextReport,
-    last_band: &mut u8,
+    announced: &mut u64,
 ) -> Option<String> {
     let usage = report.usable()?;
-    if usage.context_window == 0 {
+    let window = usage.context_window;
+    if window == 0 {
         return None;
     }
-    let pct = (usage.used_tokens.saturating_mul(100) / usage.context_window).min(u8::MAX as u64) as u8;
-    if pct < CONTEXT_REARM_BELOW {
-        *last_band = 0;
+    let used = usage.used_tokens;
+    let thresholds = context_row_thresholds(window);
+    let first = *thresholds.first()?;
+    if used < first / 2 {
+        *announced = 0;
     }
-    let band = CONTEXT_NOTICE_BANDS
-        .iter()
-        .copied()
-        .filter(|b| *b <= pct)
-        .max()?;
-    if band <= *last_band {
+    let crossed = thresholds.iter().copied().filter(|t| *t <= used).max()?;
+    if crossed <= *announced {
         return None;
     }
-    *last_band = band;
+    *announced = crossed;
+    let pct = used.saturating_mul(100) / window;
+    let where_ = match compaction_point(window).saturating_sub(used) {
+        0 => "at the point where claude-code compacts it".to_string(),
+        left => format!("about {} tokens before claude-code compacts it", group_thousands(left)),
+    };
     Some(format!(
-        "⚠ {slug}'s context is at {pct} % ({used} of {window} tokens) as of its last turn; \
-         claude-code compacts it when it fills, and this row repeats after each compaction.",
-        used = usage.used_tokens,
-        window = usage.context_window,
+        "⚠ {slug}'s context is at {pct} % ({used} of {window} tokens) as of its last turn, \
+         {where_}. This row repeats after each compaction.",
+        used = group_thousands(used),
+        window = group_thousands(window),
     ))
 }
 
@@ -592,7 +640,7 @@ async fn handoff_last_written(storage: &Storage, session_id: &str, slug: &str) -
 }
 
 /// `1234567` as `1,234,567` — token counts in a row the user reads.
-fn group_thousands(n: u64) -> String {
+pub(crate) fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -1089,10 +1137,10 @@ pub async fn pump_agent(
     // disagreement does not change between turns, and a row per turn would be
     // the nag the notice exists to replace.
     let mut window_mismatch_noticed = false;
-    // The highest context band (`CONTEXT_NOTICE_BANDS`) this pump has announced
-    // for the CURRENT fill of the window — a ratchet that a compaction resets
-    // (see `context_threshold_notice`).
-    let mut context_band_notified: u8 = 0;
+    // The highest context-row threshold (`context_row_thresholds`, in tokens)
+    // this pump has announced for the CURRENT fill of the window — a ratchet
+    // that a compaction resets (see `context_threshold_notice`).
+    let mut context_band_notified: u64 = 0;
     // What bot-hq's post-compaction hook reported since the last compaction row
     // (`AgentEvent::HandoffInjected`): it precedes the boundary on the stream,
     // so it is held here until the `Compacted` it belongs to arrives.
@@ -3655,70 +3703,122 @@ mod tests {
         }
     }
 
-    /// One row per band per FILL of the window: ratcheted while the context
-    /// climbs, re-armed once a reading falls under `CONTEXT_REARM_BELOW` — which
-    /// only a compaction does (feedback #81; F2d, week 35, had the latch never
-    /// lower, so a session's second approach to the limit went unannounced).
-    /// Nothing on an unusable reading or a zero window (EYES R2 — the non-zero
-    /// promise is a doc comment, and this table builds the report field-wise
-    /// exactly as a caller could).
+    /// Where the rows sit, per window — measured against the CLI's own point
+    /// (window − 33,000), so on every window the last call still comes before
+    /// the compaction (EYES P3: a `window/5` cap put a 64k window's last call
+    /// at 36,200, after the CLI compacts at 31,000).
     #[test]
-    fn context_threshold_notice_fires_once_per_band_per_fill_and_re_arms_after_a_compaction() {
-        let mut band = 0u8;
-        assert!(context_threshold_notice("hands", &reading(84, 100), &mut band).is_none());
-        assert_eq!(band, 0);
-        let n = context_threshold_notice("hands", &reading(850_000, 1_000_000), &mut band)
-            .expect("85 % crosses the first band");
-        for needle in ["hands", "85 %", "850000", "1000000", "compacts it when it fills", "repeats after each compaction"] {
+    fn context_row_thresholds_sit_before_the_point_claude_code_compacts() {
+        assert_eq!(compaction_point(1_000_000), 967_000);
+        assert_eq!(compaction_point(200_000), 167_000);
+        assert_eq!(compaction_point(20_000), 0, "a window under the reserve has no point");
+        assert_eq!(context_row_thresholds(1_000_000), vec![907_000, 947_000], "6 % and 2 % of 1M before 967k");
+        assert_eq!(context_row_thresholds(200_000), vec![142_000, 152_000], "the 25k and 15k floors on 200k");
+        // A small window: the first row would land under half the compaction
+        // point, so only the last call is kept.
+        assert_eq!(context_row_thresholds(64_000), vec![16_000]);
+        // Too small for even that: no row at all, rather than one past the point.
+        assert!(context_row_thresholds(48_000).is_empty());
+        assert!(context_row_thresholds(0).is_empty());
+        for window in [64_000u64, 128_000, 200_000, 400_000, 1_000_000, 2_000_000] {
+            let rows = context_row_thresholds(window);
+            assert!(rows.windows(2).all(|w| w[0] < w[1]), "{window}: lowest first: {rows:?}");
+            assert!(
+                rows.iter().all(|t| *t > 0 && *t < compaction_point(window)),
+                "{window}: every row before the compaction point: {rows:?}"
+            );
+        }
+    }
+
+    /// One row per threshold per FILL of the window: ratcheted while the
+    /// context climbs, re-armed once a reading falls under half the first
+    /// threshold — which only a compaction does (feedback #81; F2d, week 35,
+    /// had the latch never lower, so a session's second approach to the limit
+    /// went unannounced). Nothing on an unusable reading or a zero window (EYES
+    /// R2 — the non-zero promise is a doc comment, and this table builds the
+    /// report field-wise exactly as a caller could).
+    #[test]
+    fn context_threshold_notice_fires_once_per_threshold_per_fill_and_re_arms_after_a_compaction() {
+        let mut announced = 0u64;
+        assert!(context_threshold_notice("hands", &reading(906_999, 1_000_000), &mut announced).is_none());
+        assert_eq!(announced, 0);
+        let n = context_threshold_notice("hands", &reading(907_412, 1_000_000), &mut announced)
+            .expect("907,412 crosses the first row");
+        for needle in [
+            "⚠ hands's context is at 90 % (907,412 of 1,000,000 tokens) as of its last turn,",
+            "about 59,588 tokens before claude-code compacts it.",
+            "This row repeats after each compaction.",
+        ] {
             assert!(n.contains(needle), "notice lacks {needle:?}: {n}");
         }
         for imperative in ["Write your", "write your", "Update your", "refresh your"] {
             assert!(!n.contains(imperative), "a state line, not an instruction: {n}");
         }
-        assert_eq!(band, 85);
-        // The same band again says nothing.
-        assert!(context_threshold_notice("hands", &reading(86, 100), &mut band).is_none());
-        // The next band speaks once.
-        let n = context_threshold_notice("hands", &reading(95, 100), &mut band).expect("95 % is the second band");
-        assert!(n.contains("95 %"), "got: {n}");
-        assert_eq!(band, 95);
-        // Hovering between the bands does not re-arm: 72 % is not a compaction.
-        assert!(context_threshold_notice("hands", &reading(72, 100), &mut band).is_none());
-        assert!(context_threshold_notice("hands", &reading(96, 100), &mut band).is_none());
-        assert_eq!(band, 95, "the latch holds above the re-arm line");
+        assert_eq!(announced, 907_000);
+        // The same threshold again says nothing.
+        assert!(context_threshold_notice("hands", &reading(930_000, 1_000_000), &mut announced).is_none());
+        // The last call speaks once.
+        let n = context_threshold_notice("hands", &reading(950_000, 1_000_000), &mut announced)
+            .expect("950,000 crosses the last call");
+        assert!(n.contains("95 %") && n.contains("about 17,000 tokens before"), "got: {n}");
+        assert_eq!(announced, 947_000);
+        // Past the point itself: said as such, never "about 0 tokens".
+        let mut past = 907_000u64;
+        let n = context_threshold_notice("hands", &reading(970_000, 1_000_000), &mut past).unwrap();
+        assert!(n.contains("at the point where claude-code compacts it."), "got: {n}");
+        // Hovering under the first row does not re-arm (EYES D2): only a
+        // reading under half the first threshold does.
+        assert!(context_threshold_notice("hands", &reading(700_000, 1_000_000), &mut announced).is_none());
+        assert!(context_threshold_notice("hands", &reading(960_000, 1_000_000), &mut announced).is_none());
+        assert_eq!(announced, 947_000, "the latch holds above the re-arm line");
         // A compaction drops the meter under the re-arm line; the climb back is
-        // announced again, band by band.
-        assert!(context_threshold_notice("hands", &reading(18, 100), &mut band).is_none());
-        assert_eq!(band, 0, "a reading under {CONTEXT_REARM_BELOW} % re-arms");
-        let n = context_threshold_notice("hands", &reading(88, 100), &mut band).expect("the second fill's 85 band");
-        assert!(n.contains("88 %"), "got: {n}");
-        let n = context_threshold_notice("hands", &reading(96, 100), &mut band).expect("the second fill's 95 band");
+        // announced again, row by row.
+        assert!(context_threshold_notice("hands", &reading(18_000, 1_000_000), &mut announced).is_none());
+        assert_eq!(announced, 0, "a reading under half the first threshold re-arms");
+        let n = context_threshold_notice("hands", &reading(920_000, 1_000_000), &mut announced)
+            .expect("the second fill's first row");
+        assert!(n.contains("92 %"), "got: {n}");
+        let n = context_threshold_notice("hands", &reading(960_000, 1_000_000), &mut announced)
+            .expect("the second fill's last call");
         assert!(n.contains("96 %"), "got: {n}");
-        assert_eq!(band, 95);
-        // A fresh latch that lands straight at 97 % announces the 95 band only.
-        let mut fresh = 0u8;
-        let n = context_threshold_notice("eyes", &reading(97, 100), &mut fresh).unwrap();
-        assert!(n.contains("97 %") && n.starts_with("⚠ eyes"), "got: {n}");
-        assert_eq!(fresh, 95);
+        // A fresh latch that lands straight past both announces the last call only.
+        let mut fresh = 0u64;
+        let n = context_threshold_notice("eyes", &reading(955_000, 1_000_000), &mut fresh).unwrap();
+        assert!(n.starts_with("⚠ eyes"), "got: {n}");
+        assert_eq!(fresh, 947_000);
+        assert!(context_threshold_notice("eyes", &reading(956_000, 1_000_000), &mut fresh).is_none());
+        // A 200k window is announced before it compacts at 167,000 — the 85 %
+        // and 95 % rows this replaced never fired there.
+        let mut small = 0u64;
+        assert!(context_threshold_notice("hands", &reading(141_999, 200_000), &mut small).is_none());
+        let n = context_threshold_notice("hands", &reading(142_000, 200_000), &mut small).unwrap();
+        assert!(n.contains("71 %") && n.contains("about 25,000 tokens before"), "got: {n}");
+        // A small window whose only row sits under 70 %: hovering between the
+        // row and 70 % must not re-fire it every turn (EYES D2).
+        let mut tiny = 0u64;
+        assert!(context_threshold_notice("hands", &reading(16_500, 64_000), &mut tiny).is_some());
+        for _ in 0..3 {
+            assert!(context_threshold_notice("hands", &reading(17_000, 64_000), &mut tiny).is_none());
+        }
         // Nothing usable, or a zero window, says nothing and moves nothing.
-        let mut quiet = 0u8;
+        let mut quiet = 0u64;
         assert!(context_threshold_notice("hands", &ContextReport::none(ContextVerdict::NoWindow), &mut quiet).is_none());
         assert!(context_threshold_notice("hands", &reading(90, 0), &mut quiet).is_none());
         assert_eq!(quiet, 0);
     }
 
-    /// The wire: a completed turn at 90 % leaves exactly one system row in the
-    /// channel naming the band, and a second turn at the same band leaves no
-    /// more. Deleting the `context_threshold_notice` call at the reading site
-    /// turns this red.
+    /// The wire: a completed turn past the first threshold leaves exactly one
+    /// system row in the channel, and a later turn under the next threshold
+    /// leaves no more. Deleting the `context_threshold_notice` call at the
+    /// reading site turns this red.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_turn_past_85_percent_posts_one_context_notice_row() {
+    async fn a_turn_past_the_first_threshold_posts_one_context_notice_row() {
         let (storage, state) = setup().await;
         let (cfg, _ring_rx) = cfg_with_ring("hands");
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
-        for used in [900_000u64, 910_000] {
+        for used in [900_000u64, 910_000, 920_000] {
             ev_tx
                 .send(AgentEvent::TurnComplete {
                     stop_reason: None,
@@ -3741,8 +3841,8 @@ mod tests {
             .filter(|m| m.kind == MessageKind::SystemNotice.as_str() && m.content.contains("context is at"))
             .map(|m| m.content)
             .collect();
-        assert_eq!(notices.len(), 1, "one row for the 85 band, none for the repeat: {notices:?}");
-        assert!(notices[0].contains("hands's context is at 90 %"), "got: {}", notices[0]);
+        assert_eq!(notices.len(), 1, "one row for the first threshold, none before or after: {notices:?}");
+        assert!(notices[0].contains("hands's context is at 91 %"), "got: {}", notices[0]);
         assert!(
             notices[0].ends_with("It has no handoff doc (`handoff-hands`)."),
             "the row ends with the handoff doc's state: {}",
@@ -3771,7 +3871,7 @@ mod tests {
             .collect()
     }
 
-    /// The wire for the clause: with a handoff doc written, the 85 % row says
+    /// The wire for the clause: with a handoff doc written, the context row says
     /// when — read from the session-doc store at the moment the row is built.
     /// An EMPTY doc counts as none: nothing would be put back.
     #[tokio::test(flavor = "current_thread")]
@@ -3788,7 +3888,7 @@ mod tests {
             let (cfg, _ring_rx) = cfg_with_ring("hands");
             let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
             let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
-            ev_tx.send(turn_at(900_000)).await.unwrap();
+            ev_tx.send(turn_at(910_000)).await.unwrap();
             drop(ev_tx);
             task.await.unwrap();
 
@@ -3844,7 +3944,7 @@ mod tests {
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
 
-        ev_tx.send(turn_at(900_000)).await.unwrap();
+        ev_tx.send(turn_at(910_000)).await.unwrap();
         ev_tx.send(AgentEvent::HandoffInjected { has_doc: true }).await.unwrap();
         ev_tx
             .send(AgentEvent::Compacted {
@@ -3879,7 +3979,7 @@ mod tests {
         assert_eq!(
             warnings.len(),
             2,
-            "the 85 band is announced again after the compaction, with no low reading between: {warnings:?}"
+            "the first row is announced again after the compaction, with no low reading between: {warnings:?}"
         );
     }
 

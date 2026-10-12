@@ -494,11 +494,16 @@ summary kept it. bot-hq cannot prevent that, so it makes three things
 mechanical (feedback #54 / #63 / #67 / #74 / #81):
 
 - **A warning before.** At each turn end the pump compares the participant's
-  context reading with two bands (85 % and 95 %, `core/pump.rs`
-  `context_threshold_notice`) and posts one channel row per band. The row ends
-  with the state of the participant's handoff doc. The latch re-arms once a
-  reading falls under 70 %, which only a compaction does, so every fill of the
-  window is announced, not just the first.
+  context reading with two thresholds timed from the point claude-code
+  compacts (window − 33,000: `core/pump.rs` `compaction_point`,
+  `context_row_thresholds`): the first row 6 % of the window before it (at
+  least 25,000 tokens), a last call 2 % before it (at least 15,000) — 907,000
+  and 947,000 on a 1M window, 142,000 and 152,000 on 200k. One channel row per
+  threshold (`context_threshold_notice`), ending with the state of the
+  participant's handoff doc. The latch re-arms on a compaction, or once a
+  reading falls under half the first threshold, so every fill of the window is
+  announced, not just the first, and a reading hovering under a row never
+  re-fires it.
 - **A row when it happens.** claude-code writes
   `{"type":"system","subtype":"compact_boundary","compact_metadata":{…}}` to
   stdout; `agents/events.rs` turns it into `AgentEvent::Compacted`, and the pump
