@@ -249,6 +249,12 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A write to focus.md says what the file has become.** The reply to any
+  `cl_write_file` of a project's `focus.md` now ends with its size, its
+  line-start `SUPERSEDES:` count and how many appends it has had since its
+  last replace, and — past the same thresholds the spawn-time warning uses —
+  the reorganize advice itself, at the moment something can be done about it
+  rather than at the next spawn, where nothing can.
 - **Agents are told their thinking is never shown.** Several short status
   texts a participant "wrote" never reached the chat or its peers; they were
   the model's reasoning, which bot-hq never posts (and claude-code's own

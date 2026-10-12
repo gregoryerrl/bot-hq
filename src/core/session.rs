@@ -2345,11 +2345,19 @@ fn render_cl_primer(entries: &[ClIndexEntry]) -> String {
 /// Advisory threshold for the focus.md prompt section. The first real
 /// focus.md was 25.8 KB after one day of one scope, so the advisory sits
 /// above a healthy day-one file rather than firing on it.
-const FOCUS_ADVISORY_BYTES: usize = 32 * 1024;
+pub(crate) const FOCUS_ADVISORY_BYTES: usize = 32 * 1024;
 /// Line-start `SUPERSEDES:` markers at or above this count trip the same
 /// advisory — a file heavy with corrections needs a reorganize regardless of
-/// its byte size.
-const FOCUS_SUPERSEDES_ADVISORY: usize = 5;
+/// its byte size. Shared with the write reply (`cl_write::focus_status`,
+/// feedback #92), so the spawn warning and the write-time nudge agree.
+pub(crate) const FOCUS_SUPERSEDES_ADVISORY: usize = 5;
+
+/// The one advisory sentence both surfaces print when a focus.md is past
+/// [`FOCUS_ADVISORY_BYTES`] or [`FOCUS_SUPERSEDES_ADVISORY`].
+pub(crate) fn focus_reorganize_advice() -> &'static str {
+    "schedule a replace-mode reorganize (fold the supersession chains back into clean truths, \
+     `confirm_shrink: true`) at the next Plan boundary or the clearing ritual, never at close-out"
+}
 /// Pathological-size guard: bodies beyond head+tail render head + marker +
 /// tail. Head keeps the contract and scope sections (they live at the top);
 /// the LARGER tail keeps the newest truths — append-as-you-learn puts the
@@ -2382,13 +2390,11 @@ fn render_focus_section(project_root: &Path) -> String {
     let advisory = if body.len() > FOCUS_ADVISORY_BYTES || supersedes >= FOCUS_SUPERSEDES_ADVISORY
     {
         format!(
-            "\n⚠ focus.md is {} KB with {} line-start `SUPERSEDES:` entr{} — schedule a \
-             replace-mode reorganize (fold the supersession chains back into clean truths, \
-             `confirm_shrink: true`) at the next Plan boundary or the clearing ritual, never \
-             at close-out.\n",
+            "\n⚠ focus.md is {} KB with {} line-start `SUPERSEDES:` entr{} — {}.\n",
             body.len() / 1024,
             supersedes,
             if supersedes == 1 { "y" } else { "ies" },
+            focus_reorganize_advice(),
         )
     } else {
         String::new()

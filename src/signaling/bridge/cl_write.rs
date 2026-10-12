@@ -530,6 +530,18 @@ impl SignalingBridge {
         if let Some(lint) = lint {
             msg.push_str(&lint);
         }
+        // A focus.md write says what the file has become (feedback #92): its
+        // size, its correction markers and the appends since the last fold —
+        // at the moment something can be done about it, not only at the next
+        // spawn.
+        if file_path == "focus.md" {
+            if let Some(root) = self.cl_project_root(&project).await {
+                let library = self.library_root();
+                if let Some(status) = focus_status(&root.join("focus.md"), library.as_deref()) {
+                    msg.push_str(&status);
+                }
+            }
+        }
         Ok(msg)
     }
 
@@ -714,6 +726,57 @@ fn status_flip_warning(old_body: &str, new_body: &str) -> Option<String> {
          the flip if it was inferred.",
         flags.join(", ")
     ))
+}
+
+/// The focus.md status a write reply ends with (feedback #92): size, line-start
+/// `SUPERSEDES:` count, appends since the file's last replace (read off the
+/// library's own snapshot subjects, which name the kind of write), and the
+/// reorganize advice once the spawn-time thresholds are crossed — the same
+/// thresholds, so the two surfaces never disagree. `None` when the file is
+/// unreadable.
+pub(super) fn focus_status(path: &Path, library_root: Option<&Path>) -> Option<String> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let supersedes = body.lines().filter(|l| l.starts_with("SUPERSEDES:")).count();
+    let appends = library_root.map(|lib| appends_since_last_replace(lib, path)).unwrap_or(0);
+    let mut out = format!(
+        "\nfocus.md is now {:.1} KB with {} line-start `SUPERSEDES:` entr{} and {} append{} since its last replace",
+        body.len() as f64 / 1024.0,
+        supersedes,
+        if supersedes == 1 { "y" } else { "ies" },
+        appends,
+        if appends == 1 { "" } else { "s" },
+    );
+    if body.len() > crate::core::session::FOCUS_ADVISORY_BYTES
+        || supersedes >= crate::core::session::FOCUS_SUPERSEDES_ADVISORY
+    {
+        out.push_str(&format!(" — ⚠ {}", crate::core::session::focus_reorganize_advice()));
+    }
+    out.push('.');
+    Some(out)
+}
+
+/// How many `append` snapshots of `target` the library holds since its last
+/// `replace` or `create` one — the snapshot subjects end `(<agent>, <session>,
+/// <kind>)`. A user's edit (`(user)`) is neither and does not reset the count.
+/// Zero when the library is not a repository.
+fn appends_since_last_replace(library_root: &Path, target: &Path) -> usize {
+    if !library_root.join(".git").exists() {
+        return 0;
+    }
+    let rel = library_rel(library_root, target);
+    let Ok(out) = library_git(library_root, &["log", "--format=%s", "--", &rel]) else { return 0 };
+    if !out.status.success() {
+        return 0;
+    }
+    let mut appends = 0;
+    for subject in String::from_utf8_lossy(&out.stdout).lines() {
+        if subject.ends_with(", append)") {
+            appends += 1;
+        } else if subject.ends_with(", replace)") || subject.ends_with(", create)") {
+            break;
+        }
+    }
+    appends
 }
 
 /// Words too common to be a retired *concept*. The "absent from the whole new
@@ -3145,6 +3208,34 @@ mod tests {
         assert!(reply.contains(&format!("snapshot {head}")), "the rollback point is the write's own commit: {reply}");
         assert!(reply.contains("committed them first, apart from this write"), "{reply}");
         assert_eq!(git_out(&lib, &["status", "--porcelain"]), "", "nothing left unversioned");
+    }
+
+    /// Feedback #92: a focus.md write's reply states what the file has become
+    /// — size, `SUPERSEDES:` markers, appends since the last replace (read off
+    /// the snapshot subjects) — and carries the spawn-time reorganize advice
+    /// past the same thresholds; other files get no such line.
+    #[tokio::test]
+    async fn a_focus_write_reports_size_markers_and_appends_since_the_last_fold() {
+        let (bridge, _storage, _tmp) = bridge_with_data_dir().await;
+        let reply = put(&bridge, "s1", "focus.md", "# FOCUS\n\n## Scope: a\n\nTruth one.\n", false).await.unwrap();
+        assert!(reply.contains("focus.md is now 0.0 KB with 0 line-start `SUPERSEDES:` entries and 0 appends since its last replace."), "{reply}");
+        assert!(!reply.contains("⚠ schedule"), "{reply}");
+        for i in 0..3 {
+            let reply = put(&bridge, "s1", "focus.md", &format!("SUPERSEDES: truth {i}\nTruth {i} corrected.\n"), true).await.unwrap();
+            assert!(reply.contains(&format!("{} line-start `SUPERSEDES:` entr", i + 1)), "{reply}");
+            assert!(reply.contains(&format!(" and {} append{} since its last replace", i + 1, if i == 0 { "" } else { "s" })), "{reply}");
+        }
+        // Past the marker threshold the advice rides the reply — the same
+        // sentence the spawn warning prints.
+        let reply = put(&bridge, "s1", "focus.md", "SUPERSEDES: truth 3\nSUPERSEDES: truth 4\nfolded later\n", true).await.unwrap();
+        assert!(reply.contains("5 line-start `SUPERSEDES:` entries and 4 appends"), "{reply}");
+        assert!(reply.contains(&format!("⚠ {}", crate::core::session::focus_reorganize_advice())), "{reply}");
+        // A replace resets the append count; another file says nothing of this.
+        let folded = "# FOCUS\n\n## Scope: a\n\nEvery truth folded, stated at enough length to clear the shrink guard: one, two, three, four, five, six, seven, eight, nine, ten, eleven, twelve.\n";
+        let reply = put(&bridge, "s1", "focus.md", folded, false).await.unwrap();
+        assert!(reply.contains("0 line-start `SUPERSEDES:` entries and 0 appends since its last replace."), "{reply}");
+        let other = put(&bridge, "s1", "notes.md", "a note\n", false).await.unwrap();
+        assert!(!other.contains("since its last replace"), "{other}");
     }
 
     /// Feedback #86: the reply says which lines the write changed, from its
