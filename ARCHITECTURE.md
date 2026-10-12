@@ -532,7 +532,11 @@ mechanical (feedback #54 / #63 / #67 / #74 / #81):
   and where to read the rest). Every participant is spawned with a
   `SessionStart` hook, matcher `compact`, that runs `bot-hq policy-check
   compact-handoff`; it prints that file and claude-code puts a hook's output
-  into the compacted context. Hook output over about 10,000 characters is
+  into the compacted context. It stamps the doc's age into the header as it
+  prints ("last written T — 38 minutes before this compaction",
+  `handoff::stamp_age`), and the header says which source wins per claim: the
+  summary for anything after T, the doc's own words for anything before it
+  (above all the user's instructions it quotes). Hook output over about 10,000 characters is
   replaced by a preview, hence the budget. The stream's `hook_response` for
   that hook is recognised by the file's opening marker, so the compaction row
   says "put back" only when it was.

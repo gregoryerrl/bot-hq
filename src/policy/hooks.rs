@@ -158,7 +158,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         "tool-gate" => run_tool_gate(&data_dir, project.as_deref(), sid),
         "shell-lint" => run_shell_lint(&data_dir, sid),
         "compact-handoff" => {
-            if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent()) {
+            if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent(), chrono::Utc::now()) {
                 print!("{text}");
             }
             Ok(0)
@@ -570,12 +570,20 @@ fn hook_agent() -> String {
 /// `None` — and the hook prints nothing and still exits 0 — when there is no
 /// session id, the names are not path-safe, or the file is missing or
 /// unreadable. A hook that fails here must never get in a compaction's way.
-fn compact_handoff_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+fn compact_handoff_text(
+    data_dir: &Path,
+    session_id: Option<&str>,
+    agent: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
     let dir = crate::agents::handoff::dir_under(
         &crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir,
     );
     let path = crate::agents::handoff::file_path(&dir, session_id?, agent)?;
-    std::fs::read_to_string(path).ok().filter(|t| !t.is_empty())
+    let text = std::fs::read_to_string(path).ok().filter(|t| !t.is_empty())?;
+    // Stamped at print time — right after the compaction — so the age is the
+    // gap between the doc's last write and the compaction.
+    Some(crate::agents::handoff::stamp_age(&text, now))
 }
 
 /// What the `PreCompact` hook prints: the summary instructions
@@ -3215,14 +3223,24 @@ mod tests {
         let rendered = crate::agents::handoff::render("s-1", "hands", Some(("keep gating reads", "2026-10-03T05:00:00Z")));
         crate::agents::handoff::write_file(&file, &rendered).unwrap();
 
-        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "hands").as_deref(), Some(rendered.as_str()));
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-03T05:38:00Z").unwrap().with_timezone(&chrono::Utc);
+        assert_eq!(
+            compact_handoff_text(tmp.path(), Some("s-1"), "hands", now).as_deref(),
+            Some(crate::agents::handoff::stamp_age(&rendered, now).as_str()),
+            "the rendered file, stamped with its age at print time"
+        );
+        assert!(
+            compact_handoff_text(tmp.path(), Some("s-1"), "hands", now)
+                .unwrap()
+                .contains("last written 2026-10-03T05:00:00Z — 38 minutes before this compaction"),
+        );
         // No session, another participant, an unsafe name, an empty file: nothing.
-        assert_eq!(compact_handoff_text(tmp.path(), None, "hands"), None);
-        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "eyes"), None);
-        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "an agent"), None);
-        assert_eq!(compact_handoff_text(tmp.path(), Some("../s-1"), "hands"), None);
+        assert_eq!(compact_handoff_text(tmp.path(), None, "hands", now), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "eyes", now), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "an agent", now), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("../s-1"), "hands", now), None);
         crate::agents::handoff::write_file(&file, "").unwrap();
-        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "hands"), None);
+        assert_eq!(compact_handoff_text(tmp.path(), Some("s-1"), "hands", now), None);
         // The subcommand itself exits 0 with or without a file.
         let args = |sid: &str| -> Vec<String> {
             ["compact-handoff", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]

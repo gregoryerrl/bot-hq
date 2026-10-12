@@ -99,13 +99,15 @@ pub fn render(session_id: &str, participant: &str, doc: Option<(&str, &str)>) ->
     let header = format!(
         "{INJECT_MARKER} Below is your pinned handoff doc `{slug}` (session \
          {session_id}{WRITTEN_PREFIX}{updated_at}), put back by bot-hq.\n\
-         It was written before the compaction, by you or by the user. Where it and the summary \
-         disagree, trust the doc, then check the live state: the phase documents \
+         It speaks as of that time, written by you or by the user. The summary above was written \
+         at the compaction and was asked to end with what changed since then: for anything after \
+         that time the summary wins; for anything before it, this doc's own words win, above all \
+         the user's instructions it quotes. Then check the live state: the phase documents \
          (session_doc_search), the project's focus.md and git.\n---\n"
     );
     // Room for the longest footer: two 20-digit byte counts and a line number.
     const FOOTER_RESERVE: usize = 240;
-    let room = FILE_BUDGET_BYTES.saturating_sub(header.len() + FOOTER_RESERVE);
+    let room = FILE_BUDGET_BYTES.saturating_sub(header.len() + FOOTER_RESERVE + AGE_STAMP_RESERVE);
     if body.len() <= room {
         return format!("{header}{body}\n---\n[bot-hq] End of `{slug}`.\n");
     }
@@ -140,6 +142,56 @@ pub fn written_at(rendered: &str) -> Option<&str> {
 
 /// What the header says right before the doc's `updated_at`.
 const WRITTEN_PREFIX: &str = ", last written ";
+
+/// Bytes [`render`] leaves free for the age [`stamp_age`] adds when the hook
+/// prints the file — the longest stamp (a 20-digit day count, hours, the
+/// wording) is 59 bytes — so the PRINTED text, not just the rendered file,
+/// stays under [`FILE_BUDGET_BYTES`].
+const AGE_STAMP_RESERVE: usize = 64;
+
+/// `rendered` with the doc's age at `now` stamped into its header, right after
+/// the time [`render`] wrote there: "(session s-1, last written T — 38 minutes
+/// before this compaction)". The `compact-handoff` hook prints it right after
+/// the compaction, so the age IS the gap between the doc's last write and the
+/// compaction (EYES D4): the participant learns how much of the session the doc
+/// cannot know about. Unchanged when there is no doc, the time does not parse,
+/// or it lies in the future (a skewed clock).
+pub fn stamp_age(rendered: &str, now: chrono::DateTime<chrono::Utc>) -> String {
+    let Some(at) = written_at(rendered) else {
+        return rendered.to_string();
+    };
+    let Ok(then) = chrono::DateTime::parse_from_rfc3339(at) else {
+        return rendered.to_string();
+    };
+    let secs = (now - then.with_timezone(&chrono::Utc)).num_seconds();
+    let needle = format!("{WRITTEN_PREFIX}{at}");
+    let (Ok(secs), Some(pos)) = (u64::try_from(secs), rendered.find(&needle)) else {
+        return rendered.to_string();
+    };
+    let end = pos + needle.len();
+    format!("{} — {} before this compaction{}", &rendered[..end], human_age(secs), &rendered[end..])
+}
+
+/// `secs` as the age a reader takes in at a glance: minutes under two hours,
+/// hours and minutes under two days, days and hours beyond.
+fn human_age(secs: u64) -> String {
+    fn n(count: u64, unit: &str) -> String {
+        if count == 1 { format!("1 {unit}") } else { format!("{count} {unit}s") }
+    }
+    let minutes = secs / 60;
+    match minutes {
+        0 => "under a minute".to_string(),
+        m if m < 120 => n(m, "minute"),
+        m if m < 48 * 60 => match m % 60 {
+            0 => n(m / 60, "hour"),
+            r => format!("{} {}", n(m / 60, "hour"), n(r, "minute")),
+        },
+        m => match (m / 60) % 24 {
+            0 => n(m / (24 * 60), "day"),
+            h => format!("{} {}", n(m / (24 * 60), "day"), n(h, "hour")),
+        },
+    }
+}
 
 /// What the `PreCompact` hook prints: instructions claude-code appends to the
 /// prompt that writes the compaction summary (probed on CLI 2.1.291,
@@ -310,6 +362,89 @@ mod tests {
         assert_eq!(written_at(&render("s-1", "hands", None)), None);
         assert_eq!(written_at("some other hook's output, last written 2026-01-01T00:00:00Z"), None);
         assert_eq!(written_at(""), None);
+    }
+
+    /// The age goes right after the header's time and nowhere else; a body
+    /// that quotes the same words is untouched, and anything unparseable or in
+    /// the future leaves the text as it was.
+    #[test]
+    fn stamp_age_puts_the_gap_before_the_compaction_in_the_header() {
+        use chrono::TimeZone;
+        let at = "2026-10-12T05:40:00.000Z";
+        let body = "Quoting myself: (session s-1, last written 2026-10-12T05:40:00.000Z)";
+        let out = render("s-1", "hands", Some((body, at)));
+        let now = |h: u32, m: u32| chrono::Utc.with_ymd_and_hms(2026, 10, 12, h, m, 30).unwrap();
+        let stamped = stamp_age(&out, now(6, 18));
+        assert!(
+            stamped.contains("(session s-1, last written 2026-10-12T05:40:00.000Z — 38 minutes before this compaction), put back"),
+            "{stamped}"
+        );
+        assert!(stamped.contains(body), "the body is untouched: {stamped}");
+        assert_eq!(stamped.matches("before this compaction").count(), 1, "{stamped}");
+        assert_eq!(written_at(&stamped), Some(at), "a stamped file still reads back its time");
+        assert!(stamp_age(&out, now(5, 40)).contains("— under a minute before"));
+        assert!(stamp_age(&out, now(7, 39)).contains("— 119 minutes before"));
+        assert!(stamp_age(&out, now(9, 40)).contains("— 4 hours before"));
+        let days = stamp_age(&out, chrono::Utc.with_ymd_and_hms(2026, 10, 15, 8, 40, 0).unwrap());
+        assert!(days.contains("— 3 days 3 hours before"), "{days}");
+        // In the future, no doc, not ours: unchanged.
+        assert_eq!(stamp_age(&out, now(5, 0)), out);
+        let none = render("s-1", "hands", None);
+        assert_eq!(stamp_age(&none, now(6, 0)), none);
+        assert_eq!(stamp_age("other hook output", now(6, 0)), "other hook output");
+    }
+
+    /// The budget bounds what the hook PRINTS — the rendered file plus the
+    /// age stamp — not the rendered file alone (EYES F2, s-42bf34b3): a doc
+    /// that filled the old room came back up to 57 bytes over it once stamped.
+    #[test]
+    fn the_printed_file_stays_under_the_budget_with_its_age_stamp() {
+        use chrono::TimeZone;
+        let huge = "x".repeat(4 * FILE_BUDGET_BYTES);
+        let out = render("s-1", "hands", Some((&huge, "2026-10-12T05:40:00.000Z")));
+        let far = chrono::Utc.with_ymd_and_hms(9999, 12, 31, 23, 59, 59).unwrap();
+        let stamped = stamp_age(&out, far);
+        assert!(stamped.len() > out.len(), "the stamp was added: {}", &stamped[..200]);
+        assert!(stamped.len() <= FILE_BUDGET_BYTES, "{} bytes printed", stamped.len());
+        // The largest body that is NOT cut — the room, read off the cut file's
+        // own footer ("(<cut> of <total> bytes shown)") — still fits stamped.
+        let room: usize = out
+            .rsplit_once("is longer than what fits here (")
+            .and_then(|(_, rest)| rest.split(' ').next()?.parse().ok())
+            .expect("the footer states the cut");
+        let fitting = "y".repeat(room);
+        let out = render("s-1", "hands", Some((&fitting, "2026-10-12T05:40:00.000Z")));
+        assert!(out.contains("End of `handoff-hands`"), "not cut: {}", &out[out.len() - 80..]);
+        assert!(stamp_age(&out, far).len() <= FILE_BUDGET_BYTES, "{} bytes printed", stamp_age(&out, far).len());
+    }
+
+    #[test]
+    fn human_age_reads_at_a_glance() {
+        for (secs, want) in [
+            (0u64, "under a minute"),
+            (59, "under a minute"),
+            (60, "1 minute"),
+            (38 * 60, "38 minutes"),
+            (119 * 60, "119 minutes"),
+            (120 * 60, "2 hours"),
+            (125 * 60, "2 hours 5 minutes"),
+            (47 * 3600 + 60, "47 hours 1 minute"),
+            (48 * 3600, "2 days"),
+            (49 * 3600, "2 days 1 hour"),
+        ] {
+            assert_eq!(human_age(secs), want, "{secs} s");
+        }
+    }
+
+    /// The put-back says which source wins per claim (EYES D4), not "trust the
+    /// doc" — a doc written an hour before the compaction is older than the
+    /// summary for everything that hour held.
+    #[test]
+    fn the_header_states_which_source_wins_for_which_claims() {
+        let out = render("s-1", "hands", Some(("plan", "2026-10-12T05:40:00.000Z")));
+        assert!(out.contains("for anything after that time the summary wins"), "{out}");
+        assert!(out.contains("this doc's own words win, above all the user's instructions it quotes"), "{out}");
+        assert!(!out.contains("trust the doc"), "{out}");
     }
 
     /// The PreCompact instructions: plain text (never JSON — `{"decision":

@@ -60,7 +60,11 @@ and in `docs/rebuild-archive/`.
   last written: what you said, verbatim and with its time, the decisions, what
   was done and how it was checked, what is in flight, and what in the handoff
   is no longer true. So the hand-over stays current even when the handoff was
-  written an hour before the compaction.
+  written an hour before the compaction. The handoff put back after the
+  compaction now says how long before it the document was written ("last
+  written 05:40 — 38 minutes before this compaction") and which source wins
+  for what: the summary for anything after that time, the document's own
+  words for anything before it.
 - **A compaction is announced in the chat.** A row says whose context was
   compacted, how many tokens it went from and to, and whether its handoff
   document was put back, so the other participants know to check that it

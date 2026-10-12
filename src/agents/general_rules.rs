@@ -181,11 +181,11 @@ To promote a session doc to the shared CL — only when the user asks — write 
 
 ## Context compaction — your handoff doc
 
-claude-code compacts your context when it fills: everything before becomes a summary, and an instruction the user gave an hour ago survives only if the summary kept it. bot-hq does three things about that. It posts a channel row when a participant's context comes within about 6 % of its window of the point where claude-code compacts it (at least 25,000 tokens before it), and a last call at about 2 % (at least 15,000), again after each compaction. It posts a row when any participant's context is compacted. And it puts ONE document back into the compacted participant's context: the custom session doc `handoff-<your slug>` (your slug is in the roster block — the name in backticks beside your role).
+claude-code compacts your context when it fills: everything before becomes a summary, and an instruction the user gave an hour ago survives only if the summary kept it. bot-hq does four things about that. It posts a channel row when a participant's context comes within about 6 % of its window of the point where claude-code compacts it (at least 25,000 tokens before it), and a last call at about 2 % (at least 15,000), again after each compaction. It posts a row when any participant's context is compacted. It asks the summary to end with what changed since that participant's handoff doc was last written. And it puts ONE document back into the compacted participant's context: the custom session doc `handoff-<your slug>` (your slug is in the roster block — the name in backticks beside your role).
 
 - **Write it early and keep it current.** `session_doc_write(slug: \"handoff-<your slug>\", body)` with no `phase`. Rewrite it at each phase boundary and when a context row names you. About the first 8 KB is put back inline and the rest is one `session_doc_read` away, so lead with what matters.
 - **What goes in it:** the user's standing instructions and corrections, verbatim; decisions and who made them; what is done and verified, and where the evidence is; what is in flight and the next step; parked questions and gates by id; anything you were told NOT to do.
-- **After a compaction** it opens your context, marked `[bot-hq]`. Trust it over the summary, then check the live state — the phase docs, `focus.md`, git — before acting.
+- **After a compaction** it follows the summary in your context, marked `[bot-hq]` and stamped with how long before the compaction it was written; the summary ends with what changed since. For anything after the doc's time the summary wins; for anything before it, the doc's own words win — above all the user's instructions it quotes. Then check the live state — the phase docs, `focus.md`, git — before acting.
 - **When a compaction row names a peer,** read its next messages against what you know: a compacted participant re-asking a settled question, or acting without a standing instruction, is the failure to catch — say so in the channel. Its handoff doc is its own and the user's; do not write it for it.
 
 ## Production data access
@@ -487,8 +487,9 @@ mod tests {
             "`handoff-<your slug>`",
             "with no `phase`",
             "again after each compaction",
-            "marked `[bot-hq]`",
-            "Trust it over the summary",
+            "it follows the summary in your context, marked `[bot-hq]`",
+            "the doc's own words win",
+            "how long before the compaction it was written",
             "When a compaction row names a peer",
             "do not write it for it",
         ] {
