@@ -1009,8 +1009,11 @@ impl SignalingBridge {
     ) -> (std::collections::BTreeMap<String, String>, Vec<String>) {
         use sha2::{Digest, Sha256};
         let mut pinned = std::collections::BTreeMap::new();
-        let mut unpinned = Vec::new();
-        for script in super::outward_body::executed_scripts(command) {
+        // A script named after a `cd` on the line resolves against a directory
+        // only the command knows: never pinned, even if a same-named file sits
+        // where bot-hq would look.
+        let (resolvable, mut unpinned) = super::outward_body::executed_scripts_split(command);
+        for script in resolvable {
             let resolved = self.resolve_body_path(session_id, &script).await;
             match std::fs::read(&resolved) {
                 Ok(bytes) => {
@@ -1077,8 +1080,10 @@ impl SignalingBridge {
                 }
             }
         }
-        let notes = super::outward_body::executed_scripts(command)
+        let (resolvable, after_cd) = super::outward_body::executed_scripts_split(command);
+        let notes = resolvable
             .into_iter()
+            .chain(after_cd)
             .filter(|s| !pinned.contains_key(s))
             .map(|s| {
                 format!(
@@ -2506,10 +2511,12 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(marker.exists(), "the command ran: it created the script and ran it");
-        // `cd sub && ./run.sh`: the path is the sub-folder's, unreadable from the
-        // repo root at park — not pinned, and the command still runs.
+        // `cd sub && ./run.sh`: the path is the sub-folder's — never pinned, even
+        // with a same-named `run.sh` at the repo root (EYES: that root file used
+        // to be pinned instead) — and the command still runs.
         std::fs::create_dir_all(repo.path().join("sub")).unwrap();
         let sub_marker = repo.path().join("sub-ran.txt");
+        std::fs::write(repo.path().join("run.sh"), "echo root decoy\n").unwrap();
         std::fs::write(repo.path().join("sub/run.sh"), format!("touch {}\n", posix_path(&sub_marker))).unwrap();
         let reply = bridge.action_gate("s1".into(), "hands".into(), "cd sub && bash ./run.sh".into(), true).await.unwrap();
         let gate = reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string();

@@ -714,9 +714,25 @@ const SCRIPT_RUNNERS: &[&str] = &["python", "python3", "node", "ruby", "perl", "
 /// parks and re-hashed at approval, like a publish's body files, so the user
 /// approves the script as it was, not whatever the path holds later.
 pub(crate) fn executed_scripts(command: &str) -> Vec<String> {
+    executed_scripts_split(command).0
+}
+
+/// [`executed_scripts`] split into the scripts whose path bot-hq can resolve
+/// (before any `cd` on the line) and those it cannot: a script named AFTER a
+/// literal `cd` resolves against a directory only the command knows, so it is
+/// never pinned (EYES, s-42bf34b3: `cd sub && ./run.sh` could otherwise pin a
+/// root-level `run.sh` and miss an edit to `sub/run.sh`).
+pub(crate) fn executed_scripts_split(command: &str) -> (Vec<String>, Vec<String>) {
     let looks_like_file = |w: &str| w.contains('/') || w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()));
     let mut out: Vec<String> = Vec::new();
+    let mut after_cd: Vec<String> = Vec::new();
+    let mut seen_cd = false;
     for c in simple_commands(command, 0) {
+        if c.tool == "cd" || c.tool == "pushd" {
+            seen_cd = true;
+            continue;
+        }
+        let sink = if seen_cd { &mut after_cd } else { &mut out };
         let args: Vec<&Word> = c.args.iter().filter(|w| !w.op).collect();
         let tool = c.tool.as_str();
         if SHELLS.contains(&tool) || SCRIPT_RUNNERS.contains(&tool) {
@@ -747,31 +763,42 @@ pub(crate) fn executed_scripts(command: &str) -> Vec<String> {
             }
             if let Some(w) = file {
                 if !w.dynamic && looks_like_file(&w.text) {
-                    out.push(w.text.clone());
+                    sink.push(w.text.clone());
                 }
             }
         } else if tool == "source" || tool == "." {
             if let Some(w) = args.first() {
                 if !w.dynamic && looks_like_file(&w.text) {
-                    out.push(w.text.clone());
+                    sink.push(w.text.clone());
                 }
             }
         }
     }
     // Directly executed paths: a command word with a slash (`./x.sh`,
     // `/tmp/x.sh`, `~/bin/x`) at the start of a segment or after `&&`/`;`/`|`.
+    // A `cd` earlier on the line puts the ones after it out of reach.
+    let mut seen_cd = false;
     for seg in segments(command) {
         let Some(head) = seg.words.iter().find(|w| !w.op && !w.text.contains('=')) else { continue };
+        if head.text == "cd" || head.text == "pushd" {
+            seen_cd = true;
+            continue;
+        }
         if head.dynamic {
             continue;
         }
         let t = head.text.as_str();
-        if (t.starts_with("./") || t.starts_with('/') || t.starts_with("~/") || t.starts_with("../")) && !out.contains(&head.text) {
-            out.push(head.text.clone());
+        if t.starts_with("./") || t.starts_with('/') || t.starts_with("~/") || t.starts_with("../") {
+            let sink = if seen_cd { &mut after_cd } else { &mut out };
+            if !sink.contains(&head.text) {
+                sink.push(head.text.clone());
+            }
         }
     }
     out.dedup();
-    out
+    after_cd.retain(|s| !out.contains(s));
+    after_cd.dedup();
+    (out, after_cd)
 }
 
 /// Is `command` a pure `gh api` READ (feedback #83, the user's standing
@@ -1846,7 +1873,15 @@ mod tests {
         assert_eq!(scripts("bash -x -o pipefail scripts/deploy.sh --dry"), ["scripts/deploy.sh"]);
         assert_eq!(scripts("sh ./check.sh && python3 tools/report.py out.json"), ["./check.sh", "tools/report.py"]);
         assert_eq!(scripts("./deploy.sh prod"), ["./deploy.sh"]);
-        assert_eq!(scripts("cd x && ../bin/run.sh"), ["../bin/run.sh"]);
+        // After a `cd`, the path is the command's to resolve, not bot-hq's:
+        // listed, but on the unpinnable side.
+        assert!(scripts("cd x && ../bin/run.sh").is_empty(), "resolvable: none");
+        assert_eq!(executed_scripts_split("cd x && ../bin/run.sh"), (vec![], vec!["../bin/run.sh".to_string()]));
+        assert_eq!(executed_scripts_split("cd sub && ./run.sh"), (vec![], vec!["./run.sh".to_string()]));
+        assert_eq!(
+            executed_scripts_split("bash pre.sh && cd sub && bash ./run.sh"),
+            (vec!["pre.sh".to_string()], vec!["./run.sh".to_string()])
+        );
         assert_eq!(scripts("source ./env.sh && node scripts/x.mjs"), ["./env.sh", "scripts/x.mjs"]);
         assert_eq!(scripts("ENV=prod /tmp/finalcheck.sh | tee out.txt"), ["/tmp/finalcheck.sh"]);
         for none in [
