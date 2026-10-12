@@ -433,7 +433,7 @@ impl SignalingBridge {
     ) -> Result<ParkOutcome> {
         let listed = self.data_read_in(session_id, command).await;
         let reader = reviewer_read.then_some(agent);
-        let mut card_extra = card_extra(listed.as_ref(), approve_after, reader);
+        let mut card_extra = card_extra(command, listed.as_ref(), approve_after, reader);
         if let Some(card) = prod_read_card {
             card_extra = format!("\n\n{card}{card_extra}");
         }
@@ -1018,11 +1018,23 @@ pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> 
 /// The lines a gate's card gains (group K): which list entry a listed data
 /// read matched, and the executor's "approve only after" (feedback #94).
 fn card_extra(
+    command: &str,
     listed: Option<&crate::policy::data_reads::DataRead>,
     approve_after: Option<&str>,
     reviewer: Option<&str>,
 ) -> String {
     let mut out = String::new();
+    // Feedback #83 (item 4): a command that only writes TEXT into a file — a
+    // `printf` assembling a script, a heredoc — says so on the card, so the
+    // user knows the Approve runs nothing in that text. Only for the pure
+    // shape (one producer, one redirection, no continuation, nothing
+    // computed); anything else gets no such claim.
+    if let Some(file) = super::outward_body::text_only_write_target(command) {
+        out.push_str(&format!(
+            "\n\nThis command only writes text into `{file}` — nothing in that text runs when you \
+             approve (a keyword may have matched inside the text)."
+        ));
+    }
     if let Some(read) = listed {
         let whose = match reviewer {
             Some(slug) => format!("Reviewer's command ({slug})"),
@@ -2129,6 +2141,40 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("direct") && out.contains("The run is bounded at 5 s."), "{out}");
+    }
+
+    /// Feedback #83 (item 4): a parked command that only writes text into a
+    /// file says so on the user's card; a line that also runs something, or
+    /// a plain gated command, carries no such claim.
+    #[tokio::test]
+    async fn the_card_says_when_a_command_only_writes_text_into_a_file() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let park = |cmd: &str| {
+            let cmd = cmd.to_string();
+            let bridge = bridge.clone();
+            async move {
+                let reply = bridge.action_gate("s1".into(), "hands".into(), cmd, true).await.unwrap();
+                reply.split("gate_id: ").nth(1).and_then(|r| r.split(')').next()).unwrap().to_string()
+            }
+        };
+        let writes = park("printf 'psql -h prod.db -c \"select 1\"\\n' > /tmp/read.sh").await;
+        let row = storage.get_tray_entry(&writes).await.unwrap().unwrap();
+        assert!(
+            row.prompt.contains("This command only writes text into `/tmp/read.sh` — nothing in that text runs when you approve"),
+            "{}",
+            row.prompt
+        );
+        let runs = park("printf 'x' > /tmp/a.sh && sh /tmp/a.sh").await;
+        let row = storage.get_tray_entry(&runs).await.unwrap().unwrap();
+        assert!(!row.prompt.contains("only writes text"), "{}", row.prompt);
+        let plain = park("psql -h prod.db -c 'select 1'").await;
+        let row = storage.get_tray_entry(&plain).await.unwrap().unwrap();
+        assert!(!row.prompt.contains("only writes text"), "{}", row.prompt);
     }
 
     /// Feedback #96: under a zsh gate shell, a command carrying the

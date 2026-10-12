@@ -592,7 +592,151 @@ fn shell_script(args: &[Word], seg: &Segment, idx: usize, segs: &[Segment]) -> S
 pub(crate) fn is_outward(command: &str) -> bool {
     simple_commands(command, 0)
         .iter()
-        .any(|c| c.opaque || OUTWARD_TOOLS.contains(&c.tool.as_str()))
+        .any(|c| c.opaque || (OUTWARD_TOOLS.contains(&c.tool.as_str()) && !is_gh_api_get(c)))
+}
+
+/// Is this simple command a `gh api` GET — a read that publishes nothing
+/// (feedback #83)? gh's own rule: a request is a GET unless a field or body
+/// flag (`-f`, `-F`, `--field`, `--raw-field`, `--input`) makes it a POST,
+/// unless `-X GET` / `--method GET` says GET regardless; `graphql` is always a
+/// POST (and can be a mutation); any other explicit method is a write; an
+/// `X-HTTP-Method-Override` header may turn the request into one; a value the
+/// shell computes could be any of these. Every doubt reads as "not a GET".
+fn is_gh_api_get(c: &Cmd) -> bool {
+    if c.tool != "gh" || c.opaque {
+        return false;
+    }
+    let args: Vec<&Word> = c.args.iter().filter(|w| !w.op).collect();
+    if args.first().map(|w| w.text.as_str()) != Some("api") {
+        return false;
+    }
+    let args = &args[1..];
+    if args.iter().any(|w| w.dynamic) {
+        return false;
+    }
+    let mut method: Option<String> = None;
+    let mut has_body = false;
+    let mut endpoint: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].text.as_str();
+        let value_of = |i: &mut usize| -> Option<String> {
+            // `--flag=value` or `--flag value`; `-Xvalue` or `-X value`.
+            if let Some((_, v)) = a.split_once('=').filter(|_| a.starts_with("--")) {
+                return Some(v.to_string());
+            }
+            if a.len() > 2 && !a.starts_with("--") {
+                return Some(a[2..].to_string());
+            }
+            *i += 1;
+            args.get(*i).map(|w| w.text.clone())
+        };
+        if a == "-X" || a == "--method" || a.starts_with("-X") || a.starts_with("--method=") {
+            match value_of(&mut i) {
+                Some(m) => method = Some(m.to_ascii_uppercase()),
+                None => return false,
+            }
+        } else if a == "--input" || a.starts_with("--input=") || a == "--field" || a.starts_with("--field=")
+            || a == "--raw-field" || a.starts_with("--raw-field=")
+            || (a.starts_with("-f") && !a.starts_with("--")) || (a.starts_with("-F") && !a.starts_with("--"))
+        {
+            has_body = true;
+            if a == "--input" || a == "--field" || a == "--raw-field" || a == "-f" || a == "-F" {
+                i += 1; // the value
+            }
+        } else if a == "-H" || a == "--header" || a.starts_with("--header=") || (a.starts_with("-H") && a.len() > 2) {
+            let v = match value_of(&mut i) {
+                Some(v) => v,
+                None => return false,
+            };
+            if v.to_ascii_lowercase().contains("x-http-method-override") {
+                return false;
+            }
+        } else if matches!(a, "-q" | "--jq" | "-t" | "--template" | "--hostname" | "--cache" | "-p" | "--preview")
+            || a.starts_with("--jq=") || a.starts_with("--template=") || a.starts_with("--hostname=")
+            || a.starts_with("--cache=") || a.starts_with("--preview=")
+        {
+            // A value-taking flag that does not change the method.
+            if !a.contains('=') {
+                i += 1;
+            }
+        } else if a.starts_with('-') {
+            // A boolean flag (`--paginate`, `-i`, `--silent`, `--verbose`).
+        } else if endpoint.is_none() {
+            endpoint = Some(a);
+        }
+        i += 1;
+    }
+    let Some(endpoint) = endpoint else { return false };
+    if endpoint.trim_start_matches('/').eq_ignore_ascii_case("graphql") {
+        return false;
+    }
+    match method.as_deref() {
+        Some("GET") => true,
+        Some(_) => false,
+        None => !has_body,
+    }
+}
+
+/// Is `command` a pure `gh api` READ (feedback #83, the user's standing
+/// decision of 2026-10-12): ONE `gh api` GET, piped at most into the
+/// read-only filters `read_gate` allows — no continuation, no redirection, no
+/// shell, nothing the shell computes? Such a command runs without approval
+/// whatever the Tool Gate keyword list says (`tool_gate::match_keyword`).
+pub(crate) fn is_gh_api_read(command: &str) -> bool {
+    if single_read_command(command).is_err() {
+        return false;
+    }
+    let cmds = simple_commands(command, 0);
+    let Some(first) = cmds.first() else { return false };
+    is_gh_api_get(first)
+        && cmds[1..].iter().all(|c| READ_FILTERS.contains(&c.tool.as_str()) && !c.opaque)
+}
+
+/// The file `command` writes TEXT into without running anything (feedback
+/// #83, item 4): one `echo` / `printf` / `cat`-heredoc, redirected with `>`
+/// or `>>` to a literal path, with no continuation, no pipe and nothing the
+/// shell computes. The approval card then says the text is written, not run
+/// — a `printf` that assembled a production `psql -h …` line into a script
+/// once cost the user an approval that decided nothing. `None` for anything
+/// else (a cut on the side of silence, never a wrong "only writes").
+pub(crate) fn text_only_write_target(command: &str) -> Option<String> {
+    if command.lines().count() > 1 && !command.contains("<<") {
+        return None;
+    }
+    let segs = segments(command);
+    // One command: a heredoc's body lines leave an empty trailing segment.
+    let segs: Vec<&Segment> = segs.iter().filter(|s| !s.words.is_empty()).collect();
+    let [seg] = segs.as_slice() else { return None };
+    if seg.words.iter().any(|w| w.dynamic) {
+        return None;
+    }
+    let head = basename(&seg.words.first()?.text);
+    let producer = match head {
+        "echo" | "printf" => true,
+        "cat" => !seg.heredocs.is_empty(),
+        _ => false,
+    };
+    if !producer {
+        return None;
+    }
+    // Exactly one redirection, `>` or `>>`, to a literal file; the only other
+    // operators allowed are the heredoc's own (`<<`, `<<-`).
+    let ops: Vec<(usize, &Word)> = seg
+        .words
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.op && !(w.text.starts_with("<<") && !w.text.starts_with("<<<")))
+        .collect();
+    let [(at, op)] = ops.as_slice() else { return None };
+    if op.text != ">" && op.text != ">>" {
+        return None;
+    }
+    let target = seg.words.get(at + 1)?;
+    if target.op || target.dynamic || target.text.starts_with('&') || target.text.starts_with("/dev/") {
+        return None;
+    }
+    Some(target.text.clone())
 }
 
 /// The content an outward command publishes: body FILES (paths as written,
@@ -1530,6 +1674,83 @@ mod tests {
             .collect()
     }
 
+    /// Feedback #83: gh's own rule decides whether a `gh api` call is a GET,
+    /// and only a GET escapes the outward class — EYES' table, both columns.
+    #[test]
+    fn a_gh_api_get_is_not_outward_but_every_write_shape_still_is() {
+        for get in [
+            "gh api repos/o/r/issues",
+            "gh api -X GET search/issues -f q=x",
+            "gh api --method GET repos/o/r/issues -F per_page=5",
+            "gh api --method=get repos/o/r/pulls --paginate --jq '.[].number'",
+            "gh api repos/o/r/issues/comments/12 -H 'Accept: application/vnd.github+json'",
+            "gh api -i repos/o/r",
+        ] {
+            assert!(!is_outward(get), "a GET publishes nothing: {get}");
+            assert!(is_gh_api_read(get), "a pure read: {get}");
+        }
+        for write in [
+            "gh api repos/o/r/issues -f title=x",
+            "gh api --input b.json repos/o/r/issues",
+            "gh api -XPOST repos/o/r/issues",
+            "gh api --method=PATCH repos/o/r/issues/5",
+            "gh api --method DELETE repos/o/r/issues/comments/5",
+            "gh api graphql -f query='mutation { x }'",
+            "gh api /graphql",
+            "gh api repos/o/r/issues -H 'X-HTTP-Method-Override: DELETE'",
+            "gh api -F body=@notes.md repos/o/r/issues/5/comments",
+            "gh api --raw-field body=hi repos/o/r/issues/5/comments",
+            "gh api $EP",
+            "gh api repos/o/r/issues -X",
+        ] {
+            assert!(is_outward(write), "still outward: {write}");
+            assert!(!is_gh_api_read(write), "not a pure read: {write}");
+        }
+        // A GET inside a longer line is a read only when the rest is a read
+        // filter: a shell or a second command keeps the whole line gated.
+        assert!(is_gh_api_read("gh api repos/o/r | jq .name"));
+        assert!(is_gh_api_read("gh api repos/o/r/issues --paginate | grep -c open | head -1"));
+        for not_pure in [
+            "gh api repos/o/r | sh",
+            "gh api repos/o/r && gh issue comment 5 -b x",
+            "gh api repos/o/r; rm -rf x",
+            "gh api repos/o/r > out.json",
+            "gh api repos/o/r | tee out.json",
+            "cat x | gh api repos/o/r",
+            "timeout 30 gh api repos/o/r",
+            "ENV=1 gh api repos/o/r",
+        ] {
+            assert!(!is_gh_api_read(not_pure), "not a pure read: {not_pure}");
+        }
+        assert!(is_outward("gh api repos/o/r && gh issue comment 5 -b x"));
+        assert!(is_outward("gh api repos/o/r | sh"), "a shell fed from the read is opaque");
+        assert!(!is_outward("gh api repos/o/r | jq .name"));
+    }
+
+    /// Feedback #83 (item 4): the card says "only writes text" for exactly the
+    /// pure shape — one `echo`/`printf`/heredoc into one file — never for a
+    /// line that also runs something or that the shell computes.
+    #[test]
+    fn only_a_pure_text_write_names_its_file() {
+        assert_eq!(text_only_write_target("printf 'psql -h prod.db -c \"select 1\"\\n' > /tmp/read.sh"), Some("/tmp/read.sh".into()));
+        assert_eq!(text_only_write_target("echo 'gh issue comment 5' >> notes.txt"), Some("notes.txt".into()));
+        assert_eq!(text_only_write_target("cat > /tmp/q.sql <<'EOF'\nselect 1;\nEOF"), Some("/tmp/q.sql".into()));
+        for not_pure in [
+            "printf 'x' > /tmp/a.sh && sh /tmp/a.sh",
+            "printf 'x' > /tmp/a.sh; /tmp/a.sh",
+            "echo x | tee /tmp/a",
+            "echo x > \"$OUT\"",
+            "echo \"$(gh api repos/o/r)\" > out",
+            "echo x > /dev/stderr",
+            "echo x >&2",
+            "cat /etc/passwd > /tmp/p",
+            "gh api repos/o/r > out.json",
+            "printf 'x'",
+        ] {
+            assert_eq!(text_only_write_target(not_pure), None, "{not_pure}");
+        }
+    }
+
     #[test]
     fn segments_split_like_a_shell() {
         assert_eq!(
@@ -1568,7 +1789,9 @@ mod tests {
             "gh issue comment 5 --body x",
             "true && gh pr merge 3",
             "GH_TOKEN=abc gh issue edit 5 --body x",
-            "env GH_HOST=x gh api repos/o/r",
+            // A `gh api` WRITE through a wrapper; the bare GET is a read
+            // (feedback #83, `a_gh_api_get_is_not_outward_but_every_write_shape_still_is`).
+            "env GH_HOST=x gh api repos/o/r -f title=x",
             "command gh release create v1",
             "/opt/homebrew/bin/gh pr create --title t --body b",
             "bash -c 'gh issue comment 5 --body x'",
@@ -1706,7 +1929,8 @@ mod tests {
         assert_eq!(ok(cmd).files, vec!["b.md"]);
         assert!(is_outward("echo \"$(gh issue comment 5 -b x)\""));
         assert!(is_outward("echo `gh issue close 5`"));
-        assert!(is_outward("diff <(gh api repos/o/r) old.json"));
+        assert!(is_outward("diff <(gh api -X POST repos/o/r/dispatches) old.json"));
+        assert!(!is_outward("diff <(gh api repos/o/r) old.json"), "a GET in a substitution is still a read (feedback #83)");
     }
 
     #[test]

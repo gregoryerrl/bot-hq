@@ -65,6 +65,18 @@ and in `docs/rebuild-archive/`.
   written 05:40 — 38 minutes before this compaction") and which source wins
   for what: the summary for anything after that time, the document's own
   words for anything before it.
+- **A `gh api` read runs without approval, and a command that only writes a
+  file says so.** A `gh api` call with no field, body or method that makes it
+  a write — gh's own rule for a GET — is a read like `gh pr view`: it is no
+  longer treated as a publish the reviewer must read first, and by your
+  choice it runs without approval whatever the Tool Gate keyword list says,
+  when it is one command piped at most into head, tail, jq, grep, wc or cut.
+  Every write shape still gates: a `-f`/`-F`/`--field`/`--raw-field`/`--input`
+  field, `graphql`, `-X`/`--method` with anything but GET, a method-override
+  header, a pipe into a shell, or another command on the same line. And when
+  a parked command only writes text into a file — a `printf` assembling a
+  script, a heredoc — the approval card now says so, so an Approve that runs
+  nothing in that text is not mistaken for one that does.
 - **A temporary halt can wait up to 48 hours.** `wake_after_secs` on
   `mark_awaiting_user` and `halt` was capped at an hour, so an overnight CI run
   or tomorrow's cron meant re-declaring every hour — and a participant that

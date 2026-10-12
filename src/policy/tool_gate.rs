@@ -323,6 +323,16 @@ pub fn match_keyword(
     command: &str,
     keywords: &[GatedKeyword],
 ) -> Option<GateMode> {
+    // The user's standing decision (feedback #83, 2026-10-12, tray 905fd945):
+    // a pure `gh api` GET — one read, piped at most into a read-only filter —
+    // runs without approval WHATEVER the keyword list says, the `gh api`
+    // keyword included. It publishes nothing and decides nothing; gating it
+    // spent approvals on reads while the writes it sits beside still gate
+    // (`gh api … -f title=x`, `graphql`, `-X PATCH`, `… | sh`, `… && gh issue
+    // comment` all still match).
+    if tool_name == "Bash" && crate::signaling::is_gh_api_read(command) {
+        return None;
+    }
     let line = Line::new(tool_name, command);
     if keywords
         .iter()
@@ -758,6 +768,30 @@ mod tests {
         );
     }
 
+    /// Feedback #83 (the user's decision, 2026-10-12): a pure `gh api` GET
+    /// runs without approval whatever the keyword list says — the `gh api`
+    /// gate keyword included — while every write shape beside it still
+    /// matches, and a GET inside a longer line matches as that line does.
+    #[test]
+    fn a_pure_gh_api_get_runs_whatever_the_keyword_list_says() {
+        let kws = [kw("gh api", GateMode::Gate), kw("gh", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "gh api repos/o/r/issues", &kws), None);
+        assert_eq!(match_keyword("Bash", "gh api repos/o/r/issues --paginate | jq '.[].title'", &kws), None);
+        assert_eq!(match_keyword("Bash", "gh api -X GET search/issues -f q=x", &kws), None);
+        for gated in [
+            "gh api repos/o/r/issues -f title=x",
+            "gh api graphql -f query=x",
+            "gh api --method DELETE repos/o/r/issues/5",
+            "gh api repos/o/r | sh",
+            "gh api repos/o/r && gh issue comment 5 -b x",
+            "gh issue comment 5 -b x",
+        ] {
+            assert_eq!(match_keyword("Bash", gated, &kws), Some(GateMode::Gate), "{gated}");
+        }
+        // Another tool's call is never exempted by this rule.
+        assert_eq!(match_keyword("Edit", "gh api repos/o/r/issues", &kws), Some(GateMode::Gate));
+    }
+
     #[test]
     fn gate_wins_over_auto_allow_on_conflict() {
         // "git" gates broadly; "git push" auto-allows. A push matches both —
@@ -1039,7 +1073,9 @@ mod tests {
     #[test]
     fn a_keyword_that_runs_still_parks() {
         for command in [
-            "gh api repos/o/r",
+            // A `gh api` WRITE; the bare GET is the user's exemption (feedback
+            // #83, `a_pure_gh_api_get_runs_whatever_the_keyword_list_says`).
+            "gh api repos/o/r -f title=x",
             "bash -c \"rm -rf x\"",
             "echo $(gh api x)",
             "diff <(gh api a) b",
