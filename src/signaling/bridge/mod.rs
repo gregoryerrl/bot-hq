@@ -1751,6 +1751,23 @@ impl SignalingBridge {
 
     // ---- Project helpers --------------------------------------------
 
+    /// The live (registered, not yet closed) sessions of `project`, oldest
+    /// id first — the sessions a rename or delete of the project would pull
+    /// the floor from under (feedback #49: the command layer refuses while any
+    /// exist, naming them).
+    pub async fn live_sessions_of_project(&self, project: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .session_projects
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, p)| p.as_deref() == Some(project))
+            .map(|(sid, _)| sid.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// Best-effort lookup. Returns the registered project (if any) or None
     /// if the session isn't registered yet.
     pub async fn project_for_session(&self, session_id: &str) -> Option<String> {

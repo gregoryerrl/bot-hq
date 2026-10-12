@@ -63,16 +63,41 @@ impl Storage {
 
     /// Hard-delete a project: removes the `projects` row, which CASCADES (FK
     /// `ON DELETE CASCADE`, `foreign_keys` pragma is on) to `cl_index` +
-    /// `cl_folders`, and `cl_reads` via its FK to `cl_index`. The on-disk CL
-    /// directory is NOT touched here — the command layer decides that, and only
-    /// for managed default-convention dirs (never a custom `cl_path` / repo).
+    /// `cl_folders`, and `cl_reads` via its FK to `cl_index`. `cl_atoms` is an
+    /// FTS5 table with no FK, so its rows are deleted here by name (feedback
+    /// #49: two deleted projects left 116 atoms behind, still answering
+    /// retrieval). The on-disk CL directory is NOT touched here — the command
+    /// layer decides that, and only for managed default-convention dirs (never
+    /// a custom `cl_path` / repo).
     pub async fn delete_project(&self, name: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query("DELETE FROM projects WHERE name = ?")
             .bind(name)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .with_context(|| format!("deleting project {name}"))?;
+        sqlx::query("DELETE FROM cl_atoms WHERE project_id = ?")
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("deleting the atoms of project {name}"))?;
+        tx.commit().await?;
         Ok(())
+    }
+
+    /// Atoms whose project has neither a `projects` row nor any `cl_index` row
+    /// — left behind by a delete or rename before 0049 repointed them, and by
+    /// nothing since. Runs at startup; returns how many went. `cl_atoms` has no
+    /// FK to lean on (an FTS5 table), so this is the sweep.
+    pub async fn purge_orphan_atoms(&self) -> Result<u64> {
+        let res = sqlx::query(
+            "DELETE FROM cl_atoms WHERE project_id NOT IN (SELECT name FROM projects) \
+             AND project_id NOT IN (SELECT DISTINCT project_id FROM cl_index)",
+        )
+        .execute(&self.pool)
+        .await
+        .context("purging orphan CL atoms")?;
+        Ok(res.rows_affected())
     }
 
     /// Rename a project: repoint the `projects` row name + display_name and all
@@ -99,6 +124,14 @@ impl Storage {
             .execute(&mut *tx)
             .await?;
         sqlx::query("UPDATE cl_folders SET project_id = ? WHERE project_id = ?")
+            .bind(new)
+            .bind(old)
+            .execute(&mut *tx)
+            .await?;
+        // `cl_atoms` has no FK (FTS5): repointed by name, like the rest
+        // (feedback #49 — a renamed project's atoms kept the old name and
+        // stopped answering retrieval for the new one).
+        sqlx::query("UPDATE cl_atoms SET project_id = ? WHERE project_id = ?")
             .bind(new)
             .bind(old)
             .execute(&mut *tx)
@@ -317,6 +350,47 @@ mod tests {
             .is_empty());
         // cl_reads cascades off cl_index (cl_index_id FK ON DELETE CASCADE).
         assert!(s.cl_reads_for_session("s1").await.unwrap().is_empty());
+    }
+
+    async fn atom_count(s: &Storage, project: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM cl_atoms WHERE project_id = ?")
+            .bind(project)
+            .fetch_one(s.pool())
+            .await
+            .unwrap()
+    }
+
+    fn atom(text: &str) -> crate::storage::Atom {
+        crate::storage::Atom { heading_path: "notes > a".into(), body: text.into(), code_hash: None }
+    }
+
+    /// Feedback #49: `cl_atoms` (FTS5, no FK) follows its project through a
+    /// rename and a delete, and atoms a project no longer owns — neither a
+    /// `projects` row nor a `cl_index` row names them — are swept at startup
+    /// (116 such rows sat in the live DB from two deleted projects).
+    #[tokio::test]
+    async fn atoms_follow_a_rename_and_a_delete_and_orphans_are_swept() {
+        let s = Storage::memory().await.unwrap();
+        s.upsert_project("old", "old", Some("/r"), None, None).await.unwrap();
+        s.upsert_cl_index("old", "notes.md", "d", None).await.unwrap();
+        s.replace_atoms_for_file("old", "notes.md", &[atom("the lodestone plan")], "2026-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        s.rename_project("old", "new", "new").await.unwrap();
+        assert_eq!((atom_count(&s, "old").await, atom_count(&s, "new").await), (0, 1), "repointed with the project");
+        assert_eq!(s.cl_retrieve("new", "lodestone", None, 1_000, false).await.unwrap().len(), 1);
+        s.delete_project("new").await.unwrap();
+        assert_eq!(atom_count(&s, "new").await, 0, "deleted with the project");
+        // Orphans from before: atoms of a project with no row and no index.
+        s.replace_atoms_for_file("ghost", "x.md", &[atom("left behind")], "2026-01-01T00:00:00Z").await.unwrap();
+        // …but a project that still has an index row keeps its atoms, with or
+        // without a `projects` row (an external CL folder indexed on its own).
+        s.upsert_project("keep", "keep", Some("/k"), None, None).await.unwrap();
+        s.upsert_cl_index("keep", "k.md", "d", None).await.unwrap();
+        s.replace_atoms_for_file("keep", "k.md", &[atom("kept")], "2026-01-01T00:00:00Z").await.unwrap();
+        assert_eq!(s.purge_orphan_atoms().await.unwrap(), 1);
+        assert_eq!((atom_count(&s, "ghost").await, atom_count(&s, "keep").await), (0, 1));
+        assert_eq!(s.purge_orphan_atoms().await.unwrap(), 0, "idempotent");
     }
 
     #[tokio::test]

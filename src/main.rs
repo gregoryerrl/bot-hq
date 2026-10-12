@@ -188,6 +188,8 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                 ("retrieval events", storage.purge_retrieval_events(GC_RETENTION_DAYS).await),
                 ("cancel events", storage.purge_cancel_events(GC_RETENTION_DAYS).await),
                 ("CL reads", storage.purge_cl_reads(GC_RETENTION_DAYS).await),
+                // Feedback #49: atoms of a project that no longer exists.
+                ("orphan CL atoms", storage.purge_orphan_atoms().await),
             ] {
                 match purged {
                     Ok(n) if n > 0 => tracing::info!(purged = n, what, "startup GC"),

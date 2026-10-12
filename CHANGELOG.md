@@ -249,6 +249,14 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **Renaming or deleting a project takes its search index with it, and waits
+  for its sessions.** The Context Library's retrieval index (`cl_atoms`) has no
+  link to the project row, so a renamed project's atoms kept the old name and
+  stopped answering, and a deleted project's stayed behind — 116 rows from two
+  deleted projects were still answering `cl_retrieve`. A rename now repoints
+  them and a delete removes them, orphans are swept at startup, and a project
+  with an open session is neither renamed nor deleted until that session is
+  closed (the refusal names it).
 - **An agent's rewrite can no longer bury what you typed into a session
   document.** When you answer inside a document in its tab and a participant
   then replaces that document without having read your version, the replace

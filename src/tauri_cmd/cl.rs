@@ -743,6 +743,7 @@ pub async fn cl_delete_project(
     let Some(proj) = storage.get_project(&name).await? else {
         return Ok(()); // already gone — idempotent
     };
+    refuse_while_sessions_run(&bridge, &name, "deleted").await?;
 
     // Only remove disk for a managed (default-convention) project. A custom
     // cl_path points at the user's own folder/repo; never rm that.
@@ -796,6 +797,7 @@ pub async fn cl_rename_project(
             "a project named '{new_name}' already exists"
         )));
     }
+    refuse_while_sessions_run(&bridge, &name, "renamed").await?;
 
     // Managed dir move (default convention only). Done BEFORE the DB repoint so
     // a disk failure aborts without leaving the row pointing at a missing dir;
@@ -839,6 +841,25 @@ pub async fn cl_rename_project(
 
     emit_project_and_cl_changed(&app, &new_name);
     Ok(())
+}
+
+/// A project with a live session is neither renamed nor deleted (feedback
+/// #49): the session's project binding, its CL root and its working folder
+/// would all point at a name that no longer exists, mid-turn. The refusal
+/// names the sessions to close first.
+async fn refuse_while_sessions_run(bridge: &SignalingBridge, name: &str, verb: &str) -> Result<(), AppError> {
+    let live = bridge.live_sessions_of_project(name).await;
+    if live.is_empty() {
+        return Ok(());
+    }
+    Err(AppError::Validation(format!(
+        "'{name}' cannot be {verb} while {} session{} of it {} open ({}): close {} first",
+        live.len(),
+        if live.len() == 1 { "" } else { "s" },
+        if live.len() == 1 { "is" } else { "are" },
+        live.join(", "),
+        if live.len() == 1 { "it" } else { "them" },
+    )))
 }
 
 /// Resolve + canonicalize a project's CL root for the disk-op commands below.
@@ -1007,6 +1028,30 @@ mod tests {
         assert!(validate_project_name("a/b").is_err());
         assert!(validate_project_name("a\\b").is_err());
         assert!(validate_project_name(".hidden").is_err());
+    }
+
+    /// Feedback #49: a project with a live session is neither renamed nor
+    /// deleted; the refusal names the sessions to close first, and a closed
+    /// (unregistered) session frees it.
+    #[tokio::test]
+    async fn a_project_with_a_live_session_is_not_renamed_or_deleted() {
+        let bridge = SignalingBridge::new();
+        bridge.register_session("s-aaaa".to_string(), Some("linear-lode".to_string())).await;
+        bridge.register_session("s-bbbb".to_string(), Some("linear-lode".to_string())).await;
+        bridge.register_session("s-cccc".to_string(), Some("other".to_string())).await;
+        let err = refuse_while_sessions_run(&bridge, "linear-lode", "renamed").await.unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "'linear-lode' cannot be renamed while 2 sessions of it are open (s-aaaa, s-bbbb): close them first"
+            ),
+            "{err}"
+        );
+        bridge.unregister_session("s-aaaa").await;
+        let err = refuse_while_sessions_run(&bridge, "linear-lode", "deleted").await.unwrap_err();
+        assert!(err.to_string().contains("while 1 session of it is open (s-bbbb): close it first"), "{err}");
+        bridge.unregister_session("s-bbbb").await;
+        refuse_while_sessions_run(&bridge, "linear-lode", "deleted").await.unwrap();
+        refuse_while_sessions_run(&bridge, "nobody", "renamed").await.unwrap();
     }
 
     #[tokio::test]
