@@ -934,7 +934,7 @@ pub(crate) async fn dispatch_session_inner(
     // way (a plugin holding `list_sessions` is told `sessions_changed`).
     core.notify_session_created(&id);
     started?;
-    core.broadcast(&id, &prompt).await?;
+    core.broadcast(&id, &prompt, crate::core::Authored::ByUser).await?;
     Ok(session.into())
 }
 

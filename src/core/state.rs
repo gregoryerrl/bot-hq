@@ -1,7 +1,7 @@
 //! `AppState`: top-level handle the UI layer holds.
 
 use crate::core::activity::ActivityTracker;
-use crate::core::broadcast::broadcast_user_message;
+use crate::core::broadcast::{broadcast_user_message, Authored};
 use crate::core::close_learnings;
 use crate::core::ipav::IpavPhase;
 use crate::core::session::{spawn_existing_session, SessionAgent, SessionHandle};
@@ -834,7 +834,8 @@ impl AppState {
                 return Ok(()); // not paused → stale click; don't nudge the session
             }
         }
-        self.broadcast(session_id, RESUME_NOTICE).await
+        // bot-hq's text in the user's voice: not the user's words (B1d).
+        self.broadcast(session_id, RESUME_NOTICE, Authored::ByHost).await
     }
 
     /// **The Stop button, end to end** (round 11): decide with
@@ -1327,7 +1328,7 @@ impl AppState {
     async fn run_close_epilogue(&self, id: &str) {
         use close_learnings::Outcome;
         let outcome = match self
-            .broadcast(id, close_learnings::CLOSE_LEARNINGS_PROMPT)
+            .broadcast(id, close_learnings::CLOSE_LEARNINGS_PROMPT, Authored::ByHost)
             .await
         {
             Err(e) => Outcome::Failed(e.to_string()),
@@ -1738,8 +1739,8 @@ impl AppState {
         })
     }
 
-    pub async fn broadcast(&self, session_id: &str, text: &str) -> Result<()> {
-        self.broadcast_as(session_id, text, UserSend::Typed).await
+    pub async fn broadcast(&self, session_id: &str, text: &str, authored: Authored) -> Result<()> {
+        self.broadcast_as(session_id, text, UserSend::Typed, authored).await
     }
 
     /// [`broadcast`](Self::broadcast) with the arrival mode named explicitly.
@@ -1749,6 +1750,7 @@ impl AppState {
         session_id: &str,
         text: &str,
         send: UserSend,
+        authored: Authored,
     ) -> Result<()> {
         // The paste gate, FIRST — before any respawn work is spent on a
         // message that will be refused. s-f6a441ff: a 2,977,078-byte paste of
@@ -1872,7 +1874,7 @@ impl AppState {
         // No recipient list: the row IS the delivery (rc3 D19). The ring hands
         // the turn to the front of the rotation and that participant drains the
         // row off its cursor; everyone else reads it when their turn comes.
-        let id = broadcast_user_message(&self.storage, session_id, text, phase, reconcile).await?;
+        let id = broadcast_user_message(&self.storage, session_id, text, phase, reconcile, authored).await?;
         // **Who did the user name?** (rc3 D17.) Resolved HERE, on the one path
         // that writes an `origin = "user"` row — which is what makes "only the
         // user may mention" structural rather than a rule agents are asked to
@@ -1977,7 +1979,7 @@ impl AppState {
             // last row of the batch, framing the turn. `send` rides through:
             // this is the branch a staged delivery takes, and it is where the
             // preempt lived.
-            return self.broadcast_as(session_id, text, send).await;
+            return self.broadcast_as(session_id, text, send, Authored::ByUser).await;
         }
         if answered == 0 {
             return Err(anyhow::anyhow!(

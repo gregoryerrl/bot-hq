@@ -100,10 +100,12 @@ pub fn render(session_id: &str, participant: &str, doc: Option<(&str, &str)>) ->
         "{INJECT_MARKER} Below is your pinned handoff doc `{slug}` (session \
          {session_id}{WRITTEN_PREFIX}{updated_at}), put back by bot-hq.\n\
          It speaks as of that time, written by you or by the user. The summary above was written \
-         at the compaction and was asked to end with what changed since then: for anything after \
-         that time the summary wins; for anything before it, this doc's own words win, above all \
-         the user's instructions it quotes. Then check the live state: the phase documents \
-         (session_doc_search), the project's focus.md and git.\n---\n"
+         at the compaction and was asked to end with what changed since then; what the user said \
+         since then, if anything, follows this doc verbatim. The user's verbatim words win over the \
+         summary's account of them; for anything else after that time the summary wins; for \
+         anything before it, this doc's own words win, above all the user's instructions it \
+         quotes. Then check the live state: the phase documents (session_doc_search), the \
+         project's focus.md and git.\n---\n"
     );
     // Room for the longest footer: two 20-digit byte counts and a line number.
     const FOOTER_RESERVE: usize = 240;
@@ -218,16 +220,20 @@ pub fn compaction_instructions(session_id: &str, participant: &str, written_at: 
         Some(at) => format!(
             "[bot-hq] This conversation is participant `{participant}` in bot-hq session {session_id}. \
              After this compaction bot-hq puts its handoff doc `{slug}` (last written {at}) back into \
-             its context beside your summary. Write the summary as you normally would. Then end it \
-             with a section headed \"Since `{slug}` was last written ({at})\" that lists, from after \
-             that time: {lists}; and each statement in `{slug}` you know to be no longer true, with \
-             what replaced it."
+             its context beside your summary, and the user's own messages from after that time, \
+             verbatim. Write the summary as you normally would. Then end it with a section headed \
+             \"Since `{slug}` was last written ({at})\" that lists, from after that time: {lists}; and \
+             each statement in `{slug}` you know to be no longer true, with what replaced it. Quote \
+             the user exactly: where your quotation and the verbatim text differ, the verbatim text \
+             wins."
         ),
         None => format!(
             "[bot-hq] This conversation is participant `{participant}` in bot-hq session {session_id}. \
-             It has no handoff doc, so your summary is all it carries across this compaction. Write \
-             the summary as you normally would. Then end it with a section headed \"Standing \
-             instructions and state\" that lists: {lists}."
+             It has no handoff doc, so your summary and the user's own messages of this session, \
+             which bot-hq puts back verbatim beside it, are all it carries across this compaction. \
+             Write the summary as you normally would. Then end it with a section headed \"Standing \
+             instructions and state\" that lists: {lists}. Quote the user exactly: where your \
+             quotation and the verbatim text differ, the verbatim text wins."
         ),
     }
 }
@@ -248,9 +254,178 @@ pub fn write_file(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("md.tmp");
+    // `<name>.tmp` beside the file, the whole name kept: `hands.md` and
+    // `user-words.log` must not share a temp file in the same directory.
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = path.with_file_name(format!("{name}.tmp"));
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)
+}
+
+// ---------------------------------------------------------------------------
+// The user's own words (feedback-queue scope, s-42bf34b3 B1d)
+//
+// The summary the compaction writes is asked to quote the user (see
+// `compaction_instructions`), but a summarizer paraphrases. So the words the
+// user typed, staged or answered in the tray since a participant's handoff
+// doc was last written are put back VERBATIM beside the doc, by a second
+// `SessionStart:compact` hook command (`policy-check compact-user-words`) that
+// prints its own file. Its own hook output, because claude-code caps each
+// hook's output on its own: two 9,029-byte outputs arrived whole where one
+// 18,040-byte output became a 2 KB preview (probed on CLI 2.1.291,
+// s-42bf34b3, session doc `evidence-hook-cap-probe`). The hooks landed in
+// settings order in 3 of 3 runs, so the words follow the doc.
+// ---------------------------------------------------------------------------
+
+/// The per-session file of the user's own words, beside the rendered handoff
+/// docs (`Storage::sync_user_words_file`). Not `.md`: `<sid>/<participant>.md`
+/// is a participant's file, and [`safe_segment`] admits a participant called
+/// `user-words`.
+pub const USER_WORDS_FILE: &str = "user-words.log";
+
+/// Everything the `compact-user-words` hook prints stays under this many
+/// BYTES — the same per-hook cap as [`FILE_BUDGET_BYTES`] (see the module doc).
+pub const USER_WORDS_BUDGET_BYTES: usize = 9_000;
+
+/// The file keeps at most this many bytes of entries, newest kept: a doc may
+/// be older than many messages, and the hook cuts to its own budget anyway.
+pub const USER_WORDS_FILE_BUDGET_BYTES: usize = 64 * 1024;
+
+/// First words of every `compact-user-words` output — distinct from
+/// [`INJECT_MARKER`], so `injected_doc` never mistakes one for a doc.
+pub const USER_WORDS_MARKER: &str = "[bot-hq] What the user said";
+
+/// One thing the user said: when (RFC3339-Z, as stored) and the words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserWordsEntry {
+    pub at: String,
+    pub text: String,
+}
+
+/// The user-words file of one session, or `None` when the id is not a safe
+/// path segment.
+pub fn user_words_path(handoff_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    safe_segment(session_id).then(|| handoff_dir.join(session_id).join(USER_WORDS_FILE))
+}
+
+/// The file's text for `entries` (oldest first): one length-prefixed record
+/// each — `<at> <bytes>\n<text>\n` — so a message that itself looks like a
+/// record header cannot forge or split an entry.
+pub fn render_user_words_file(entries: &[UserWordsEntry]) -> String {
+    let mut out = String::new();
+    for e in entries {
+        out.push_str(&format!("{} {}\n{}\n", e.at, e.text.len(), e.text));
+    }
+    out
+}
+
+/// The entries of a file written by [`render_user_words_file`], oldest first.
+/// Stops at the first record that does not parse (a truncated or foreign
+/// file), keeping what came before it.
+pub fn parse_user_words_file(text: &str) -> Vec<UserWordsEntry> {
+    let mut entries = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some((header, body)) = rest.split_once('\n') else { break };
+        let Some((at, len)) = header.split_once(' ') else { break };
+        let Ok(len) = len.parse::<usize>() else { break };
+        if !body.is_char_boundary(len) || body.len() < len + 1 || body.as_bytes()[len] != b'\n' {
+            break;
+        }
+        entries.push(UserWordsEntry {
+            at: at.to_string(),
+            text: body[..len].to_string(),
+        });
+        rest = &body[len + 1..];
+    }
+    entries
+}
+
+/// What the `compact-user-words` hook prints: the user's words from after
+/// `since` (the participant's handoff doc's `updated_at`; `None` when it has
+/// no doc, which makes the whole session the range), newest last, under
+/// `budget` bytes with the newest kept. `None` when there is nothing to print,
+/// so the hook prints nothing and no attachment is made.
+///
+/// The header says these words outrank the summary's account of them — the
+/// third tier of the put-back's precedence rule (EYES P-D): the user's words
+/// verbatim, then the summary for what followed the doc, then the doc.
+pub fn render_user_words(entries: &[UserWordsEntry], since: Option<&str>, budget: usize) -> Option<String> {
+    let mut shown: Vec<&UserWordsEntry> = entries
+        .iter()
+        .filter(|e| since.is_none_or(|s| e.at.as_str() > s))
+        .collect();
+    if shown.is_empty() {
+        return None;
+    }
+    let total = shown.len();
+    // Room for the longest header (a time, two 20-digit counts) and the end line.
+    const FRAME_RESERVE: usize = 480;
+    let room = budget.saturating_sub(FRAME_RESERVE);
+    // Newest first until the room is spent; the newest entry alone is cut to
+    // fit rather than dropped, with the cut marked (EYES P-G).
+    let mut kept = 0usize;
+    let mut used = 0usize;
+    for e in shown.iter().rev() {
+        let size = entry_len(e);
+        if kept > 0 && used + size > room {
+            break;
+        }
+        used += size;
+        kept += 1;
+    }
+    shown.drain(..total - kept);
+    let omitted = total - kept;
+    let header = match since {
+        Some(at) => format!(
+            "{USER_WORDS_MARKER} since your handoff doc was last written ({at}) — {} message{}{}, \
+             verbatim, newest last. These are the user's own words: where the summary's account \
+             of them differs, these win.\n---\n",
+            kept,
+            if kept == 1 { "" } else { "s" },
+            if omitted > 0 { format!(" of {total} ({omitted} earlier omitted; read the channel for them)") } else { String::new() },
+        ),
+        None => format!(
+            "{USER_WORDS_MARKER} in this session — {} message{}{}, verbatim, newest last. You have \
+             no handoff doc, so these and the summary are all you carry from before; where the \
+             summary's account of them differs, these win.\n---\n",
+            kept,
+            if kept == 1 { "" } else { "s" },
+            if omitted > 0 { format!(" of {total} ({omitted} earlier omitted; read the channel for them)") } else { String::new() },
+        ),
+    };
+    let mut out = header;
+    for (i, e) in shown.iter().enumerate() {
+        let mut text: &str = &e.text;
+        let mut cut_note = String::new();
+        if kept == 1 && entry_len(e) > room {
+            let fit = room.saturating_sub(e.at.len() + 64);
+            let cut = crate::text::floor_char_boundary(text, fit);
+            cut_note = format!("\n… [bot-hq] {} bytes cut; read the channel for the rest", text.len() - cut);
+            text = &text[..cut];
+        }
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("— {}\n{text}{cut_note}\n", e.at));
+    }
+    out.push_str("---\n[bot-hq] End of what the user said.\n");
+    Some(out)
+}
+
+/// Bytes one entry takes in the printed text.
+fn entry_len(e: &UserWordsEntry) -> usize {
+    e.at.len() + e.text.len() + 5
+}
+
+/// Was `hook_output` printed by `compact-user-words`? `Some(count)` — the
+/// number of messages it carries — when so, `None` for any other hook's
+/// output, the handoff doc's included.
+pub fn injected_user_words(hook_output: &str) -> Option<usize> {
+    let rest = hook_output.trim_start().strip_prefix(USER_WORDS_MARKER)?;
+    let after_dash = rest.split_once(" — ")?.1;
+    let digits: String = after_dash.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 #[cfg(test)]
@@ -442,9 +617,18 @@ mod tests {
     #[test]
     fn the_header_states_which_source_wins_for_which_claims() {
         let out = render("s-1", "hands", Some(("plan", "2026-10-12T05:40:00.000Z")));
-        assert!(out.contains("for anything after that time the summary wins"), "{out}");
+        assert!(out.contains("for anything else after that time the summary wins"), "{out}");
         assert!(out.contains("this doc's own words win, above all the user's instructions it quotes"), "{out}");
+        // The third tier (EYES P-D): the user's words put back verbatim outrank
+        // the summary's account of them.
+        assert!(out.contains("The user's verbatim words win over the summary's account of them"), "{out}");
         assert!(!out.contains("trust the doc"), "{out}");
+        for text in [
+            compaction_instructions("s-1", "hands", Some("2026-10-12T05:40:00.000Z")),
+            compaction_instructions("s-1", "hands", None),
+        ] {
+            assert!(text.contains("verbatim") && text.contains("the verbatim text wins"), "{text}");
+        }
     }
 
     /// The PreCompact instructions: plain text (never JSON — `{"decision":
@@ -480,6 +664,96 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
         write_file(&path, "second").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
-        assert!(!path.with_extension("md.tmp").exists(), "the temp file was renamed away");
+        assert!(!path.with_file_name("hands.md.tmp").exists(), "the temp file was renamed away");
+        // The words file beside it has its own temp name, so a participant
+        // called `user-words` and the words file never race on one.
+        let words = user_words_path(&dir_under(tmp.path()), "s-1").unwrap();
+        assert_eq!(words.file_name().unwrap(), USER_WORDS_FILE);
+        assert_eq!(words.parent(), path.parent());
+        write_file(&words, "w").unwrap();
+        assert!(!words.with_file_name("user-words.log.tmp").exists());
+        assert_eq!(user_words_path(&dir_under(tmp.path()), "../s-1"), None);
+    }
+
+    /// The file is length-prefixed, so a message that looks like a record
+    /// header neither forges an entry nor splits its own; a truncated tail
+    /// keeps every whole record before it.
+    #[test]
+    fn the_user_words_file_round_trips_any_text() {
+        let entries = vec![
+            UserWordsEntry { at: "2026-10-12T06:29:12.345Z".into(), text: "work on the handoff".into() },
+            UserWordsEntry {
+                at: "2026-10-12T06:40:00.000Z".into(),
+                text: "line one\n2026-10-12T06:41:00.000Z 3\nabc\nline — four ✓".into(),
+            },
+            UserWordsEntry { at: "2026-10-12T06:50:00.000Z".into(), text: String::new() },
+        ];
+        let file = render_user_words_file(&entries);
+        assert_eq!(parse_user_words_file(&file), entries);
+        assert_eq!(parse_user_words_file(""), Vec::<UserWordsEntry>::new());
+        // Cut inside the last record: the first two survive.
+        let cut = &file[..file.len() - 3];
+        assert_eq!(parse_user_words_file(cut), entries[..2].to_vec());
+        // A foreign file parses to nothing, and never panics.
+        assert!(parse_user_words_file("not a record\n\nx 99\nshort\n").is_empty());
+    }
+
+    fn words(n: usize, text_len: usize) -> Vec<UserWordsEntry> {
+        (0..n)
+            .map(|i| UserWordsEntry {
+                at: format!("2026-10-12T06:{:02}:00.000Z", i),
+                text: format!("{i}:{}", "w".repeat(text_len.saturating_sub(2))),
+            })
+            .collect()
+    }
+
+    /// Only what the user said AFTER the doc's time is printed; with no doc
+    /// the whole session is; nothing to print → `None` (no attachment).
+    #[test]
+    fn user_words_are_printed_from_the_docs_time_or_the_whole_session() {
+        let all = words(5, 10);
+        let out = render_user_words(&all, Some("2026-10-12T06:02:30.000Z"), USER_WORDS_BUDGET_BYTES).unwrap();
+        assert!(out.starts_with(USER_WORDS_MARKER), "{out}");
+        assert!(out.contains("since your handoff doc was last written (2026-10-12T06:02:30.000Z) — 2 messages, verbatim"), "{out}");
+        assert!(out.contains("— 2026-10-12T06:03:00.000Z\n3:") && out.contains("\n4:"), "{out}");
+        assert!(!out.contains("\n2:"), "the message before the doc's time is not printed: {out}");
+        assert!(out.contains("where the summary's account of them differs, these win"), "{out}");
+        assert!(out.ends_with("---\n[bot-hq] End of what the user said.\n"), "{out}");
+        assert_eq!(injected_user_words(&out), Some(2));
+        let whole = render_user_words(&all, None, USER_WORDS_BUDGET_BYTES).unwrap();
+        assert!(whole.contains("in this session — 5 messages, verbatim") && whole.contains("no handoff doc"), "{whole}");
+        assert_eq!(injected_user_words(&whole), Some(5));
+        let one = render_user_words(&all[..1], None, USER_WORDS_BUDGET_BYTES).unwrap();
+        assert!(one.contains("— 1 message,"), "{one}");
+        assert_eq!(render_user_words(&all, Some("2026-10-12T06:04:00.000Z"), 9_000), None, "nothing after the doc");
+        assert_eq!(render_user_words(&[], None, 9_000), None);
+        // The doc's own output is not a words output, and vice versa.
+        assert_eq!(injected_user_words(&render("s-1", "hands", None)), None);
+        assert_eq!(injected_doc(&whole), None);
+        assert_eq!(injected_user_words("other hook output"), None);
+    }
+
+    /// Under the budget the NEWEST messages are kept and the header counts the
+    /// omitted ones; one message bigger than the budget is cut with a marker,
+    /// never dropped (EYES P-G). The printed text never exceeds the budget.
+    #[test]
+    fn user_words_keep_the_newest_under_the_budget_and_cut_one_oversized_message() {
+        let many = words(40, 1_000);
+        let out = render_user_words(&many, None, USER_WORDS_BUDGET_BYTES).unwrap();
+        assert!(out.len() <= USER_WORDS_BUDGET_BYTES, "{} bytes", out.len());
+        let shown = injected_user_words(&out).unwrap();
+        assert!((7..=8).contains(&shown), "{shown} shown: {}", &out[..300]);
+        assert!(out.contains(&format!(" of 40 ({} earlier omitted; read the channel for them)", 40 - shown)), "{}", &out[..300]);
+        assert!(out.contains("\n39:") && !out.contains("\n0:"), "the newest survive, the oldest go");
+        let huge = vec![UserWordsEntry { at: "2026-10-12T06:00:00.000Z".into(), text: "h".repeat(20_000) }];
+        let cut = render_user_words(&huge, None, USER_WORDS_BUDGET_BYTES).unwrap();
+        assert!(cut.len() <= USER_WORDS_BUDGET_BYTES, "{} bytes", cut.len());
+        assert!(cut.contains("bytes cut; read the channel for the rest"), "{}", &cut[cut.len() - 200..]);
+        assert_eq!(injected_user_words(&cut), Some(1));
+        // The longest header still fits the frame reserve: a tiny budget prints
+        // the marker and one cut message, nothing more.
+        let tiny = render_user_words(&many, Some("2026-10-12T06:00:00.000Z"), 600).unwrap();
+        assert!(tiny.len() <= 600, "{} bytes: {tiny}", tiny.len());
+        assert!(tiny.contains("1 message of 39 (38 earlier omitted"), "{tiny}");
     }
 }

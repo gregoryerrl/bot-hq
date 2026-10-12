@@ -1993,6 +1993,9 @@ async fn participant_spawn_config(
     storage
         .sync_handoff_file(session_id, &crate::agents::handoff::doc_slug(agent_name))
         .await;
+    // And the session's user-words file the second compaction hook prints
+    // (B1d), re-rendered from the table for the same reason.
+    storage.sync_user_words_file(session_id).await;
 
     Ok(SpawnConfig {
         agent_name: agent_name.to_string(),
@@ -4094,6 +4097,8 @@ mod tests {
         let bridge = SignalingBridge::new();
         // The reviewer wrote a doc before this (re)spawn; the executor has none.
         s.upsert_session_document("s1", "handoff-eyes", "Open finding: 9a1602f1.", None).await.unwrap();
+        // The user spoke before it too.
+        s.record_user_words("s1", 1, "keep gating reads").await.unwrap();
         std::fs::remove_dir_all(handoffs.path().join("s1")).unwrap();
 
         for (slug, has_doc) in [("hands", false), ("eyes", true)] {
@@ -4118,6 +4123,11 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{slug}'s handoff file after the spawn config: {e}"));
             assert_eq!(crate::agents::handoff::injected_doc(&text), Some(has_doc), "{slug}: {text}");
         }
+        // The user-words file is re-rendered at spawn as well (deleting the
+        // `sync_user_words_file` call turns this red).
+        let words = crate::agents::handoff::user_words_path(handoffs.path(), "s1").unwrap();
+        let text = std::fs::read_to_string(&words).expect("the user-words file after the spawn config");
+        assert_eq!(crate::agents::handoff::parse_user_words_file(&text)[0].text, "keep gating reads");
     }
 
     /// The wire for feedback #90: the session's RESOLVED policy decides whether

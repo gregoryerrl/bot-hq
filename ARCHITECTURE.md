@@ -540,10 +540,30 @@ mechanical (feedback #54 / #63 / #67 / #74 / #81):
   replaced by a preview, hence the budget. The stream's `hook_response` for
   that hook is recognised by the file's opening marker, so the compaction row
   says "put back" only when it was.
+- **The user's own words put back verbatim.** A summarizer paraphrases, so what
+  the user said since the doc was last written comes back as written: a second
+  command in the same `SessionStart:compact` group, `bot-hq policy-check
+  compact-user-words`, prints `<data_dir>/.local/handoffs/<session>/user-words.log`
+  filtered to the entries after the participant's doc time (read off its
+  rendered file; the whole session when it has no doc), newest kept under its
+  own 9,000-byte budget — claude-code caps each hook's output on its own (two
+  9 KB outputs arrived whole where one 18 KB output became a preview, CLI
+  2.1.291), and the commands landed in settings order, so the words follow the
+  doc. The file mirrors the `session_user_words` table (migration 0092),
+  re-rendered on every record and at spawn. What counts as the user's words is
+  the CALLER's decision (`core::Authored`): a typed Send, a staged message and
+  the initial prompt are recorded; the resume notice, the close-out prompt and
+  a plugin's send — all posted in the user's voice — are not; a tray answer is
+  recorded as the pick with the question it answered (gate: the verdict with
+  the command's first line), never the row's body with the gate's output. The
+  put-back's precedence has three tiers: the user's verbatim words over the
+  summary's account of them, the summary for anything else after the doc's
+  time, the doc for anything before it. The compaction row counts the messages
+  put back.
 
-The hook fails open: with no file it prints nothing and exits 0. The file is
-rendered at spawn too (as "you have no handoff doc" until one is written) and
-removed when the session closes.
+The hooks fail open: with no file they print nothing and exit 0. The files are
+rendered at spawn too (the doc's as "you have no handoff doc" until one is
+written) and removed when the session closes.
 
 ## Tauri + React UI
 

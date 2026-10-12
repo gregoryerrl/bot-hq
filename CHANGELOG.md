@@ -65,6 +65,17 @@ and in `docs/rebuild-archive/`.
   written 05:40 — 38 minutes before this compaction") and which source wins
   for what: the summary for anything after that time, the document's own
   words for anything before it.
+- **What you said comes back word for word after a compaction.** Beside the
+  handoff document, bot-hq now puts back everything you typed, staged or
+  answered in the tray since that document was last written (the whole
+  session's, for a participant with no document), exactly as you wrote it —
+  a summary paraphrases, and an instruction paraphrased is an instruction
+  changed. The participant is told these words outrank the summary's account
+  of them. Only your own words count: bot-hq's resume notice and close-out
+  prompt, a plugin's message and a command's output are not put back as yours;
+  a tray answer comes back as your pick with the question it answered. The
+  newest messages are kept when they do not all fit, and the compaction row
+  says how many came back.
 - **A compaction is announced in the chat.** A row says whose context was
   compacted, how many tokens it went from and to, and whether its handoff
   document was put back, so the other participants know to check that it

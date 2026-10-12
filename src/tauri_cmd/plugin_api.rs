@@ -518,7 +518,8 @@ pub(crate) async fn dispatch(
             let core = core.ok_or_else(|| {
                 AppError::Internal("core state unavailable for plugin_session_send".into())
             })?;
-            core.broadcast(&session_id, &text)
+            // A plugin's text, not the user's words (B1d).
+            core.broadcast(&session_id, &text, crate::core::Authored::ByPlugin)
                 .await
                 .map_err(|e| AppError::Internal(format!("plugin_session_send: {e}")))?;
             to_json(&true)

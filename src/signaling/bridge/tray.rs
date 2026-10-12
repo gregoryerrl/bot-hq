@@ -8,7 +8,7 @@
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
 //! tray row, or sets the session's awaiting-halt flag.
 
-use super::util::{gate_verdict, oob_resolution_body, outcome_from_picked, parse_tray_ts};
+use super::util::{gate_verdict, oob_resolution_body, outcome_from_picked, parse_tray_ts, user_words_of_answer};
 use super::*;
 use crate::storage::MessageKind;
 use uuid::Uuid;
@@ -1326,7 +1326,17 @@ impl SignalingBridge {
                     )
                     .await
                 {
-                    Ok(m) => Some(m),
+                    Ok(m) => {
+                        // The answer is the user's own words — recorded for the
+                        // put-back after a compaction (B1d) as the pick with the
+                        // question it answered, built from the redacted pieces;
+                        // never the body, which carries the gate's output.
+                        let words = user_words_of_answer(choice_id, &question, &shown_pick, command_shown.as_deref());
+                        if let Err(e) = storage.record_user_words(&session_id, m.message_id(), &words).await {
+                            tracing::warn!(?e, %session_id, "the tray answer was not recorded as the user's words");
+                        }
+                        Some(m)
+                    }
                     Err(e) => {
                         tracing::warn!(
                             ?e,
@@ -3290,6 +3300,11 @@ mod tests {
         assert!(msgs
             .iter()
             .any(|m| m.content.starts_with("Tray answer ") && m.content.contains("Picked: Yes")));
+        // The answer is recorded as the user's own words — the pick with its
+        // question, tied to the row — for the put-back after a compaction (B1d).
+        let words = storage.user_words("s1", 64 * 1024).await.unwrap();
+        assert_eq!(words.len(), 1, "{words:?}");
+        assert_eq!(words[0].text, "Q: pick → Picked: Yes");
     }
 
     #[tokio::test]

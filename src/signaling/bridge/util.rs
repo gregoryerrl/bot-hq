@@ -598,8 +598,64 @@ pub(super) fn oob_resolution_body(
     )
 }
 
+/// The user's own words in a tray answer — what `session_user_words` records
+/// for the put-back after a compaction (B1d, s-42bf34b3): the pick with the
+/// question it answered, or the gate's verdict with the command's first line,
+/// never the row's whole body (which carries the gate's output and the mooting
+/// block). `question` and `command` are the REDACTED pieces `deliver_oob`
+/// already built (EYES P-B); `picked` is the shown pick — redacted when it is
+/// one of the agent's options, the user's typing kept whole when it is not,
+/// and for a gate the verdict word or the words the user typed instead.
+pub(super) fn user_words_of_answer(choice_id: &str, question: &str, picked: &str, command: Option<&str>) -> String {
+    let id8: String = choice_id.chars().take(8).collect();
+    // The first line, cut to 120 characters: enough to know what was answered.
+    let head = |s: &str| -> String {
+        let first = s.lines().next().unwrap_or("").trim();
+        if first.chars().count() > 120 {
+            format!("{}…", first.chars().take(120).collect::<String>())
+        } else {
+            first.to_string()
+        }
+    };
+    match command {
+        Some(command) => {
+            let verdict = match gate_verdict(picked) {
+                crate::policy::ViolationOutcome::Approved => "approved".to_string(),
+                _ if picked == "Reject" => "rejected".to_string(),
+                _ => format!("rejected — {picked}"),
+            };
+            format!("Gate {id8} {verdict}: `{}`", head(command))
+        }
+        None => format!("Q: {} → Picked: {picked}", head(question)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// The user's words of an answer: the pick with its question, the verdict
+    /// with its command — a long question or command cut to its first line.
+    #[test]
+    fn user_words_of_answer_keep_the_pick_and_what_it_answered() {
+        use super::user_words_of_answer;
+        assert_eq!(
+            user_words_of_answer("c6f79538-1a55", "Push now?", "Hold for review", None),
+            "Q: Push now? → Picked: Hold for review"
+        );
+        let long = format!("{}\nsecond line", "q".repeat(200));
+        let out = user_words_of_answer("c6f79538-1a55", &long, "yes, but after lunch — my own words", None);
+        assert!(out.starts_with(&format!("Q: {}… → Picked: yes, but after lunch — my own words", "q".repeat(120))), "{out}");
+        assert!(!out.contains("second line"));
+        assert_eq!(
+            user_words_of_answer("a1b2c3d4e5", "irrelevant", "Approve", Some("gh pr merge 12\n--squash")),
+            "Gate a1b2c3d4 approved: `gh pr merge 12`"
+        );
+        assert_eq!(user_words_of_answer("a1b2c3d4e5", "", "Reject", Some("rm -rf build")), "Gate a1b2c3d4 rejected: `rm -rf build`");
+        assert_eq!(
+            user_words_of_answer("a1b2c3d4e5", "", "not yet, CI is still red", Some("git push")),
+            "Gate a1b2c3d4 rejected — not yet, CI is still red: `git push`"
+        );
+    }
+
     /// The exact-replace core `cl_edit_file` and `session_doc_edit` share: the
     /// count is an assertion, a mismatch changes nothing and says which way
     /// out, and an anchor that quotes a secret is pointed at its marker.

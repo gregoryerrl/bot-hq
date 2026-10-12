@@ -670,6 +670,7 @@ pub fn compaction_notice(
     pre_tokens: Option<u64>,
     post_tokens: Option<u64>,
     handoff: Option<bool>,
+    user_words: Option<usize>,
 ) -> String {
     let how = match trigger {
         Some("auto") => " because it filled",
@@ -684,14 +685,27 @@ pub fn compaction_notice(
         _ => String::new(),
     };
     let doc = crate::agents::handoff::doc_slug(slug);
+    // The user's words put back beside the doc (`compact-user-words`): named
+    // with their count when the hook reported, so a live session can see the
+    // feature work from this row.
+    let words = |lead: &str, tail: &str| match user_words {
+        Some(1) => format!("{lead} the user's 1 message {tail}"),
+        Some(n) => format!("{lead} the user's {n} messages {tail}"),
+        None => String::new(),
+    };
     let handoff = match handoff {
-        Some(true) => format!("bot-hq put its handoff doc `{doc}` back into its context."),
+        Some(true) => format!(
+            "bot-hq put its handoff doc `{doc}` back into its context{}.",
+            words(", and", "since the doc was written, verbatim")
+        ),
         Some(false) => format!(
-            "It has no handoff doc (`{doc}`), so the summary is all it carries from before."
+            "It has no handoff doc (`{doc}`), so the summary is all it carries from before{}.",
+            words(" — plus", "in this session, put back verbatim")
         ),
         None => format!(
             "No handoff doc was put back: its post-compaction hook did not report (`{doc}` is \
-             read with session_doc_read)."
+             read with session_doc_read){}.",
+            words(" — but it got", "in this session, put back verbatim")
         ),
     };
     format!(
@@ -1145,6 +1159,9 @@ pub async fn pump_agent(
     // (`AgentEvent::HandoffInjected`): it precedes the boundary on the stream,
     // so it is held here until the `Compacted` it belongs to arrives.
     let mut handoff_injected: Option<bool> = None;
+    // Likewise the second hook's report: how many of the user's messages were
+    // put back verbatim (`AgentEvent::UserWordsInjected`).
+    let mut user_words_injected: Option<usize> = None;
     // s-f6a441ff: consecutive errored turns for THIS pump. ONE errored turn
     // ends `Spoke` and the ring steps past it — a failure is not a claim there
     // is nothing left to do (see the ending derivation below). But a SECOND in
@@ -1221,6 +1238,10 @@ pub async fn pump_agent(
             handoff_injected = Some(has_doc);
             continue;
         }
+        if let AgentEvent::UserWordsInjected { count } = event {
+            user_words_injected = Some(count);
+            continue;
+        }
         if let AgentEvent::Compacted { trigger, pre_tokens, post_tokens } = event {
             // The window was just emptied, so the next approach to the limit
             // is announced again (the hysteresis in `context_threshold_notice`
@@ -1232,6 +1253,7 @@ pub async fn pump_agent(
                 pre_tokens,
                 post_tokens,
                 handoff_injected.take(),
+                user_words_injected.take(),
             );
             tracing::info!(agent = %cfg.slug, ?trigger, ?pre_tokens, ?post_tokens, "context compacted");
             if crate::core::post_system_notice(
@@ -1372,7 +1394,8 @@ pub async fn pump_agent(
             // Handled before the turn logic, which they must never reach.
             AgentEvent::BackgroundTasks { .. }
             | AgentEvent::Compacted { .. }
-            | AgentEvent::HandoffInjected { .. } => {}
+            | AgentEvent::HandoffInjected { .. }
+            | AgentEvent::UserWordsInjected { .. } => {}
             AgentEvent::Text(text) => {
                 match storage
                     // `text` is read again below (limit detection, buffer), so
@@ -3910,7 +3933,7 @@ mod tests {
     /// line, like the context rows.
     #[test]
     fn the_compaction_row_states_the_tokens_and_what_happened_to_the_handoff_doc() {
-        let n = compaction_notice("hands", Some("auto"), Some(970_716), Some(17_629), Some(true));
+        let n = compaction_notice("hands", Some("auto"), Some(970_716), Some(17_629), Some(true), None);
         for needle in [
             "⚠ hands's context was compacted because it filled (970,716 → 17,629 tokens).",
             "works from a summary",
@@ -3918,12 +3941,20 @@ mod tests {
         ] {
             assert!(n.contains(needle), "row lacks {needle:?}: {n}");
         }
-        let n = compaction_notice("eyes", Some("manual"), Some(23_527), None, Some(false));
+        assert!(!n.contains("the user's"), "no words hook report, no words claim: {n}");
+        let n = compaction_notice("eyes", Some("manual"), Some(23_527), None, Some(false), None);
         assert!(n.contains("compacted on request (23,527 tokens before)."), "got: {n}");
         assert!(n.contains("It has no handoff doc (`handoff-eyes`)"), "got: {n}");
-        let n = compaction_notice("hands", None, None, None, None);
+        let n = compaction_notice("hands", None, None, None, None, None);
         assert!(n.starts_with("⚠ hands's context was compacted. "), "got: {n}");
         assert!(n.contains("No handoff doc was put back") && n.contains("did not report"), "got: {n}");
+        // The user's words put back are counted in the row, in every doc state.
+        let n = compaction_notice("hands", Some("auto"), None, None, Some(true), Some(3));
+        assert!(n.ends_with("back into its context, and the user's 3 messages since the doc was written, verbatim."), "got: {n}");
+        let n = compaction_notice("eyes", None, None, None, Some(false), Some(1));
+        assert!(n.ends_with("from before — plus the user's 1 message in this session, put back verbatim."), "got: {n}");
+        let n = compaction_notice("eyes", None, None, None, None, Some(2));
+        assert!(n.ends_with("session_doc_read) — but it got the user's 2 messages in this session, put back verbatim."), "got: {n}");
         for imperative in ["Re-read", "You must", "Check that", "Write "] {
             assert!(!n.contains(imperative), "a state line, not an instruction: {n}");
         }
@@ -3946,6 +3977,7 @@ mod tests {
 
         ev_tx.send(turn_at(910_000)).await.unwrap();
         ev_tx.send(AgentEvent::HandoffInjected { has_doc: true }).await.unwrap();
+        ev_tx.send(AgentEvent::UserWordsInjected { count: 2 }).await.unwrap();
         ev_tx
             .send(AgentEvent::Compacted {
                 trigger: Some("auto".into()),
@@ -3966,12 +3998,13 @@ mod tests {
         assert_eq!(compactions.len(), 2, "one row per compaction: {compactions:?}");
         assert!(
             compactions[0].contains("970,716 → 17,629 tokens")
-                && compactions[0].contains("put its handoff doc `handoff-hands` back"),
+                && compactions[0].contains("put its handoff doc `handoff-hands` back")
+                && compactions[0].contains("and the user's 2 messages since the doc was written"),
             "got: {}",
             compactions[0]
         );
         assert!(
-            compactions[1].contains("did not report"),
+            compactions[1].contains("did not report") && !compactions[1].contains("the user's"),
             "the second compaction had no hook report of its own: {}",
             compactions[1]
         );

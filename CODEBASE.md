@@ -83,7 +83,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |
 | `src/agents/prompts.rs` | layer-3 hardcoded role prose (`HANDS_ROLE`/`EYES_ROLE`, keyed by ROLE SLUG) — seeds `roles.description_prompt`; live prose is the DB row | L |
 | `src/agents/general_rules.rs` | layer-1 `GENERAL_RULES` (compiled in) | M |
-| `src/agents/handoff.rs` | the pinned handoff doc put back after a compaction: slug `handoff-<participant>`, the rendered file (byte budget, markers), its path under `.local/handoffs/`; written by `Storage::sync_handoff_file`, printed by `policy-check compact-handoff`; the compaction summary's instructions (`compaction_instructions`), printed by `policy-check pre-compact` | S |
+| `src/agents/handoff.rs` | the pinned handoff doc put back after a compaction: slug `handoff-<participant>`, the rendered file (byte budget, markers, the age stamp), its path under `.local/handoffs/`; written by `Storage::sync_handoff_file`, printed by `policy-check compact-handoff`; the compaction summary's instructions (`compaction_instructions`), printed by `policy-check pre-compact`; the user's words file `user-words.log` (length-prefixed records, `render_user_words` under its own budget), printed by `policy-check compact-user-words` | M |
 | `src/agents/capability.rs` | `Capability` (16), `CapabilitySet`, `ResolvedCapabilities`, `required_for` = THE tool→capability map | L |
 | `src/agents/capability_prompt.rs` | layer-2 generator: grants/denials + live roster prose from a `CapabilitySet` (`phrasing()` exhaustive) | L |
 | `src/agents/llm_proxy.rs` | localhost reverse proxy for non-Anthropic gateways (started by `src/main.rs`); forwards only to upstreams a spawn registered via `proxied_base_url`, refuses browser-shaped requests | L |
@@ -457,6 +457,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, purge, closed/orphan withdraw | M |
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
+| `src/storage/user_words.rs` | `session_user_words` (0092): the user's own words, recorded by the caller that knows whose they are (`core::Authored`, the tray answer), mirrored to the words file the compaction hook prints | S |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
 | `src/storage/gc.rs` | boot-time retention purges for the five append-only telemetry tables (`participant_deliveries`, `context_readings`, `retrieval_events`, `cancel_events`, `cl_reads`), run by `main.rs` beside the tray/activity sweeps; `messages` is deliberately not swept | S |
 | `src/storage/cancel_events.rs` | Stop/interrupt escalation ledger + the press-time `PressSnapshot` (0086: holder, turn age, tools in flight, last tool, last event) | S |

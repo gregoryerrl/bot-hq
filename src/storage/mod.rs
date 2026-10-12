@@ -45,6 +45,7 @@ mod session_docs;
 mod sessions;
 mod time;
 mod tray;
+mod user_words;
 
 pub use account_marks::AccountMark;
 pub use cl_atoms::{Atom, RetrievedAtom};

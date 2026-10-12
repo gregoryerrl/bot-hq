@@ -59,7 +59,7 @@ pub async fn broadcast_message(
     session_id: String,
     text: String,
 ) -> Result<(), AppError> {
-    core.broadcast(&session_id, &text).await?;
+    core.broadcast(&session_id, &text, crate::core::Authored::ByUser).await?;
     Ok(())
 }
 

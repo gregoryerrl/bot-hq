@@ -163,6 +163,15 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             }
             Ok(0)
         }
+        // The second `SessionStart:compact` command: the user's own words since
+        // the participant's handoff doc was last written, verbatim. Its own
+        // hook output because claude-code caps each one on its own.
+        "compact-user-words" => {
+            if let Some(text) = compact_user_words_text(&data_dir, sid, &hook_agent()) {
+                print!("{text}");
+            }
+            Ok(0)
+        }
         // ALWAYS exit 0, and print plain text or nothing: claude-code BLOCKS a
         // compaction on a PreCompact hook's exit 2, or on stdout that parses as
         // `{"decision":"block"}` (CLI 2.1.291, s-079dec53).
@@ -584,6 +593,24 @@ fn compact_handoff_text(
     // Stamped at print time — right after the compaction — so the age is the
     // gap between the doc's last write and the compaction.
     Some(crate::agents::handoff::stamp_age(&text, now))
+}
+
+/// What the `compact-user-words` hook prints: the user's own words of the
+/// session from after the participant's handoff doc was last written (read
+/// off the participant's rendered file — `None` there, or no file, means the
+/// whole session), under `agents::handoff::USER_WORDS_BUDGET_BYTES`.
+///
+/// `None` — nothing printed, exit 0 — when there is no session id, the names
+/// are not path-safe, the words file is missing or unreadable, or nothing was
+/// said since. File reads only, like `compact_handoff_text`.
+fn compact_user_words_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+    use crate::agents::handoff;
+    let session_id = session_id?;
+    let dir = handoff::dir_under(&crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir);
+    let words = std::fs::read_to_string(handoff::user_words_path(&dir, session_id)?).ok()?;
+    let rendered = handoff::file_path(&dir, session_id, agent).and_then(|p| std::fs::read_to_string(p).ok());
+    let since = rendered.as_deref().and_then(handoff::written_at);
+    handoff::render_user_words(&handoff::parse_user_words_file(&words), since, handoff::USER_WORDS_BUDGET_BYTES)
 }
 
 /// What the `PreCompact` hook prints: the summary instructions
@@ -3244,6 +3271,51 @@ mod tests {
         // The subcommand itself exits 0 with or without a file.
         let args = |sid: &str| -> Vec<String> {
             ["compact-handoff", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        };
+        assert_eq!(run_cli(&args("s-1")).unwrap(), 0);
+        assert_eq!(run_cli(&args("s-none")).unwrap(), 0);
+    }
+
+    /// The second compaction hook prints the user's words from after the
+    /// participant's doc time (read off its rendered file), the whole session
+    /// for a participant with no doc, and nothing when nothing was said since
+    /// or the files are missing — exit 0 throughout.
+    #[test]
+    fn compact_user_words_prints_what_the_user_said_since_the_participants_doc() {
+        use crate::agents::handoff;
+        let tmp = tempfile::tempdir().unwrap();
+        let local = crate::paths::Paths::for_data_dir(tmp.path().to_path_buf()).local_dir;
+        let dir = handoff::dir_under(&local);
+        let words = [
+            handoff::UserWordsEntry { at: "2026-10-12T05:30:00.000Z".into(), text: "work on the feedback queue".into() },
+            handoff::UserWordsEntry { at: "2026-10-12T06:29:00.000Z".into(), text: "work on the handoff".into() },
+        ];
+        handoff::write_file(&handoff::user_words_path(&dir, "s-1").unwrap(), &handoff::render_user_words_file(&words)).unwrap();
+        // hands' doc was written between the two messages; eyes has the no-doc
+        // text; a third participant has no rendered file at all.
+        let hands = handoff::file_path(&dir, "s-1", "hands").unwrap();
+        handoff::write_file(&hands, &handoff::render("s-1", "hands", Some(("plan", "2026-10-12T06:00:00.000Z")))).unwrap();
+        handoff::write_file(&handoff::file_path(&dir, "s-1", "eyes").unwrap(), &handoff::render("s-1", "eyes", None)).unwrap();
+
+        let out = compact_user_words_text(tmp.path(), Some("s-1"), "hands").unwrap();
+        assert!(out.starts_with(handoff::USER_WORDS_MARKER), "{out}");
+        assert!(out.contains("(2026-10-12T06:00:00.000Z) — 1 message,") && out.contains("work on the handoff"), "{out}");
+        assert!(!out.contains("feedback queue"), "said before the doc: {out}");
+        for who in ["eyes", "nobody"] {
+            let out = compact_user_words_text(tmp.path(), Some("s-1"), who).unwrap();
+            assert!(out.contains("in this session — 2 messages,") && out.contains("feedback queue"), "{who}: {out}");
+        }
+        // Nothing said since the doc, no session, an unsafe id, no words file: nothing.
+        handoff::write_file(&hands, &handoff::render("s-1", "hands", Some(("plan", "2026-10-12T06:30:00.000Z")))).unwrap();
+        assert_eq!(compact_user_words_text(tmp.path(), Some("s-1"), "hands"), None);
+        assert_eq!(compact_user_words_text(tmp.path(), None, "hands"), None);
+        assert_eq!(compact_user_words_text(tmp.path(), Some("../s-1"), "hands"), None);
+        assert_eq!(compact_user_words_text(tmp.path(), Some("s-2"), "hands"), None);
+        let args = |sid: &str| -> Vec<String> {
+            ["compact-user-words", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()

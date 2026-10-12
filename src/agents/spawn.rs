@@ -203,6 +203,11 @@ pub enum AgentEvent {
     /// [`Self::Compacted`] it belongs to. `has_doc` is false when the file was
     /// the "you have no handoff doc" text.
     HandoffInjected { has_doc: bool },
+    /// The second post-compaction hook printed the user's own words since this
+    /// participant's handoff doc was last written (`agents::handoff::
+    /// render_user_words`), recognised by its marker; `count` is how many
+    /// messages it carried. Precedes the [`Self::Compacted`] it belongs to.
+    UserWordsInjected { count: usize },
     /// Process exited. Carries exit-status string for log/observability.
     Exited(String),
     /// Retry-supervisor liveness transition (B2), relayed by the participant's
@@ -1609,16 +1614,29 @@ pub const SILENT_TURN_REMINDER_ENV: &str = "CLAUDE_CODE_SILENT_TURN_REMINDER";
 /// A resume or a fresh start does not match `compact`, so nothing is injected
 /// then. Like the Tool Gate hook it rides `--settings`, so nothing is written
 /// into the working repo, and the user's own hooks still run beside it.
+///
+/// A SECOND command in the same group, `policy-check compact-user-words`,
+/// prints what the user said since that doc was last written, verbatim
+/// (`agents::handoff::render_user_words`). Its own command because claude-code
+/// caps each hook's output on its own (two 9 KB outputs arrived whole where one
+/// 18 KB output became a preview — CLI 2.1.291, s-42bf34b3), and second because
+/// the commands landed in settings order in every probe run, so the newer
+/// words follow the older doc.
 fn compact_handoff_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Value {
-    let command = format!(
-        "\"{}\" policy-check compact-handoff --data-dir \"{}\" --session \"{}\"",
-        exe.display(),
-        cfg.data_dir.display(),
-        cfg.session_id,
-    );
+    let command = |subcommand: &str| {
+        format!(
+            "\"{}\" policy-check {subcommand} --data-dir \"{}\" --session \"{}\"",
+            exe.display(),
+            cfg.data_dir.display(),
+            cfg.session_id,
+        )
+    };
     serde_json::json!([{
         "matcher": "compact",
-        "hooks": [{ "type": "command", "command": command }],
+        "hooks": [
+            { "type": "command", "command": command("compact-handoff") },
+            { "type": "command", "command": command("compact-user-words") },
+        ],
     }])
 }
 
@@ -3568,16 +3586,22 @@ mod tests {
                 .unwrap_or_else(|| panic!("{who} has a SessionStart hook: {s}"));
             assert_eq!(entries.len(), 1, "{who}: {s}");
             assert_eq!(entries[0]["matcher"], serde_json::json!("compact"), "{who}: only after a compaction");
-            let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
-            assert!(command.contains("policy-check compact-handoff"), "{who}: {command}");
-            assert!(
-                command.contains(&format!("--session \"{}\"", c.session_id)),
-                "{who}: bound to the session: {command}"
-            );
-            assert!(
-                command.contains(&format!("--data-dir \"{}\"", c.data_dir.display())),
-                "{who}: {command}"
-            );
+            // Two commands, the doc first and the user's words second (the
+            // order the outputs land in), each its own hook output.
+            let hooks = entries[0]["hooks"].as_array().unwrap();
+            assert_eq!(hooks.len(), 2, "{who}: {s}");
+            for (hook, subcommand) in hooks.iter().zip(["compact-handoff", "compact-user-words"]) {
+                let command = hook["command"].as_str().unwrap();
+                assert!(command.contains(&format!("policy-check {subcommand} ")), "{who}: {command}");
+                assert!(
+                    command.contains(&format!("--session \"{}\"", c.session_id)),
+                    "{who}: bound to the session: {command}"
+                );
+                assert!(
+                    command.contains(&format!("--data-dir \"{}\"", c.data_dir.display())),
+                    "{who}: {command}"
+                );
+            }
         }
     }
 }

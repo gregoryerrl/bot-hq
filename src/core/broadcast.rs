@@ -61,6 +61,35 @@ pub async fn post_system_notice(
     }
 }
 
+/// **Whose words a user-origin row carries** — the axis that decides whether
+/// the text is recorded as the user's own words (`session_user_words`) and so
+/// put back VERBATIM into a compacted participant's context as "what the user
+/// said" (`agents::handoff::render_user_words`).
+///
+/// Every `origin = "user"` row reads as the user to the participants, but not
+/// every one is the user speaking: the resume notice, the close-out prompt and
+/// a plugin's send all travel this path. Put back after a compaction as the
+/// user's words, they would manufacture a user utterance — the failure the
+/// tray's own docs name. So the CALLER says whose words they are, and the
+/// decision is a value the call-site tests can read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authored {
+    /// The user typed, staged or prompted it. Recorded.
+    ByUser,
+    /// bot-hq wrote it in the user's voice (a resume notice, the close-out
+    /// prompt). Not recorded.
+    ByHost,
+    /// A plugin sent it through `plugin_session_send`. Not recorded.
+    ByPlugin,
+}
+
+impl Authored {
+    /// Whether the text is recorded as the user's own words.
+    pub fn is_users(self) -> bool {
+        matches!(self, Authored::ByUser)
+    }
+}
+
 /// Persist a user-originated message. The ring delivers it; see the module doc.
 pub async fn broadcast_user_message(
     storage: &Storage,
@@ -71,6 +100,7 @@ pub async fn broadcast_user_message(
     // post-cancel reconciliation directive. NOT persisted: storage keeps the
     // raw user text, so chat history stays clean (like the findings banner).
     system_prefix: Option<&str>,
+    authored: Authored,
 ) -> Result<i64> {
     // REORDERED (B5 Task 2): the banner count is read BEFORE the insert, because
     // it is part of what the agent will read and the row has to record that. It
@@ -126,6 +156,15 @@ pub async fn broadcast_user_message(
     // which resets the cycle and hands the turn to the front; every participant
     // reads the row off its own cursor when its turn comes, which is what "a
     // turn is a PULL" has always meant.
+    //
+    // The user's own words are recorded beside the row (and mirrored to the
+    // file the `compact-user-words` hook prints). The row is already the
+    // delivery, so a failed record is logged, never returned.
+    if authored.is_users() {
+        if let Err(e) = storage.record_user_words(session_id, persisted.message_id(), text).await {
+            tracing::warn!(session_id, error = %e, "the user's words were not recorded");
+        }
+    }
     Ok(persisted.message_id())
 }
 
@@ -231,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn broadcast_persists_raw_and_envelopes_the_render() {
         let s = session("s1").await;
-        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, None)
+        broadcast_user_message(&s, "s1", "hello", IpavPhase::Apply, None, Authored::ByUser)
             .await
             .unwrap();
         let (content, wire) = only_row(&s, "s1").await;
@@ -248,7 +287,7 @@ mod tests {
     async fn what_the_user_types_is_stored_verbatim_even_with_a_secret() {
         let s = session("s1").await;
         let typed = format!("use this token: {}{}", "ghp_", "1234567890abcdefghijABCDEF");
-        broadcast_user_message(&s, "s1", &typed, IpavPhase::Apply, None)
+        broadcast_user_message(&s, "s1", &typed, IpavPhase::Apply, None, Authored::ByUser)
             .await
             .unwrap();
         let (content, wire) = only_row(&s, "s1").await;
@@ -260,7 +299,7 @@ mod tests {
     async fn a_broadcast_writes_only_into_its_own_session() {
         let s = session("s1").await;
         s.create_session("s2", "other", None).await.unwrap();
-        broadcast_user_message(&s, "s1", "for s1", IpavPhase::Investigate, None)
+        broadcast_user_message(&s, "s1", "for s1", IpavPhase::Investigate, None, Authored::ByUser)
             .await
             .unwrap();
         assert_eq!(only_row(&s, "s1").await.0, "for s1");
@@ -283,7 +322,7 @@ mod tests {
         )
         .await
         .unwrap();
-        broadcast_user_message(&s, "s1", "carry on", IpavPhase::Apply, None)
+        broadcast_user_message(&s, "s1", "carry on", IpavPhase::Apply, None, Authored::ByUser)
             .await
             .unwrap();
         let (content, wire) = only_row(&s, "s1").await;
@@ -304,6 +343,7 @@ mod tests {
             "go on",
             IpavPhase::Verify,
             Some("[System: reconcile first]"),
+            Authored::ByUser,
         )
         .await
         .unwrap();
@@ -313,5 +353,106 @@ mod tests {
             "the prefix is wire-only — chat history keeps the raw user text"
         );
         assert!(wire.contains("reconcile first"));
+    }
+
+    /// **Every production `broadcast` names whose words it carries, and names
+    /// them right** (EYES P-A, s-42bf34b3). The signature forces a choice; this
+    /// pins WHICH choice each site made, since nothing in the crate can build an
+    /// `AppState` to drive the sites themselves: the resume notice, the close-out
+    /// prompt and a plugin's send are not the user's words; a typed Send, the
+    /// initial prompt and a staged release are. A new site must be added here.
+    #[test]
+    fn every_broadcast_site_names_whose_words_it_carries() {
+        let files: &[(&str, &str)] = &[
+            ("core/state.rs", include_str!("state.rs")),
+            ("tauri_cmd/messages.rs", include_str!("../tauri_cmd/messages.rs")),
+            ("tauri_cmd/sessions.rs", include_str!("../tauri_cmd/sessions.rs")),
+            ("tauri_cmd/plugin_api.rs", include_str!("../tauri_cmd/plugin_api.rs")),
+        ];
+        // (file, a text the call's arguments contain, the variant it must name)
+        let expected: &[(&str, &str, &str)] = &[
+            ("core/state.rs", "RESUME_NOTICE", "Authored::ByHost"),
+            ("core/state.rs", "CLOSE_LEARNINGS_PROMPT", "Authored::ByHost"),
+            ("core/state.rs", "text, send", "Authored::ByUser"),
+            ("tauri_cmd/messages.rs", "&session_id, &text", "Authored::ByUser"),
+            ("tauri_cmd/sessions.rs", "&id, &prompt", "Authored::ByUser"),
+            ("tauri_cmd/plugin_api.rs", "&session_id, &text", "Authored::ByPlugin"),
+        ];
+        let mut seen = 0usize;
+        for (name, src) in files {
+            let prod = match src.find("\n#[cfg(test)]\nmod tests") {
+                Some(at) => &src[..at],
+                None => src,
+            };
+            let code = prod
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            for call in [".broadcast(", ".broadcast_as("] {
+                let mut from = 0;
+                while let Some(at) = code[from..].find(call) {
+                    let call_at = from + at;
+                    let rest = &code[call_at + call.len()..];
+                    let mut depth = 1usize;
+                    let mut end = rest.len();
+                    for (i, ch) in rest.char_indices() {
+                        match ch {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = i;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let args = &rest[..end];
+                    // `broadcast_as` is also what `broadcast` itself calls — the
+                    // forwarding site passes its parameter through.
+                    if args.contains("UserSend::Typed, authored") {
+                        from = call_at + 1;
+                        continue;
+                    }
+                    let (_, _, variant) = expected
+                        .iter()
+                        .find(|(f, needle, _)| f == name && args.contains(needle))
+                        .unwrap_or_else(|| panic!("{name}: an unlisted broadcast site — add it to this test: {}", args.trim()));
+                    assert!(args.contains(variant), "{name}: the site must say {variant}: {}", args.trim());
+                    seen += 1;
+                    from = call_at + 1;
+                }
+            }
+        }
+        assert_eq!(seen, expected.len(), "every expected site was found exactly once");
+    }
+
+    /// The wire for the user's words (B1d, s-42bf34b3): a message the caller
+    /// marks as the user's is recorded in `session_user_words`, tied to its
+    /// row; a host-authored or plugin-authored message on the same path is not
+    /// — put back after a compaction, it would read as the user speaking.
+    #[tokio::test]
+    async fn only_the_users_own_words_are_recorded_for_the_put_back() {
+        let s = session("s1").await;
+        let id = broadcast_user_message(&s, "s1", "ship it", IpavPhase::Apply, None, Authored::ByUser)
+            .await
+            .unwrap();
+        broadcast_user_message(&s, "s1", "▶ Resumed. Continue.", IpavPhase::Apply, None, Authored::ByHost)
+            .await
+            .unwrap();
+        broadcast_user_message(&s, "s1", "a plugin's text", IpavPhase::Apply, None, Authored::ByPlugin)
+            .await
+            .unwrap();
+        let words = s.user_words("s1", 64 * 1024).await.unwrap();
+        assert_eq!(words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>(), ["ship it"]);
+        let tied: (i64,) = sqlx::query_as("SELECT message_id FROM session_user_words WHERE session_id = 's1'")
+            .fetch_one(s.pool())
+            .await
+            .unwrap();
+        assert_eq!(tied.0, id, "tied to its channel row");
+        assert_eq!(s.channel_after("s1", 0, 100).await.unwrap().rows.len(), 3, "every row is still posted");
+        assert!(Authored::ByUser.is_users() && !Authored::ByHost.is_users() && !Authored::ByPlugin.is_users());
     }
 }

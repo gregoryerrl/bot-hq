@@ -9,7 +9,7 @@
 pub mod activity;
 pub mod build_info;
 mod broadcast;
-pub use broadcast::post_system_notice;
+pub use broadcast::{post_system_notice, Authored};
 pub mod mentions;
 pub mod close_learnings;
 pub mod git;

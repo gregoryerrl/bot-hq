@@ -128,11 +128,14 @@ pub fn translate(
             SystemEvent::HookResponse { hook_name, output, .. }
                 if hook_name.as_deref() == Some(COMPACT_HOOK_NAME) =>
             {
-                output
-                    .as_deref()
-                    .and_then(crate::agents::handoff::injected_doc)
-                    .map(|has_doc| vec![AgentEvent::HandoffInjected { has_doc }])
-                    .unwrap_or_default()
+                let output = output.as_deref().unwrap_or_default();
+                if let Some(has_doc) = crate::agents::handoff::injected_doc(output) {
+                    vec![AgentEvent::HandoffInjected { has_doc }]
+                } else if let Some(count) = crate::agents::handoff::injected_user_words(output) {
+                    vec![AgentEvent::UserWordsInjected { count }]
+                } else {
+                    Vec::new()
+                }
             }
             _ => Vec::new(),
         },
@@ -671,6 +674,22 @@ mod tests {
         ));
         assert!(translate(response(COMPACT_HOOK_NAME, "{\"hookSpecificOutput\":{}}"), &mut None).is_empty());
         assert!(translate(response("SessionStart:startup", &doc), &mut None).is_empty());
+        // The second command's output — the user's words — is told apart by
+        // its own marker and reports how many messages it carried.
+        let words = crate::agents::handoff::render_user_words(
+            &[
+                crate::agents::handoff::UserWordsEntry { at: "2026-10-12T06:29:00.000Z".into(), text: "go".into() },
+                crate::agents::handoff::UserWordsEntry { at: "2026-10-12T06:30:00.000Z".into(), text: "on".into() },
+            ],
+            Some("2026-10-12T06:00:00.000Z"),
+            9_000,
+        )
+        .unwrap();
+        assert!(matches!(
+            translate(response(COMPACT_HOOK_NAME, &words), &mut None).as_slice(),
+            [AgentEvent::UserWordsInjected { count: 2 }]
+        ));
+        assert!(translate(response("SessionStart:startup", &words), &mut None).is_empty());
     }
 
     #[tokio::test]
