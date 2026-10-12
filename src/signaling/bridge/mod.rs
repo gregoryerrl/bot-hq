@@ -1353,6 +1353,9 @@ impl SignalingBridge {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .retain(|k, _| !k.starts_with(&format!("{session_id}:")));
+        // What each participant had seen of the session's docs (feedback #102)
+        // dies with the session.
+        self.doc_seen.lock().await.retain(|(sid, _, _), _| sid != session_id);
         // A push re-run's nonce (round 12) is consumed within its own run; a
         // closed session's leftover must not stay redeemable.
         self.push_nonces
@@ -2772,6 +2775,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .insert(format!("{s}:hands"), "tok".into());
+            b.doc_seen.lock().await.insert(
+                (s.into(), "hands".into(), "plan".into()),
+                session_docs::DocSeen { version: "v".into(), covered_to: usize::MAX },
+            );
             // A gate still executing: the mark is inserted directly, so no
             // guard removes it behind the test's back.
             b.running_gates.lock().unwrap().insert(
@@ -2865,13 +2872,16 @@ mod tests {
         check!("running_gates", b.running_gates.lock().unwrap(), |m, s| {
             m.keys().any(|(k, _)| k == s)
         });
+        check!("doc_seen", b.doc_seen.lock().await, |m, s| {
+            m.keys().any(|(k, _, _)| k == s)
+        });
 
         // Tracks THIS test's manual `check!` list, so it moves when a map is
         // legitimately added or removed — 16 until round 6 deleted
         // `session_open_blocking` with the rest of the router's orphaned cache,
         // 16 again since `running_gates` became a map that carries each run's
-        // start (2026-10-03).
-        assert_eq!(report.len(), 16, "a map was dropped from this test's sweep");
+        // start (2026-10-03), 17 with `doc_seen` (feedback #102, 2026-10-12).
+        assert_eq!(report.len(), 17, "a map was dropped from this test's sweep");
         let undrained: Vec<&str> = report
             .iter()
             .filter(|(_, doomed, _)| *doomed)
