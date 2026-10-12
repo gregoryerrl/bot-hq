@@ -934,7 +934,9 @@ pub(crate) async fn dispatch_session_inner(
     // way (a plugin holding `list_sessions` is told `sessions_changed`).
     core.notify_session_created(&id);
     started?;
-    core.broadcast(&id, &prompt, crate::core::Authored::ByUser).await?;
+    // Reached only from the plugin proxy's create arms (`plugin_api.rs`): a
+    // plugin's prompt, not the user's words (B1d; EYES bc24ddea).
+    core.broadcast(&id, &prompt, crate::core::Authored::ByPlugin).await?;
     Ok(session.into())
 }
 

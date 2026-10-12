@@ -74,12 +74,13 @@ pub async fn post_system_notice(
 /// decision is a value the call-site tests can read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authored {
-    /// The user typed, staged or prompted it. Recorded.
+    /// The user typed or staged it. Recorded.
     ByUser,
     /// bot-hq wrote it in the user's voice (a resume notice, the close-out
     /// prompt). Not recorded.
     ByHost,
-    /// A plugin sent it through `plugin_session_send`. Not recorded.
+    /// A plugin sent it (`plugin_session_send`, or the prompt of a session a
+    /// plugin created). Not recorded.
     ByPlugin,
 }
 
@@ -359,8 +360,10 @@ mod tests {
     /// them right** (EYES P-A, s-42bf34b3). The signature forces a choice; this
     /// pins WHICH choice each site made, since nothing in the crate can build an
     /// `AppState` to drive the sites themselves: the resume notice, the close-out
-    /// prompt and a plugin's send are not the user's words; a typed Send, the
-    /// initial prompt and a staged release are. A new site must be added here.
+    /// prompt, a plugin's send and a plugin-created session's prompt
+    /// (`dispatch_session_inner` has only plugin callers — EYES bc24ddea) are
+    /// not the user's words; a typed Send and a staged release are. A new site
+    /// must be added here.
     #[test]
     fn every_broadcast_site_names_whose_words_it_carries() {
         let files: &[(&str, &str)] = &[
@@ -375,7 +378,7 @@ mod tests {
             ("core/state.rs", "CLOSE_LEARNINGS_PROMPT", "Authored::ByHost"),
             ("core/state.rs", "text, send", "Authored::ByUser"),
             ("tauri_cmd/messages.rs", "&session_id, &text", "Authored::ByUser"),
-            ("tauri_cmd/sessions.rs", "&id, &prompt", "Authored::ByUser"),
+            ("tauri_cmd/sessions.rs", "&id, &prompt", "Authored::ByPlugin"),
             ("tauri_cmd/plugin_api.rs", "&session_id, &text", "Authored::ByPlugin"),
         ];
         let mut seen = 0usize;

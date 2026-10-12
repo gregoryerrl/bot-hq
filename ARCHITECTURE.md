@@ -551,9 +551,10 @@ mechanical (feedback #54 / #63 / #67 / #74 / #81):
   2.1.291), and the commands landed in settings order, so the words follow the
   doc. The file mirrors the `session_user_words` table (migration 0092),
   re-rendered on every record and at spawn. What counts as the user's words is
-  the CALLER's decision (`core::Authored`): a typed Send, a staged message and
-  the initial prompt are recorded; the resume notice, the close-out prompt and
-  a plugin's send — all posted in the user's voice — are not; a tray answer is
+  the CALLER's decision (`core::Authored`): a typed Send and a staged message
+  are recorded; the resume notice, the close-out prompt, a plugin's send and
+  the prompt of a plugin-created session — all posted in the user's voice —
+  are not; a tray answer is
   recorded as the pick with the question it answered (gate: the verdict with
   the command's first line), never the row's body with the gate's output. The
   put-back's precedence has three tiers: the user's verbatim words over the
