@@ -613,7 +613,10 @@ pub(super) const COMMAND_ECHO_MAX_BYTES: usize = 2_000;
 const COMMAND_ECHO_HEAD_LINES: usize = 8;
 
 /// `command` as agents see it echoed: whole when short, else its first lines
-/// and a line naming what was left out, with the whole text's size and hash.
+/// and a line naming what was left out, with the whole text's size. No hash
+/// here: the answer row echoes the REDACTED command, whose hash would not match
+/// the reply's and `gate_status`'s hash of the text as parked (EYES) — those two
+/// carry the sha256 of the whole, and the marker points at them.
 pub(super) fn command_excerpt(command: &str) -> std::borrow::Cow<'_, str> {
     let lines = command.lines().count();
     if lines <= COMMAND_ECHO_MAX_LINES && command.len() <= COMMAND_ECHO_MAX_BYTES {
@@ -637,12 +640,11 @@ pub(super) fn command_excerpt(command: &str) -> std::borrow::Cow<'_, str> {
     }
     let shown = head.len();
     std::borrow::Cow::Owned(format!(
-        "{}\n… [bot-hq] {} more line{} not echoed ({} bytes in all; sha256 {}) — the full text is on the approval card",
+        "{}\n… [bot-hq] {} more line{} not echoed ({} bytes in all) — the full text is on the approval card; gate_status reports its sha256",
         head.join("\n"),
         lines.saturating_sub(shown),
         if lines.saturating_sub(shown) == 1 { "" } else { "s" },
         command.len(),
-        super::action_gate::sha256_hex(command),
     ))
 }
 
@@ -695,8 +697,9 @@ mod tests {
         let out = command_excerpt(&many);
         assert!(out.starts_with("echo line 1\necho line 2\n") && out.contains("echo line 8\n"), "{out}");
         assert!(!out.contains("echo line 9"), "{out}");
-        assert!(out.contains("32 more lines not echoed") && out.contains(&format!("({} bytes in all; sha256 {})", many.len(), super::super::action_gate::sha256_hex(&many))), "{out}");
-        assert!(out.ends_with("the full text is on the approval card"), "{out}");
+        assert!(out.contains("32 more lines not echoed") && out.contains(&format!("({} bytes in all)", many.len())), "{out}");
+        assert!(!out.contains("sha256 ") || out.ends_with("gate_status reports its sha256"), "no hash of a possibly redacted text: {out}");
+        assert!(out.ends_with("the full text is on the approval card; gate_status reports its sha256"), "{out}");
         let wide = format!("echo {}\necho tail", "x".repeat(COMMAND_ECHO_MAX_BYTES + 10));
         let out = command_excerpt(&wide);
         assert!(out.contains("1 more line not echoed") && out.len() < wide.len(), "{}", out.len());
