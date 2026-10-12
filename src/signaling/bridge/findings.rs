@@ -112,7 +112,7 @@ impl SignalingBridge {
                  not park for the user on its own. Two ways out: change the body file and re-issue the \
                  identical command — the new body is re-posted for the reviewer and this finding is \
                  settled as fixed — or rebut the finding with disposition_finding to let the publish \
-                 park unchanged.",
+                 park unchanged (either way it parks at the reviewer's next turn end, not at once).",
                 &gate[..gate.len().min(8)],
                 &uid[..8]
             );

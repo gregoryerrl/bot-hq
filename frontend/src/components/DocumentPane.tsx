@@ -5,6 +5,8 @@ import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
+import { docSlugsIn } from "../lib/docLinks";
+import { PHASE_NAMES } from "../lib/phase";
 import { isTrayItem } from "./HaltBanner";
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { ChoicePrompt, type ChoicePromptChoice } from "./ChoicePrompt";
@@ -326,7 +328,21 @@ export const DocumentPane = memo(function DocumentPane({
           its parent and overflow-x-hidden clips it out of reach. */}
       <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-3">
         {showTray ? (
-          <TrayList sessionId={sessionId} />
+          <TrayList
+            sessionId={sessionId}
+            // Feedback #79: a question that names a session doc in backticks
+            // links to that doc's tab — a phase doc's or a custom one's.
+            docSlugs={allDocs.filter((d) => !isArchivedVersion(d.slug)).map((d) => d.slug)}
+            onOpenDoc={(slug) => {
+              setShowTray(false);
+              if ((PHASE_NAMES as readonly string[]).includes(slug)) {
+                setCustomSlug(null);
+                setActivePhase(slug as Phase);
+              } else {
+                setCustomSlug(slug);
+              }
+            }}
+          />
         ) : customDoc ? (
           <DocArticle
             key={customDoc.slug}
@@ -785,7 +801,16 @@ function TrayPill({
 // inline. Resolved history is intentionally NOT shown (it's noise — the tray
 // is an inbox, not an audit log). Reads the durable table so items that
 // accumulated while the user was AFK (and survived a restart) still appear.
-function TrayList({ sessionId }: { sessionId: string }) {
+function TrayList({
+  sessionId,
+  docSlugs = [],
+  onOpenDoc,
+}: {
+  sessionId: string;
+  /** Every live session-doc slug, for the question → doc links (feedback #79). */
+  docSlugs?: readonly string[];
+  onOpenDoc?: (slug: string) => void;
+}) {
   const queryClient = useQueryClient();
   // rc3 D10: a tray card is asked BY a participant, and `entry.agent` is that
   // participant's stored slug — an internal key, and on legacy rows literally
@@ -909,6 +934,8 @@ function TrayList({ sessionId }: { sessionId: string }) {
             onDiscard={() => setDiscardTarget(e)}
             onViewFile={(path) => setViewFile({ sessionId, path })}
             onExpand={(title, text) => setViewInline({ title, text })}
+            docLinks={docSlugsIn(e.prompt, docSlugs)}
+            onOpenDoc={onOpenDoc}
           />
         </li>
         ))}
@@ -929,8 +956,13 @@ function TrayChoice({
   onDiscard,
   onViewFile,
   onExpand,
+  docLinks = [],
+  onOpenDoc,
 }: {
   entry: SessionTrayView;
+  /** Session docs the question names in backticks — one link each (feedback #79). */
+  docLinks?: readonly string[];
+  onOpenDoc?: (slug: string) => void;
   /** Who asked, as `ROLE · Model` — resolved by the list, which holds the
    *  roster. Never `entry.agent` itself (rc3 D10). */
   askedByLabel: string;
@@ -1021,6 +1053,23 @@ function TrayChoice({
           ⚠ Stale — requested {relAgo(entry.asked_at)}; the requesting agent has
           moved on. Review the command before approving (repo state may have
           changed).
+        </div>
+      )}
+      {docLinks.length > 0 && onOpenDoc && (
+        <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[0.7rem] text-on-surface-variant">
+          <span>Named here:</span>
+          {docLinks.map((slug) => (
+            <button
+              key={slug}
+              type="button"
+              data-testid="tray-doc-link"
+              onClick={() => onOpenDoc(slug)}
+              className="rounded border border-outline-variant px-1.5 py-0.5 font-mono text-on-surface hover:bg-surface-container-high"
+              title={`Open the session document ${slug}`}
+            >
+              {slug}
+            </button>
+          ))}
         </div>
       )}
       <ChoicePrompt

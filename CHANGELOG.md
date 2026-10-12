@@ -249,6 +249,12 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A tray question that names a session document links to it.** When an
+  agent parks a question and writes the document's name in backticks
+  ("Approve the key questions? They are in `key-questions`"), the tray card
+  now shows the named documents as links that open their tab — a phase doc's
+  or a custom one's — so you can read what you are approving without hunting
+  for the right tab. No new tool parameter: the name in the prose is the link.
 - **The reviewer can ask for a revision of a queued publish without blocking
   it.** An advisory finding that names a queued outward publish now holds it
   queued — not withdrawn, not parked for you — until the executor changes the

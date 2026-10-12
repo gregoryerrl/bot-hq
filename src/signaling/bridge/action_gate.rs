@@ -803,7 +803,7 @@ impl SignalingBridge {
                  ({}). It will not park for the user on its own. Change the body file and re-issue the \
                  identical command (the new body is re-posted for the reviewer and the finding is \
                  settled as fixed), or rebut the finding with disposition_finding to let it park \
-                 unchanged.",
+                 unchanged — either way at the reviewer's next turn end, not at once.",
                 &f.finding_uid[..8],
                 f.summary.replace('\n', " ")
             ),
