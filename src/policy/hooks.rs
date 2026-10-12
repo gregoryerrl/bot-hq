@@ -68,7 +68,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
             "usage: bot-hq policy-check \
-             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|compact-handoff}} \
+             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|compact-handoff|pre-compact}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -159,6 +159,15 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         "shell-lint" => run_shell_lint(&data_dir, sid),
         "compact-handoff" => {
             if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent()) {
+                print!("{text}");
+            }
+            Ok(0)
+        }
+        // ALWAYS exit 0, and print plain text or nothing: claude-code BLOCKS a
+        // compaction on a PreCompact hook's exit 2, or on stdout that parses as
+        // `{"decision":"block"}` (CLI 2.1.291, s-079dec53).
+        "pre-compact" => {
+            if let Some(text) = pre_compact_text(&data_dir, sid, &hook_agent()) {
                 print!("{text}");
             }
             Ok(0)
@@ -567,6 +576,31 @@ fn compact_handoff_text(data_dir: &Path, session_id: Option<&str>, agent: &str) 
     );
     let path = crate::agents::handoff::file_path(&dir, session_id?, agent)?;
     std::fs::read_to_string(path).ok().filter(|t| !t.is_empty())
+}
+
+/// What the `PreCompact` hook prints: the summary instructions
+/// (`agents::handoff::compaction_instructions`) for the participant, naming
+/// when its handoff doc was last written — read from the same rendered file
+/// `compact-handoff` prints, so this hook too touches no database and needs no
+/// runtime. `None` (print nothing) without a session id or a participant name,
+/// or when the participant has no rendered file at all: the app renders one at
+/// spawn, so a missing file means this is not a participant bot-hq manages,
+/// and saying "it has no handoff doc" there could be false.
+///
+/// Side-effect free on purpose: claude-code can run PreCompact early, from its
+/// precompute path, and run it twice for one compaction (EYES D5).
+fn pre_compact_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+    let session_id = session_id?;
+    let dir = crate::agents::handoff::dir_under(
+        &crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir,
+    );
+    let path = crate::agents::handoff::file_path(&dir, session_id, agent)?;
+    let rendered = std::fs::read_to_string(path).ok()?;
+    Some(crate::agents::handoff::compaction_instructions(
+        session_id,
+        agent,
+        crate::agents::handoff::written_at(&rendered),
+    ))
 }
 
 /// Build a current-thread runtime to drive async calls from a sync git-hook
@@ -3192,6 +3226,44 @@ mod tests {
         // The subcommand itself exits 0 with or without a file.
         let args = |sid: &str| -> Vec<String> {
             ["compact-handoff", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        };
+        assert_eq!(run_cli(&args("s-1")).unwrap(), 0);
+        assert_eq!(run_cli(&args("s-none")).unwrap(), 0);
+    }
+
+    /// The PreCompact hook reads the same rendered file and prints the summary
+    /// instructions naming the doc's time — or the no-doc variant for a
+    /// participant the app rendered without one — and nothing for a stranger.
+    /// It exits 0 every time: an exit 2 would block the compaction.
+    #[test]
+    fn pre_compact_prints_the_summary_instructions_for_a_rendered_participant() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = crate::paths::Paths::for_data_dir(tmp.path().to_path_buf()).local_dir;
+        let dir = crate::agents::handoff::dir_under(&local);
+        let hands = crate::agents::handoff::file_path(&dir, "s-1", "hands").unwrap();
+        let at = "2026-10-12T05:40:12.345Z";
+        crate::agents::handoff::write_file(&hands, &crate::agents::handoff::render("s-1", "hands", Some(("plan", at))))
+            .unwrap();
+        let eyes = crate::agents::handoff::file_path(&dir, "s-1", "eyes").unwrap();
+        crate::agents::handoff::write_file(&eyes, &crate::agents::handoff::render("s-1", "eyes", None)).unwrap();
+
+        assert_eq!(
+            pre_compact_text(tmp.path(), Some("s-1"), "hands"),
+            Some(crate::agents::handoff::compaction_instructions("s-1", "hands", Some(at)))
+        );
+        assert_eq!(
+            pre_compact_text(tmp.path(), Some("s-1"), "eyes"),
+            Some(crate::agents::handoff::compaction_instructions("s-1", "eyes", None))
+        );
+        // No session, no rendered file, an unsafe name: nothing.
+        assert_eq!(pre_compact_text(tmp.path(), None, "hands"), None);
+        assert_eq!(pre_compact_text(tmp.path(), Some("s-1"), "hands-2"), None);
+        assert_eq!(pre_compact_text(tmp.path(), Some("s-1"), "an agent"), None);
+        let args = |sid: &str| -> Vec<String> {
+            ["pre-compact", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()

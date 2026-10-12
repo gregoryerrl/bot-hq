@@ -1622,6 +1622,32 @@ fn compact_handoff_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json:
     }])
 }
 
+/// The `PreCompact` hook entry every participant is spawned with: before
+/// claude-code compacts, it runs this binary's `policy-check pre-compact`,
+/// whose stdout claude-code appends to the prompt that writes the summary
+/// (`agents::handoff::compaction_instructions`; probed on CLI 2.1.291,
+/// s-079dec53). No matcher, so a manual `/compact` gets it too.
+///
+/// An explicit `timeout` (seconds): the CLI's default for a command hook is
+/// 600 s, and a compaction waits on its PreCompact hooks. The hook reads one
+/// file, so 10 s is generous. Its exit is always 0 — an exit 2 would block the
+/// compaction — and an older binary answers the unknown subcommand the same
+/// way, printing nothing.
+fn pre_compact_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Value {
+    let command = format!(
+        "\"{}\" policy-check pre-compact --data-dir \"{}\" --session \"{}\"",
+        exe.display(),
+        cfg.data_dir.display(),
+        cfg.session_id,
+    );
+    serde_json::json!([{
+        "hooks": [{ "type": "command", "command": command, "timeout": PRE_COMPACT_HOOK_TIMEOUT_SECS }],
+    }])
+}
+
+/// How long claude-code waits for the `PreCompact` hook, in seconds.
+pub const PRE_COMPACT_HOOK_TIMEOUT_SECS: u64 = 10;
+
 /// The read-only posture's `PreToolUse` entry: before each Bash call,
 /// claude-code runs this binary's `policy-check shell-lint`, which refuses
 /// the zsh `"$var:x"` trap (exit 2, the corrected command on stderr) and
@@ -1784,6 +1810,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                     "hooks".into(),
                     serde_json::json!({
                         "SessionStart": compact_handoff_hook(&exe, cfg),
+                        "PreCompact": pre_compact_hook(&exe, cfg),
                         "PreToolUse": shell_lint_hook(&exe, cfg),
                     }),
                 );
@@ -1791,7 +1818,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             Err(e) => warn!(
                 agent = %cfg.agent_name,
                 error = %e,
-                "current_exe() failed — the post-compaction handoff and shell-lint hooks were NOT injected"
+                "current_exe() failed — the compaction and shell-lint hooks were NOT injected"
             ),
         }
         for (k, v) in model_cli_settings(&cfg.config, &cfg.agent_name) {
@@ -1837,6 +1864,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                             "hooks": [{ "type": "command", "command": hook_cmd }],
                         }],
                         "SessionStart": compact_handoff_hook(&exe, cfg),
+                        "PreCompact": pre_compact_hook(&exe, cfg),
                     }
                 });
                 // Fold in the agent's override fragment (skillOverrides /
@@ -3500,6 +3528,29 @@ mod tests {
                 Some(inherited.clone().unwrap_or_else(|| "0".into())),
                 "{who}: the child runs with the reminder off, or with what bot-hq inherited"
             );
+        }
+    }
+
+    /// The wire for the compaction summary's instructions: BOTH postures are
+    /// spawned with a `PreCompact` hook running this binary's `policy-check
+    /// pre-compact` for the session, with an explicit short timeout (the CLI's
+    /// default is 600 s, and the compaction waits on it). Deleting the
+    /// `pre_compact_hook` entry on either branch turns its half red.
+    #[test]
+    fn both_postures_get_the_pre_compaction_summary_hook() {
+        for (who, c) in [("the edit-capable role", cfg()), ("the read-only role", eyes_cfg())] {
+            let s = settings_arg_of(&c).unwrap_or_else(|| panic!("{who} passes --settings"));
+            let entries = s["hooks"]["PreCompact"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{who} has a PreCompact hook: {s}"));
+            assert_eq!(entries.len(), 1, "{who}: {s}");
+            assert!(entries[0].get("matcher").is_none(), "{who}: manual and auto compactions alike: {s}");
+            let hook = &entries[0]["hooks"][0];
+            let command = hook["command"].as_str().unwrap();
+            assert!(command.contains("policy-check pre-compact"), "{who}: {command}");
+            assert!(command.contains(&format!("--session \"{}\"", c.session_id)), "{who}: {command}");
+            assert_eq!(hook["timeout"], serde_json::json!(PRE_COMPACT_HOOK_TIMEOUT_SECS), "{who}: {s}");
+            assert!(PRE_COMPACT_HOOK_TIMEOUT_SECS <= 30, "a compaction waits on this hook");
         }
     }
 

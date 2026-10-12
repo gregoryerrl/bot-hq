@@ -97,8 +97,8 @@ pub fn render(session_id: &str, participant: &str, doc: Option<(&str, &str)>) ->
         );
     };
     let header = format!(
-        "{INJECT_MARKER} Below is your pinned handoff doc `{slug}` (session {session_id}, last \
-         written {updated_at}), put back by bot-hq.\n\
+        "{INJECT_MARKER} Below is your pinned handoff doc `{slug}` (session \
+         {session_id}{WRITTEN_PREFIX}{updated_at}), put back by bot-hq.\n\
          It was written before the compaction, by you or by the user. Where it and the summary \
          disagree, trust the doc, then check the live state: the phase documents \
          (session_doc_search), the project's focus.md and git.\n---\n"
@@ -120,6 +120,64 @@ pub fn render(session_id: &str, participant: &str, doc: Option<(&str, &str)>) ->
          \"{resume_line}-\").\n",
         total = body.len(),
     )
+}
+
+/// When the doc in a rendered handoff file was last written — the `updated_at`
+/// [`render`] put in its header — or `None` for the no-doc text and for any
+/// other text. Read from the header only (up to the first `---` line), so a
+/// doc body that quotes "last written" cannot answer for it.
+pub fn written_at(rendered: &str) -> Option<&str> {
+    if !rendered.trim_start().starts_with(INJECT_MARKER) {
+        return None;
+    }
+    let header = rendered.split("\n---\n").next()?;
+    let from = header.find(WRITTEN_PREFIX)? + WRITTEN_PREFIX.len();
+    let rest = &header[from..];
+    let end = rest.find(|c: char| c == ')' || c == ',' || c.is_whitespace()).unwrap_or(rest.len());
+    let at = &rest[..end];
+    (!at.is_empty()).then_some(at)
+}
+
+/// What the header says right before the doc's `updated_at`.
+const WRITTEN_PREFIX: &str = ", last written ";
+
+/// What the `PreCompact` hook prints: instructions claude-code appends to the
+/// prompt that writes the compaction summary (probed on CLI 2.1.291,
+/// s-079dec53 — a hook's stdout on exit 0 becomes the summary's custom
+/// instructions; the text never enters the compacted context itself).
+///
+/// The summary is the one artifact written AT the compaction, so this is how
+/// what happened after the handoff doc's last write survives it: the summary
+/// is asked, ADDITIVELY, for a closing section about everything since then
+/// (EYES D3 — not "carry on from the doc", which would let the summary drop
+/// what only it holds: the put-back is cut at [`FILE_BUDGET_BYTES`], and a doc
+/// the user edited is not in the transcript at all). `written_at` is the doc's
+/// last write, `None` when the participant has none.
+///
+/// Plain text that never starts with `{`: claude-code parses hook output that
+/// does as JSON, and `{"decision":"block"}` would BLOCK the compaction.
+pub fn compaction_instructions(session_id: &str, participant: &str, written_at: Option<&str>) -> String {
+    let slug = doc_slug(participant);
+    let lists = "every instruction or correction the user gave, verbatim, with its time; each decision \
+                 and who took it; what was done and verified, with its evidence (commit, test run, \
+                 document, gate id); what is in flight and the exact next step; question and gate ids \
+                 still open; anything the participant was told not to do";
+    match written_at {
+        Some(at) => format!(
+            "[bot-hq] This conversation is participant `{participant}` in bot-hq session {session_id}. \
+             After this compaction bot-hq puts its handoff doc `{slug}` (last written {at}) back into \
+             its context beside your summary. Write the summary as you normally would. Then end it \
+             with a section headed \"Since `{slug}` was last written ({at})\" that lists, from after \
+             that time: {lists}; and each statement in `{slug}` you know to be no longer true, with \
+             what replaced it."
+        ),
+        None => format!(
+            "[bot-hq] This conversation is participant `{participant}` in bot-hq session {session_id}. \
+             It has no handoff doc, so your summary is all it carries across this compaction. Write \
+             the summary as you normally would. Then end it with a section headed \"Standing \
+             instructions and state\" that lists: {lists}."
+        ),
+    }
 }
 
 /// Was `hook_output` printed from a rendered handoff file? `Some(true)` when
@@ -238,6 +296,45 @@ mod tests {
         // A doc that QUOTES the no-doc sentence is still a doc.
         let quoting = render("s-1", "hands", Some((NO_DOC_MARKER, "2026-10-03T05:00:00Z")));
         assert_eq!(injected_doc(&quoting), Some(true));
+    }
+
+    /// `written_at` reads back exactly what `render` wrote, from the header
+    /// only: the no-doc text, other hooks' output and a body that quotes the
+    /// header's words all answer `None` or the header's own time.
+    #[test]
+    fn written_at_reads_the_time_render_put_in_the_header() {
+        let at = "2026-10-12T05:40:12.345Z";
+        assert_eq!(written_at(&render("s-1", "hands", Some(("the plan", at)))), Some(at));
+        let quoting = render("s-1", "hands", Some(("(session x, last written yesterday)", at)));
+        assert_eq!(written_at(&quoting), Some(at), "the header answers, not the body");
+        assert_eq!(written_at(&render("s-1", "hands", None)), None);
+        assert_eq!(written_at("some other hook's output, last written 2026-01-01T00:00:00Z"), None);
+        assert_eq!(written_at(""), None);
+    }
+
+    /// The PreCompact instructions: plain text (never JSON — `{"decision":
+    /// "block"}` would block the compaction), naming the doc and its time, and
+    /// ADDITIVE — the summary is written as usual and gains a closing section
+    /// (EYES D3).
+    #[test]
+    fn compaction_instructions_ask_for_a_closing_section_and_never_parse_as_json() {
+        let with = compaction_instructions("s-1", "hands", Some("2026-10-12T05:40:12.345Z"));
+        let without = compaction_instructions("s-1", "eyes", None);
+        for text in [&with, &without] {
+            assert!(text.starts_with("[bot-hq]") && !text.trim_start().starts_with('{'), "{text}");
+            assert!(text.contains("Write the summary as you normally would."), "additive: {text}");
+            assert!(text.contains("verbatim, with its time"), "{text}");
+            assert!(text.contains("question and gate ids"), "{text}");
+            assert!(text.len() < 2_000, "{} bytes", text.len());
+        }
+        assert!(with.contains("participant `hands` in bot-hq session s-1"), "{with}");
+        assert!(
+            with.contains("\"Since `handoff-hands` was last written (2026-10-12T05:40:12.345Z)\""),
+            "{with}"
+        );
+        assert!(with.contains("no longer true, with what replaced it"), "{with}");
+        assert!(without.contains("It has no handoff doc") && without.contains("\"Standing instructions and state\""), "{without}");
+        assert!(!without.contains("handoff-eyes` (last written"), "{without}");
     }
 
     #[test]

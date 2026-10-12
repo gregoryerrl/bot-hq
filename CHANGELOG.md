@@ -54,6 +54,13 @@ and in `docs/rebuild-archive/`.
   and edit in its own tab. When claude-code compacts that participant's
   context, bot-hq puts the document back into it, so the hand-over no longer
   depends on you asking for it or on a peer noticing.
+- **The compaction summary carries what happened since the handoff was
+  written.** When claude-code compacts a participant, bot-hq now tells the
+  summary to end with everything since the participant's handoff document was
+  last written: what you said, verbatim and with its time, the decisions, what
+  was done and how it was checked, what is in flight, and what in the handoff
+  is no longer true. So the hand-over stays current even when the handoff was
+  written an hour before the compaction.
 - **A compaction is announced in the chat.** A row says whose context was
   compacted, how many tokens it went from and to, and whether its handoff
   document was put back, so the other participants know to check that it

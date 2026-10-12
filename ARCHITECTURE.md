@@ -141,7 +141,7 @@ Per-agent model swap via env-vars: `ANTHROPIC_BASE_URL`,
 `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`. A model row may also carry
 `models.cli_settings` (0079): a JSON object merged into the `--settings` argument
 on **both** spawn postures — the read-only posture's `--settings` otherwise
-carries only the post-compaction handoff hook. Its first use is
+carries only the compaction hooks and the zsh-trap lint. Its first use is
 `modelOverrides`: the CLI resolves a model's context window from its own catalog,
 so a model id newer than the installed CLI (`claude-fable-5-1` on 2.1.251) runs at
 the 200k default whatever the registry says; mapping a known id to it restores the
@@ -510,6 +510,20 @@ mechanical (feedback #54 / #63 / #67 / #74 / #81):
   posts one row every participant and the user read: who, the token counts, and
   whether the handoff doc was put back. It is handled before the turn logic,
   like the background-task count: a compaction is not the participant speaking.
+- **A summary that knows the doc's age.** Every participant is also spawned
+  with a `PreCompact` hook (`policy-check pre-compact`, a 10 s timeout). It
+  reads the same rendered file as the put-back below and prints
+  `agents/handoff.rs::compaction_instructions`; claude-code appends a
+  PreCompact hook's stdout to the prompt that writes the summary (probed on
+  2.1.291). The summary is written as usual and ends with a section on
+  everything since the doc was last written: the user's words verbatim with
+  their times, decisions, what was done with its evidence, what is in flight,
+  open ids, and what in the doc is no longer true. The summary is the one
+  artifact written AT the compaction, so this is what keeps the time between
+  the doc's last write and the compaction from being lost. The hook always
+  exits 0 and prints plain text: an exit 2, or stdout parsing as
+  `{"decision":"block"}`, would block the compaction. It has no side effects,
+  because the CLI may run it early (its precompute path) or twice.
 - **One document put back.** The custom session doc `handoff-<participant
   slug>` is the participant's own (a peer's write to it is refused; the user
   edits it in its tab). The session-doc store mirrors every write and delete of
@@ -1070,7 +1084,7 @@ command on approval.
 
 **Scope:** only participants granted `edit_files` — the PreToolUse hook is
 injected via `--settings` on that posture alone. The read-only posture's
-`--settings` carries the post-compaction handoff hook, the zsh-trap lint (below)
+`--settings` carries the two compaction hooks, the zsh-trap lint (below)
 and a model's `cli_settings` fragment (0079), never the Tool Gate hook: a role that holds no
 `action_gate` could not answer a gate. A
 reviewer is held by `--disallowedTools` instead, which is **fail-open** for verbs
