@@ -249,6 +249,15 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The close-out staleness sweep reports terms, not vocabulary.** It flagged
+  263 lines at one close — "follow-up", "byte-identical", "re-read", "1st",
+  found in other projects' notes — none of them a thing to fix. Now a plain
+  hyphenated word and an ordinal count only when the old text backticked them
+  (an underscore, two hyphens or a non-ordinal digit still make a term); a
+  write to a root-level library file has its words looked for in the root
+  files and the session's own project only, never in another project's
+  library (a retired filename is still found anywhere); and each hit names
+  the write that retired the term.
 - **The staleness report no longer lists a whole library as missing for a
   folder git tracks nothing under.** A project whose folder sits inside a
   bigger repository that tracks no file there (a mods folder under

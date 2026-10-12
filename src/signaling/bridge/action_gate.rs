@@ -796,6 +796,7 @@ impl SignalingBridge {
     /// run an approved gated command on the receiver-dropped path — when the
     /// agent's `action_gate` tool call timed out client-side, its request future
     /// (which would have called this in-band) was already cancelled.
+    #[cfg(test)]
     pub(super) async fn execute_gated(&self, session_id: &str, command: &str) -> Result<GatedRun> {
         self.execute_gated_with(session_id, command, tool_gate::DEFAULT_TIMEOUT, &[])
             .await

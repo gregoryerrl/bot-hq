@@ -795,11 +795,28 @@ pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
     terms.into_iter().map(|(t, _)| t).collect()
 }
 
-/// Code- or artifact-shaped: a hyphen, an underscore, or a digit — the shapes
-/// prose words don't have and branch names, file stems, columns and issue
-/// numbers do.
+/// Code-shaped: an underscore, TWO hyphens, or a digit that is not an ordinal
+/// — the shapes prose words don't have and identifiers, branch names and
+/// issue numbers do. A single hyphen is prose ("follow-up", "re-read",
+/// "short-lived", "byte-identical" were most of one close's 263 hits) and an
+/// ordinal ("1st") is a number in words; both count only when backticked
+/// (the user's pick on #87 a-iii, 2026-10-12). Dots and slashes never reach
+/// here — the tokenizer splits on them and `artifact_tokens` keeps the
+/// filenames and paths whole.
 fn term_shaped(tok: &str) -> bool {
-    tok.chars().any(|c| c == '-' || c == '_' || c.is_ascii_digit())
+    if tok.contains('_') || tok.matches('-').count() >= 2 {
+        return true;
+    }
+    tok.chars().any(|c| c.is_ascii_digit()) && !is_ordinal(tok)
+}
+
+/// `1st`, `2nd`, `3rd`, `4th`, `22nd`, `100th`: digits then an ordinal suffix.
+fn is_ordinal(tok: &str) -> bool {
+    let digits = tok.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let suffix = &tok[digits.len()..];
+    !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && matches!(suffix, "st" | "nd" | "rd" | "th")
 }
 
 /// Did the (lowercased) old body BACKTICK this token? Code spans are how a CL
@@ -900,17 +917,42 @@ fn sweep_skips(file_name: &str) -> bool {
         || file_name.starts_with("notes-20")
 }
 
-/// Grep one project's CL root for surviving uses of `terms`. Returns
-/// `"<file>:<line> — <term>"` strings, at most one per (file, term) so a term
-/// repeated through a file reports once. Case-insensitive, whole-token match:
-/// substring matching would flag "duo" inside "duologue".
+/// A term the close-out sweep looks for, with the write that retired it
+/// (`None`: a library file removed or renamed since the session began).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RetiredTerm {
+    pub term: String,
+    pub retired_by: Option<String>,
+}
+
+/// Where the sweep looks for WORD terms. Filenames and paths are always
+/// looked for across the whole root: a renamed `eod.md` is cited from
+/// anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum WordScope {
+    /// Every `.md` under the root (a project's own folder).
+    Whole,
+    /// The root's own top-level files plus one project folder — the
+    /// `_globals` shape (feedback #87 a-i): a write to a root file used to
+    /// have its ordinary words searched through every project's library
+    /// ("follow-up" in Minecraft's notes, 263 hits in one close), when only
+    /// the root files and the session's own project can be about it.
+    RootAndProject(String),
+}
+
+/// Grep one CL root for surviving uses of `terms`. Returns
+/// `"<file>:<line> — "<term>" (retired by your write to <file>)"` strings, at
+/// most one per (file, term) so a term repeated through a file reports once.
+/// Case-insensitive, whole-token match: substring matching would flag "duo"
+/// inside "duologue".
 pub(super) fn sweep_project(
     root: &Path,
     project: &str,
-    terms: &[String],
+    terms: &[RetiredTerm],
     own_files: &[String],
+    words: &WordScope,
 ) -> Vec<String> {
-    fn md_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    fn md_files(dir: &Path, out: &mut Vec<PathBuf>, depth: usize, recurse: bool) {
         if depth > 4 || out.len() > 500 {
             return;
         }
@@ -920,15 +962,28 @@ pub(super) fn sweep_project(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                md_files(&path, out, depth + 1);
+                if recurse {
+                    md_files(&path, out, depth + 1, true);
+                }
             } else if path.extension().is_some_and(|e| e == "md") {
                 out.push(path);
             }
         }
     }
     let mut files = Vec::new();
-    md_files(root, &mut files, 0);
+    md_files(root, &mut files, 0, true);
     files.sort();
+    // The files whose WORDS are checked: all of them, or the root's own
+    // top-level files plus the named project's folder.
+    let word_files: std::collections::HashSet<PathBuf> = match words {
+        WordScope::Whole => files.iter().cloned().collect(),
+        WordScope::RootAndProject(own_project) => {
+            let mut narrow = Vec::new();
+            md_files(root, &mut narrow, 0, false);
+            md_files(&root.join("projects").join(own_project), &mut narrow, 0, true);
+            narrow.into_iter().collect()
+        }
+    };
     let mut hits = Vec::new();
     for path in files {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
@@ -942,16 +997,22 @@ pub(super) fn sweep_project(
         // search for, rather than a native `agents\rain\x.md` spelling.
         let rel = rel_key(&path, root).unwrap_or_else(|| path.display().to_string());
         let own = own_files.iter().any(|f| f == &rel);
-        for term in terms {
+        let words_here = word_files.contains(&path);
+        for RetiredTerm { term, retired_by } in terms {
             // A file this session itself wrote is skipped for WORD terms (it
             // was just brought up to date by hand) — never for a filename or
             // path: a partly-updated file is exactly where a stale `eod.md`
-            // survives (plan review M4).
-            if own && !is_artifact_term(term) {
+            // survives (plan review M4). Word terms are also only looked for
+            // inside the word scope.
+            if !is_artifact_term(term) && (own || !words_here) {
                 continue;
             }
             if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| line_cites(line, term)) {
-                hits.push(format!("  {project}/{rel}:{} — \"{term}\"", lineno + 1));
+                let by = match retired_by {
+                    Some(source) => format!(" (retired by your write to {source})"),
+                    None => " (a library file removed or renamed this session)".to_string(),
+                };
+                hits.push(format!("  {project}/{rel}:{} — \"{term}\"{by}", lineno + 1));
             }
         }
     }
@@ -2764,8 +2825,22 @@ mod tests {
         let terms = retired_terms(old, new);
         // Backticked in the old body → a TERM, and first on occurrence count.
         assert_eq!(terms.first().map(String::as_str), Some("duo"));
-        // Code-shaped (hyphen) reports without any marking.
-        assert!(terms.contains(&"tmp-scratch".to_string()), "got: {terms:?}");
+        // A single hyphen is prose (the user's pick on #87 a-iii): unmarked, it
+        // is vocabulary, not a concept. Underscores, two hyphens and
+        // non-ordinal digits still report unmarked; ordinals never do.
+        assert!(!terms.contains(&"tmp-scratch".to_string()), "got: {terms:?}");
+        let shaped = retired_terms(
+            "Use meta_reconcile_runs, the tool-gate-json path, migration m0092, pr-531 and the 1st pass; the follow-up is byte-identical.",
+            "lean.",
+        );
+        // (A digits-only token such as `0092` is not a word to the tokenizer.)
+        for yes in ["meta_reconcile_runs", "tool-gate-json", "m0092", "pr-531"] {
+            assert!(shaped.contains(&yes.to_string()), "{yes} is code-shaped: {shaped:?}");
+        }
+        for no in ["1st", "follow-up", "byte-identical", "pass"] {
+            assert!(!shaped.contains(&no.to_string()), "{no} is prose: {shaped:?}");
+        }
+        assert!(retired_terms("the `follow-up` list", "lean.").contains(&"follow-up".to_string()), "backticked: a term");
         // A plain unmarked word is vocabulary now, not a concept — the five
         // generic-English flags at s-a73699ec's close were exactly this class.
         assert!(!terms.contains(&"trio".to_string()), "got: {terms:?}");
@@ -2958,7 +3033,8 @@ mod tests {
 
         let report = bridge.staleness_sweep("s1").await.expect("sweep must report a hit");
         assert!(report.contains("conventions.md:2"), "got:\n{report}");
-        assert!(report.contains("\"duo\""), "got:\n{report}");
+        // The hit names the write that retired the term (feedback #87 a-ii).
+        assert!(report.contains("\"duo\" (retired by your write to vision.md)"), "got:\n{report}");
         assert!(
             !report.contains("decisions.md"),
             "append-only history must not be flagged:\n{report}"
@@ -2968,6 +3044,40 @@ mod tests {
             bridge.staleness_sweep("s1").await.is_none(),
             "the sweep must not repeat"
         );
+    }
+
+    /// Feedback #87 a-i: a `_globals` write's ordinary WORDS are looked for in
+    /// the root's own files and the session's project only — never in another
+    /// project's library — while a retired filename is still found anywhere.
+    #[tokio::test]
+    async fn a_globals_writes_words_are_swept_in_root_files_and_the_own_project_only() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        bridge.register_session("s1".to_string(), Some("bot-hq".to_string())).await;
+        let lib = tmp.path().join("library");
+        std::fs::create_dir_all(lib.join("projects/minecraft")).unwrap();
+        std::fs::write(lib.join("scratch.md"), "The `lodestone` plan and the file old-plan.md.\n").unwrap();
+        std::fs::write(lib.join("tasks.md"), "Still mentions the lodestone here.\n").unwrap();
+        std::fs::write(lib.join("projects/bot-hq/notes.md"), "bot-hq also cites the lodestone.\n").unwrap();
+        std::fs::write(lib.join("projects/minecraft/notes.md"), "minecraft's lodestone is a block; see old-plan.md.\n").unwrap();
+        bridge
+            .cl_write_file(
+                "s1".to_string(),
+                "hands".to_string(),
+                "_globals".to_string(),
+                "scratch.md".to_string(),
+                "A new plan, restated at some length so that the shrink guard stays out of this \
+                 test's way, with nothing of the old vocabulary left in it."
+                    .to_string(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        let report = bridge.staleness_sweep("s1").await.expect("a hit");
+        assert!(report.contains("_globals/tasks.md:1 — \"lodestone\" (retired by your write to scratch.md)"), "got:\n{report}");
+        assert!(report.contains("_globals/projects/bot-hq/notes.md:1 — \"lodestone\""), "the own project: {report}");
+        assert!(!report.contains("minecraft/notes.md:1 — \"lodestone\""), "another project's words are its own:\n{report}");
+        assert!(report.contains("minecraft/notes.md:1 — \"old-plan.md\""), "a retired filename is found anywhere:\n{report}");
     }
 
     #[tokio::test]

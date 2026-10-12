@@ -46,7 +46,7 @@ mod cl_write;
 mod feedback;
 mod findings;
 mod outward_body;
-pub(crate) use outward_body::{commands_run, gate_surface, is_gh_api_read, text_only_write_target, GateSurface, RunCommand};
+pub(crate) use outward_body::{commands_run, gate_surface, is_gh_api_read, GateSurface, RunCommand};
 mod prod_read;
 mod readback;
 mod session_docs;
@@ -1447,8 +1447,9 @@ impl SignalingBridge {
             .or_default()
             .sweep_nudged = true;
         // Group by project so each library root is walked once; drop a term a
-        // later write put back into its own source file.
-        let mut by_project: HashMap<String, Vec<String>> = HashMap::new();
+        // later write put back into its own source file. Each term keeps the
+        // write that retired it, which the hit names (feedback #87 a-ii).
+        let mut by_project: HashMap<String, Vec<cl_write::RetiredTerm>> = HashMap::new();
         for (project, term, source) in retired {
             if let (Some(source), Some(root)) = (&source, self.cl_project_root(&project).await) {
                 let back = std::fs::read_to_string(root.join(source))
@@ -1458,8 +1459,15 @@ impl SignalingBridge {
                     continue;
                 }
             }
-            by_project.entry(project).or_default().push(term);
+            by_project
+                .entry(project)
+                .or_default()
+                .push(cl_write::RetiredTerm { term, retired_by: source });
         }
+        // A `_globals` write's ordinary words are looked for in the root's own
+        // files and the session's project only (feedback #87 a-i); filenames
+        // and paths still anywhere.
+        let own_project = self.project_for_session(session_id).await;
         let mut hits: Vec<String> = Vec::new();
         for (project, terms) in by_project {
             let Some(root) = self.cl_project_root(&project).await else {
@@ -1470,8 +1478,13 @@ impl SignalingBridge {
                 .filter(|(p, _)| p == &project)
                 .map(|(_, f)| f.clone())
                 .collect();
+            let scope = if project == crate::storage::Project::GLOBALS {
+                cl_write::WordScope::RootAndProject(own_project.clone().unwrap_or_default())
+            } else {
+                cl_write::WordScope::Whole
+            };
             let found = tokio::task::spawn_blocking(move || {
-                cl_write::sweep_project(&root, &project, &terms, &own)
+                cl_write::sweep_project(&root, &project, &terms, &own, &scope)
             })
             .await
             .unwrap_or_default();

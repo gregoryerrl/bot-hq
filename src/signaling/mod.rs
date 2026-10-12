@@ -23,7 +23,7 @@
 //! decision doc itself flagged HTTP as the "promote if IPC gets hairy" fallback.
 
 mod bridge;
-pub(crate) use bridge::{commands_run, gate_surface, is_gh_api_read, text_only_write_target, GateSurface, RunCommand};
+pub(crate) use bridge::{commands_run, gate_surface, is_gh_api_read, GateSurface, RunCommand};
 mod jsonrpc;
 /// Parity oracle for the session-focused redesign — pins today's tool
 /// authorization so the capability rewrite can be proven not to change it.
