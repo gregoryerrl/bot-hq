@@ -4793,11 +4793,28 @@ mod tests {
         assert!(err.message.contains("after the version you last saw whole") && err.message.contains("Nothing was changed"), "{}", err.message);
         let live = storage.session_document_by_slug("s1", "decisions-needed").await.unwrap().unwrap();
         assert!(live.body.contains("yes") && live.last_writer.as_deref() == Some("user"), "{live:?}");
-        // An append keeps the answers and is never refused.
+        // An append keeps the answers and is never refused — and it does NOT
+        // make the appender's next replace acceptable (EYES 85ae55a4: a blind
+        // append or edit used to count as having read the doc, so the replace
+        // that followed buried the answers after all).
         write(caller(), "4. push?", "append").await.unwrap();
         let live = storage.session_document_by_slug("s1", "decisions-needed").await.unwrap().unwrap();
         assert!(live.body.contains("yes") && live.body.contains("4. push?"), "{}", live.body);
         assert_eq!(live.last_writer.as_deref(), Some("hands"), "the append stamps its writer");
+        let err = write(caller(), "rewritten blind after an append", "replace").await.unwrap_err();
+        assert!(err.message.contains("was changed by `hands` at ") && err.message.contains("Nothing was changed"), "a blind append is not a read: {}", err.message);
+        // Nor does a blind edit.
+        call(caller(), "session_doc_edit", json!({ "slug": "decisions-needed", "old_string": "4. push?", "new_string": "4. push to main?" })).await.unwrap();
+        let err = write(caller(), "rewritten blind after an edit", "replace").await.unwrap_err();
+        assert!(err.message.contains("Nothing was changed"), "a blind edit is not a read: {}", err.message);
+        let live = storage.session_document_by_slug("s1", "decisions-needed").await.unwrap().unwrap();
+        assert!(live.body.contains("yes") && live.body.contains("4. push to main?"), "the answers survive: {}", live.body);
+        // A whole read, then an append and an edit of the version it saw: the
+        // view stays current and the replace goes through.
+        call(caller(), "session_doc_read", json!({ "slug": "decisions-needed" })).await.unwrap();
+        write(caller(), "5. tag?", "append").await.unwrap();
+        call(caller(), "session_doc_edit", json!({ "slug": "decisions-needed", "old_string": "5. tag?", "new_string": "5. tag v1?" })).await.unwrap();
+        write(caller(), "1. ship it? yes\n2. defer? no\n3. close? later\n4. push to main? yes\n5. tag v1?", "replace").await.unwrap();
         // The user edits again; a whole read lifts the guard; a grep does not.
         bridge.session_doc_save_custom("s1", "decisions-needed", "1. ship it? yes\n2. defer? no\n3. close? later\n4. push? yes").await.unwrap();
         call(caller(), "session_doc_read", json!({ "slug": "decisions-needed", "grep": "push" })).await.unwrap();

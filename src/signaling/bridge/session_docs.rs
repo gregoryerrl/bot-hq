@@ -503,13 +503,23 @@ impl SignalingBridge {
             // refused, naming who and when. An append keeps every line, an
             // unstamped row (written before 0094) cannot be attributed, and a
             // writer with no identity (tests) is not guarded.
+            let current = storage.session_document_by_slug(session_id, key).await.ok().flatten();
             if !append && !writer.is_empty() {
-                if let Some(current) = storage.session_document_by_slug(session_id, key).await.ok().flatten() {
-                    if let Some(refusal) = self.replace_refusal(session_id, writer, key, &current).await {
+                if let Some(current) = &current {
+                    if let Some(refusal) = self.replace_refusal(session_id, writer, key, current).await {
                         anyhow::bail!("{refusal}");
                     }
                 }
             }
+            // After the write the writer has seen the doc whole only if it wrote
+            // the whole body (a replace, or a first write) or had seen the
+            // version it appended to (EYES 85ae55a4: an append or an edit used
+            // to mark the writer as having read everything, so one blind
+            // append let the next replace bury the user's answers after all).
+            let mark_seen = match (&current, append) {
+                (Some(c), true) => self.doc_seen_version(session_id, writer, key).await == Some(doc_version(c)),
+                _ => true,
+            };
             // Append only has meaning against an existing doc; appending to a
             // missing one is just a write.
             let existing = if append {
@@ -545,7 +555,7 @@ impl SignalingBridge {
                 .upsert_session_document(session_id, key, body, phase)
                 .await?;
             if !writer.is_empty() {
-                self.stamp_doc_writer(&storage, session_id, key, writer).await;
+                self.stamp_doc_writer(&storage, session_id, key, writer, mark_seen).await;
             }
             id
         };
@@ -566,10 +576,12 @@ impl SignalingBridge {
         slug: &str,
         current: &crate::storage::SessionDocument,
     ) -> Option<String> {
+        // A row nobody is recorded for (written before 0094) cannot be
+        // attributed and is never refused. There is no "its own last write"
+        // shortcut (EYES 85ae55a4): the writer's last write may have been a
+        // blind append onto the user's answers, and only having SEEN the
+        // version counts.
         let last_writer = current.last_writer.as_deref()?;
-        if last_writer == writer {
-            return None;
-        }
         let seen = self.doc_seen_version(session_id, writer, slug).await;
         if seen.as_deref() == Some(doc_version(current).as_str()) {
             return None;
@@ -591,10 +603,23 @@ impl SignalingBridge {
         ))
     }
 
-    /// Stamp `slug` with its writer and mark the writer's view current.
-    async fn stamp_doc_writer(&self, storage: &crate::storage::Storage, session_id: &str, slug: &str, writer: &str) {
+    /// Stamp `slug` with its writer and, when `mark_seen`, mark the writer's
+    /// view of the new version current — true for a write of the whole body
+    /// or of a version the writer had seen whole; false for a blind append or
+    /// edit, which leaves the writer's view where it was.
+    async fn stamp_doc_writer(
+        &self,
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        slug: &str,
+        writer: &str,
+        mark_seen: bool,
+    ) {
         if let Err(e) = storage.set_session_document_writer(session_id, slug, writer).await {
             tracing::warn!(?e, session_id, slug, "stamping a session doc's writer");
+        }
+        if !mark_seen {
+            return;
         }
         if let Ok(Some(doc)) = storage.session_document_by_slug(session_id, slug).await {
             self.note_doc_seen_whole(session_id, writer, &doc).await;
@@ -784,16 +809,12 @@ impl SignalingBridge {
             let Some(storage) = self.storage.lock().await.clone() else {
                 return Err(anyhow::anyhow!("storage not configured"));
             };
-            let existing = if append {
-                storage
-                    .session_document_by_slug(session_id, &slug)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|d| d.body)
-            } else {
-                None
+            let current = storage.session_document_by_slug(session_id, &slug).await.ok().flatten();
+            let mark_seen = match (&current, append) {
+                (Some(c), true) => self.doc_seen_version(session_id, author_slug, &slug).await == Some(doc_version(c)),
+                _ => true,
             };
+            let existing = if append { current.map(|d| d.body) } else { None };
             let composed = match existing {
                 // The heading is already at the top of the existing doc; an
                 // appended slice goes under the separator, not under a second
@@ -811,7 +832,7 @@ impl SignalingBridge {
             let id = storage
                 .upsert_session_document(session_id, &slug, &composed, Some(phase))
                 .await?;
-            self.stamp_doc_writer(&storage, session_id, &slug, author_slug).await;
+            self.stamp_doc_writer(&storage, session_id, &slug, author_slug, mark_seen).await;
             (id, storage)
         };
         let _ = self.event_tx.send(SignalingEvent::DocChanged {
@@ -949,11 +970,14 @@ impl SignalingBridge {
             })?;
             let cap = if doc.phase.is_some() { MAX_DOC_ARCHIVES } else { MAX_UNTAGGED_DOC_ARCHIVES };
             let archived_as = Self::archive_superseded_doc(&storage, session_id, slug, &edited, cap).await;
+            // An edit of a version the writer had seen whole keeps its view
+            // current; a blind edit does not (EYES 85ae55a4).
+            let mark_seen = self.doc_seen_version(session_id, writer, slug).await == Some(doc_version(&doc));
             let id = storage
                 .upsert_session_document(session_id, slug, &edited, doc.phase.as_deref())
                 .await?;
             if !writer.is_empty() {
-                self.stamp_doc_writer(&storage, session_id, slug, writer).await;
+                self.stamp_doc_writer(&storage, session_id, slug, writer, mark_seen).await;
             }
             (id, doc.phase, doc.body.len(), edited.len(), archived_as)
         };

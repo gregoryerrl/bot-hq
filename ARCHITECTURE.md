@@ -1457,8 +1457,11 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   were buried by the executor's rewrite). "Seen whole" is kept per
   participant in memory (`doc_seen`, keyed by `updated_at` + body hash): a
   whole `session_doc_read`, a `session_doc_search` reply carrying the body,
-  line ranges read from 1 to the end, or its own write. An append and
-  `session_doc_edit` are never refused for that.
+  line ranges read from 1 to the end, or its own write of the whole body. An
+  append and `session_doc_edit` are never refused for that — and neither
+  counts as having seen the doc unless the writer had already seen the
+  version it changed, so a blind append cannot make the next replace
+  acceptable.
 - `findings` (id PK, session_id, finding_uid UNIQUE, agent, severity,
   summary, code_ref, status, disposition_reason, disposed_by,
   created_at, updated_at) — EYES review findings backing the commit
