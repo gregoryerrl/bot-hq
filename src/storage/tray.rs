@@ -638,6 +638,25 @@ impl Storage {
         Ok(rows)
     }
 
+    /// The gated commands of this session the user answered at or after
+    /// `since` (an RFC3339-Z stamp, compared as text; inclusive — see
+    /// `session_documents_changed_since`), oldest first — the reviewer's turn
+    /// digest (feedback #76, #61) lists them with their run's outcome.
+    pub async fn gates_answered_since(&self, session_id: &str, since: &str) -> Result<Vec<SessionTrayEntry>> {
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
+             WHERE session_id = ? AND command_text IS NOT NULL \
+               AND status = 'answered' AND answered_at >= ? \
+             ORDER BY answered_at ASC, id ASC"
+        ))
+        .bind(session_id)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("reading gates answered since {since} for {session_id}"))?;
+        Ok(rows)
+    }
+
     /// Whether ANY tray row is pending OR queued for this session — question,
     /// gate, or an outward publish waiting on the reviewer (0080). The
     /// idle-unflagged watchdog reads this each poll: such a row means the

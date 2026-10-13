@@ -249,6 +249,18 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **The reviewer's turn opens with what its peer's prose could not show it.**
+  A reviewer receives only what the other participants write in the channel;
+  their tool calls never reach it, so a Context Library write or a session-doc
+  write was invisible to review, and a gate you answered while the reviewer was
+  working was a state it could later contradict. A participant holding the
+  finding capability now gets a short `[bot-hq]` digest at the start of each
+  dealt turn — its peers' (and your) CL writes and session-doc changes, and the
+  gated commands you answered, each with its time, writer, verdict and first
+  output line — in front of the rows it reads, never as a chat row: nobody
+  else receives it. The newest 30 items within 6,000 bytes are listed and
+  earlier ones counted; a gate still running when listed is listed again when
+  it finishes.
 - **The reviewer reads the close recap before you see the close card.** An
   agent's `close_session` used to park the card for you at once, so an
   advisory the reviewer would have raised, or a correction it had not relayed

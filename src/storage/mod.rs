@@ -70,7 +70,8 @@ pub use findings::{FindingUidResolution, OPEN_BLOCKING_FOR_SESSION};
 pub use row_types::{
     AgentConfig, AgentFeedback, CancelEvent, ClFolder, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
-    QuestionKind, RetrievalStats, Session, SessionDocument, SessionTrayEntry, SessionWithPreview,
+    QuestionKind, RetrievalStats, Session, SessionDocument, SessionDocumentChange, SessionTrayEntry,
+    SessionWithPreview,
 };
 pub(crate) use time::{cutoff_days_ago, now_utc};
 pub use messages::{messages_tail_sql, participant_text_since_sql};

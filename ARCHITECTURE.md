@@ -334,6 +334,27 @@ message is what wakes the ring — reads last. The splitter is the 200-row page
 bound of `unread_for_participant` and nothing else; a deeper backlog is one write
 per page, and the commit is all-or-nothing per page.
 
+**A reviewer's first page opens with the turn digest** (feedback #76, carrying
+#61; `src/signaling/bridge/turn_digest.rs`). A reviewer reads only its peers'
+prose — their tool calls never reach it — so a Context Library write or a
+session-doc write left nothing in the channel to review, and a gate the user
+answered while the reviewer worked was a state it could contradict. The ring
+asks the bridge for `turn_digest(session, slug, participant)` before the first
+page of a dealt turn; for a participant the session registers as a reviewer it
+lists, oldest first, the peers' (and the user's) CL writes (`cl_write_log`, fed
+by `write_cl`; in memory, capped at 200 per session), the session docs changed
+(`session_documents_changed_since`, by `updated_at` and `last_writer`, archives
+left out) and the gated commands the user answered (`gates_answered_since`,
+with `gate_ledger_state`'s verdict, exit code and output size and the first
+output line), newest 30 within 6,000 bytes, earlier ones counted. It goes out
+as the PREFACE of the same one stdin write (`deliver_batch_prefaced`), never as
+a row — nobody else reads it. Its window is `[cursor, now]`: the `now` of the
+last digest handed over (`digest_cursor`, committed by `commit_turn_digest`
+only once the page LANDED, so a drain a user message cut short loses nothing),
+or when there is none the time of the row the participant's channel cursor
+rests on; a gate still running when listed is listed again, finished, next
+time. Both maps die with the session (`unregister_session`).
+
 **A turn's epoch is bound by the RING, not by the participant's own output.** The
 sequencer publishes the epoch before delivering, and the pump snapshots it on the
 turn's first event — but never on a STRAGGLER, an event arriving after a

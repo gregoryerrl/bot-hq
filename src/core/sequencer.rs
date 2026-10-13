@@ -4087,6 +4087,14 @@ async fn deliver_backlog(
         // bounded at `UNREAD_BATCH_LIMIT`.
         let receipts: Vec<PersistedMessage> =
             page.rows.iter().map(PersistedMessage::from_row).collect();
+        // The reviewer's turn digest (feedback #76): its peers' CL and
+        // session-doc writes and the gates resolved since its last turn, in
+        // front of the FIRST page only — not a row, so nobody else reads it.
+        // Its window is committed only once the page lands, below.
+        let digest = match (batch, deps.bridge.as_ref()) {
+            (0, Some(bridge)) => bridge.turn_digest(&deps.session_id, &to.slug, to.id).await,
+            _ => None,
+        };
         let mut landed: Vec<(i64, Option<&str>)> = Vec::with_capacity(total);
         let mut stop: Option<Stop> = None;
         // ONE write for the whole page, retried until it lands or a command
@@ -4166,10 +4174,13 @@ async fn deliver_backlog(
                         break;
                     }
                 },
-                landed_ok = input.deliver_batch(&receipts) => {
+                landed_ok = input.deliver_batch_prefaced(digest.as_ref().map(|d| d.text.as_str()), &receipts) => {
                     if !landed_ok {
                         stop = Some(Stop::Unreachable);
                         break;
+                    }
+                    if let (Some(digest), Some(bridge)) = (digest.clone(), deps.bridge.as_ref()) {
+                        bridge.commit_turn_digest(&deps.session_id, &to.slug, digest);
                     }
                     // `None` = delivered. Nothing on the turn path
                     // withholds; see the module doc.
@@ -8969,6 +8980,63 @@ mod tests {
         seats[0].quiet().await;
 
         drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// Feedback #76: the REVIEWER's page opens with the turn digest — its
+    /// peers' CL and session-doc writes and the gates resolved since its last
+    /// turn — as the preface of the same one write, never as a row; the
+    /// executor's page carries none; and once the page has landed the window is
+    /// closed, so the next turn's page starts clean.
+    #[tokio::test]
+    async fn the_reviewers_page_opens_with_the_turn_digest_and_nobody_elses_does() {
+        let (mut deps, storage, mut seats) = ring(&[("hands", "active"), ("eyes", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        bridge.register_session_reviewers("s1".to_string(), vec!["eyes".to_string()]);
+        deps.bridge = Some(Arc::clone(&bridge));
+        // The executor wrote a doc before anyone was dealt a turn.
+        bridge.session_doc_write_as("s1", "hands", "plan", "B0", Some("plan"), false).await.unwrap();
+        post(&storage, "user", None, "go").await;
+
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, user_message()).await;
+        // hands first: no digest, the page is the row alone.
+        assert_eq!(seats[0].expect_raw(1).await, vec!["[user] go".to_string()]);
+        seats[0].quiet().await;
+        post(&storage, "participant", Some("hands"), "done").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: seats[0].id, epoch: 1, ending: SPOKE },
+        )
+        .await;
+        // eyes: ONE write — the digest, the join, then the rows.
+        let wires = seats[1].expect_raw(1).await;
+        let (digest, page) = wires[0]
+            .split_once(crate::storage::WIRE_JOIN)
+            .expect("the preface and the page share the write");
+        assert!(digest.starts_with("[bot-hq · ") && digest.contains("Since your last turn"), "{digest}");
+        assert!(digest.contains("hands changed session doc `plan` (plan phase)"), "{digest}");
+        assert_eq!(page, ["[user] go", "[hands] done"].join(crate::storage::WIRE_JOIN));
+        seats[1].quiet().await;
+        // The window closed with the landing: eyes' next page has no preface.
+        post(&storage, "participant", Some("eyes"), "reviewed").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: seats[1].id, epoch: 2, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(seats[0].expect_raw(1).await, vec!["[eyes] reviewed".to_string()]);
+        post(&storage, "participant", Some("hands"), "next").await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete { participant_id: seats[0].id, epoch: 3, ending: SPOKE },
+        )
+        .await;
+        assert_eq!(seats[1].expect_raw(1).await, vec!["[hands] next".to_string()], "no digest: nothing new");
+        drop(tx);
+        bridge.unregister_session("s1").await;
         assert!(exited(task).await);
     }
 

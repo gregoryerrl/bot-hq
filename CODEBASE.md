@@ -323,6 +323,7 @@ lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, ag
 | `src/signaling/bridge/readback.rs` | an approved publish read back (feedback #57 #60 #97): `object_from_stdout` (checked URL parts only), `read_command` (`gh api --method GET`), `compare` (only the body's end trimmed), `read_back_publish` (the result row's line; one retry for an edit; a PR's closing references), `live_edit_section` / `live_body_sha` (a queued edit's diff against the live body, and its hash re-checked at approval, 0088); reads run through the gate shell; `set_gh_program` is the test seam | M |
 | `src/signaling/bridge/findings.rs` | `eyes_flag`/`approve`/`disposition`/`check_open_findings` + reviewer-down gate + override | M |
 | `src/signaling/bridge/session_docs.rs` | doc write (phase-keyed, `-eyes` twin), search, read, archive-on-rewrite (cap 50) | M |
+| `src/signaling/bridge/turn_digest.rs` | the reviewer's turn digest (feedback #76 + #61): `ClWriteRecord` log (`log_cl_write`, cap 200), `DigestCursor`, `turn_digest` (peers' CL + doc writes, gates answered, running gates re-listed when finished) → `TurnDigest` the ring prefaces the first page with; `commit_turn_digest` on landing; `render_digest` (newest 30 / 6,000 bytes) | S |
 | `src/signaling/bridge/terminal_tools.rs` | `terminal_exec`/`terminal_read` over the PTY registry + Tool-Gate parity | M |
 | `src/signaling/bridge/feedback.rs` | `file_feedback` | S |
 | `src/signaling/bridge/cl_facade.rs` | `cl_index_search`/`cl_retrieve`/`cl_stale_refs`/folder/register/`cl_rescan` | L |

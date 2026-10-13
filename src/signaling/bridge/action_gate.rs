@@ -677,7 +677,7 @@ impl SignalingBridge {
     }
 
     /// One ledger row's state, from the tray row and the running mark.
-    async fn gate_ledger_state(&self, storage: &crate::storage::Storage, row: &crate::storage::SessionTrayEntry) -> String {
+    pub(super) async fn gate_ledger_state(&self, storage: &crate::storage::Storage, row: &crate::storage::SessionTrayEntry) -> String {
         match row.status.as_str() {
             "queued" => "queued for the reviewer's read".to_string(),
             "pending" => "pending the user's approval".to_string(),
@@ -2160,16 +2160,22 @@ fn human_ms(ms: i64) -> String {
     }
 }
 
+/// What follows a gate delivery row's `Output:` line — the command's own
+/// output and footer — or the whole row when it has no such line.
+pub(super) fn gate_output_body(content: &str) -> &str {
+    const MARK: &str = "Output:\n";
+    match content.rfind(MARK) {
+        Some(at) if at == 0 || content[..at].ends_with('\n') => &content[at + MARK.len()..],
+        _ => content,
+    }
+}
+
 /// The output part of a gate's delivery row, for `gate_status`: what follows
 /// the row's `Output:` line (the verdict above it restates the command the
 /// caller already has), cut to its last [`GATE_STATUS_OUTPUT_TAIL_BYTES`] on a
 /// char boundary. `content` is the stored row — redacted when it was written.
 fn gate_output_excerpt(content: &str, row_id: i64) -> String {
-    const MARK: &str = "Output:\n";
-    let output = match content.rfind(MARK) {
-        Some(at) if at == 0 || content[..at].ends_with('\n') => &content[at + MARK.len()..],
-        _ => content,
-    };
+    let output = gate_output_body(content);
     if output.len() <= GATE_STATUS_OUTPUT_TAIL_BYTES {
         return format!("\nOutput (message {row_id}):\n{output}");
     }
@@ -3969,6 +3975,75 @@ mod tests {
         // An RPC from the reviewer inside the window is stronger evidence: queued again.
         bridge.note_agent_rpc("s1", "eyes");
         assert!(matches!(bridge.queue_close_card("s1", "hands", "fifth try", "").await.unwrap(), CloseQueue::Queued(_)));
+    }
+
+    /// Feedback #76 (+ #61): the reviewer's dealt turn opens with a digest of
+    /// what its peers' prose cannot show it — their CL writes, their session-doc
+    /// writes, the gates the user answered — since its last turn. Only a
+    /// reviewer gets one; its own writes are left out; the window moves only
+    /// when the page carrying it lands (`commit_turn_digest`); a gate still
+    /// running when reported is reported again, finished, next time.
+    #[tokio::test]
+    async fn the_reviewers_turn_opens_with_a_digest_of_what_it_could_not_see() {
+        use super::super::turn_digest::ClWriteRecord;
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let hands = storage.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        assert!(bridge.turn_digest("s1", "hands", hands).await.is_none(), "the executor gets no digest");
+        assert!(bridge.turn_digest("s1", "eyes", eyes).await.is_none(), "nothing has happened yet");
+        // The executor writes a doc and the CL; the reviewer writes its own co-doc.
+        bridge.session_doc_write_as("s1", "hands", "plan", "B0–B5", Some("plan"), false).await.unwrap();
+        bridge.session_doc_write_as("s1", "eyes", "plan-eyes", "P1", None, false).await.unwrap();
+        bridge.log_cl_write(
+            "s1",
+            ClWriteRecord {
+                at: crate::storage::now_utc(),
+                agent: "hands".into(),
+                project: "bot-hq".into(),
+                file_path: "focus.md".into(),
+                kind: "append",
+                bytes: 4_210,
+                changed: Some("lines 88–96".into()),
+            },
+        );
+        // The user approves a gate; it runs.
+        let (gate, _, _) = parked(bridge.park_gated_command("s1", "hands", "printf 'rows: 42\\n'").await.unwrap());
+        bridge.resolve_choice(&gate, "Approve".into()).await.unwrap();
+        let digest = bridge.turn_digest("s1", "eyes", eyes).await.expect("three items");
+        let text = &digest.text;
+        assert!(text.starts_with("[bot-hq · 20") && text.contains("Since your last turn"), "{text}");
+        assert!(text.contains("hands wrote the CL: bot-hq/focus.md (append, 4210 bytes; lines 88–96)"), "{text}");
+        assert!(text.contains("hands changed session doc `plan` (plan phase)"), "{text}");
+        assert!(!text.contains("plan-eyes"), "the reviewer's own write is not news to it: {text}");
+        assert!(
+            text.contains(&format!("gate {} (hands) resolved: approved, exit 0 after", &gate[..8]))
+                && text.contains("— output: rows: 42"),
+            "{text}"
+        );
+        assert_eq!(text.lines().count(), 4, "{text}");
+        // Not committed (the page never landed): the same window again.
+        assert_eq!(bridge.turn_digest("s1", "eyes", eyes).await.unwrap().text.lines().count(), 4);
+        bridge.commit_turn_digest("s1", "eyes", digest);
+        assert!(bridge.turn_digest("s1", "eyes", eyes).await.is_none(), "the window closed");
+        // A gate still running when the digest is cut is reported again, finished.
+        let (gate2, _, _) = parked(bridge.park_gated_command("s1", "hands", "printf 'done\\n'").await.unwrap());
+        bridge.resolve_choice(&gate2, "Approve".into()).await.unwrap();
+        {
+            let _running = bridge.note_gate_running("s1", &gate2, std::time::Duration::from_secs(120));
+            let digest = bridge.turn_digest("s1", "eyes", eyes).await.unwrap();
+            assert!(digest.text.contains(&format!("gate {} (hands) resolved: approved, RUNNING", &gate2[..8])), "{}", digest.text);
+            bridge.commit_turn_digest("s1", "eyes", digest);
+        }
+        let digest = bridge.turn_digest("s1", "eyes", eyes).await.expect("the finish");
+        assert!(
+            digest.text.contains(&format!("gate {} (hands) finished: approved, exit 0 after", &gate2[..8]))
+                && digest.text.contains("— output: done"),
+            "{}",
+            digest.text
+        );
+        bridge.commit_turn_digest("s1", "eyes", digest);
+        assert!(bridge.turn_digest("s1", "eyes", eyes).await.is_none());
     }
 
     /// Feedback #69: an ADVISORY finding that names a queued publish is a

@@ -203,6 +203,31 @@ impl Storage {
         Ok(rows)
     }
 
+    /// The session's documents changed at or after `since` (an RFC3339-Z
+    /// stamp, compared as text like every other cutoff; inclusive, so a change
+    /// in the same millisecond as the last digest is repeated rather than
+    /// lost), oldest first, without their bodies — the reviewer's turn digest
+    /// (feedback #76) lists them. Archived versions (`<slug>@<n>`) are left
+    /// out: the replace that made one is already the change on the live slug.
+    pub async fn session_documents_changed_since(
+        &self,
+        session_id: &str,
+        since: &str,
+    ) -> Result<Vec<SessionDocumentChange>> {
+        let rows = sqlx::query_as::<_, SessionDocumentChange>(
+            "SELECT slug, phase, last_writer, updated_at, LENGTH(CAST(body AS BLOB)) AS bytes \
+             FROM session_documents \
+             WHERE session_id = ? AND updated_at >= ? AND slug NOT LIKE '%@%' \
+             ORDER BY updated_at ASC",
+        )
+        .bind(session_id)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| format!("reading session docs changed since {since} for {session_id}"))?;
+        Ok(rows)
+    }
+
     /// Convenience wrapper: all docs tagged with `phase` for `session_id`,
     /// newest-first (the session view's tabs read `session_documents_for`
     /// with a phase filter directly). Test-only since round 7 (2026-08-17):

@@ -735,6 +735,15 @@ impl ParticipantInput {
     /// there is unchanged in substance: every write to a participant's stdin
     /// that carries a receipt is compared against the channel it is for.
     pub async fn deliver_batch(&self, msgs: &[PersistedMessage]) -> bool {
+        self.deliver_batch_prefaced(None, msgs).await
+    }
+
+    /// [`deliver_batch`](Self::deliver_batch) with a host-authored PREFACE in
+    /// front of the page — the reviewer's turn digest (feedback #76), which is
+    /// not a row and carries no receipt. The same one write, the same
+    /// all-or-nothing: the preface goes out only with a page it belongs to,
+    /// never on its own (an empty page sends nothing, preface or not).
+    pub async fn deliver_batch_prefaced(&self, preface: Option<&str>, msgs: &[PersistedMessage]) -> bool {
         // Checked BEFORE anything is sent, across the whole batch, so a bad row
         // in the middle cannot leave a prefix on the wire.
         for msg in msgs {
@@ -752,10 +761,12 @@ impl ParticipantInput {
         if msgs.is_empty() {
             return true;
         }
-        self.tx
-            .send(OutgoingUserMessage::text(PersistedMessage::wire_batch(msgs)))
-            .await
-            .is_ok()
+        let page = PersistedMessage::wire_batch(msgs);
+        let text = match preface {
+            Some(p) if !p.is_empty() => format!("{p}{}{page}", crate::storage::WIRE_JOIN),
+            _ => page,
+        };
+        self.tx.send(OutgoingUserMessage::text(text)).await.is_ok()
     }
 
     /// True once the receiving half is gone — a permanent API error or an

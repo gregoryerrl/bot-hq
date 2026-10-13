@@ -73,6 +73,8 @@ struct Written {
     snapshot: Snapshot,
     /// Which lines the write changed (`changed_lines`), or "no change".
     changed: Option<String>,
+    /// The file's size after the write.
+    bytes: usize,
 }
 
 impl SignalingBridge {
@@ -449,13 +451,27 @@ impl SignalingBridge {
                 (Snapshot::NothingToCommit, _) => Some("no change".to_string()),
                 _ => None,
             };
-            Ok(Written { done, lint, retired, pre, outside, snapshot, changed })
+            let bytes = final_content.len();
+            Ok(Written { done, lint, retired, pre, outside, snapshot, changed, bytes })
         })
         .await
         .context("CL write task panicked")??;
-        let Written { done, lint, retired, pre, outside, snapshot, changed } = outcome;
+        let Written { done, lint, retired, pre, outside, snapshot, changed, bytes } = outcome;
         self.record_retired_terms(&session_id, &project, retired, Some(&file_path)).await;
         self.record_cl_write(&session_id, &project, &file_path).await;
+        // The reviewer's turn digest lists it (feedback #76).
+        self.log_cl_write(
+            &session_id,
+            super::turn_digest::ClWriteRecord {
+                at: crate::storage::now_utc(),
+                agent: agent.clone(),
+                project: project.clone(),
+                file_path: file_path.clone(),
+                kind: done.kind(),
+                bytes,
+                changed: changed.clone(),
+            },
+        );
         let library = self
             .data_dir
             .as_ref()

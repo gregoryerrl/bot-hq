@@ -129,6 +129,18 @@ impl Storage {
         Ok(row.map(|r| r.0))
     }
 
+    /// When ONE message row was written, or `None` for no such row — the
+    /// reviewer's turn digest takes its window from the row its cursor rests on
+    /// when nothing in memory says where the last digest ended (feedback #76).
+    pub async fn message_created_at(&self, id: i64) -> Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT created_at FROM messages WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .with_context(|| format!("reading the time of message {id}"))?;
+        Ok(row.map(|r| r.0))
+    }
+
     /// What the findings re-raise guard asks: a reviewer only escalates once its peer
     /// has actually had a turn since the last raise. Scoped to
     /// `origin = 'participant'` so a host `system_notice` or the user's own reply

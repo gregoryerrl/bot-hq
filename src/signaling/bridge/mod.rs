@@ -55,6 +55,7 @@ pub(crate) use session_docs::{
 };
 mod terminal_tools;
 mod tray;
+mod turn_digest;
 pub use tray::{gate_age_secs, Withdrawal, STALE_GATE_MAX_AGE_SECS};
 mod util;
 
@@ -423,6 +424,14 @@ pub struct SignalingBridge {
     /// ranges (feedback #102: the replace guard). In memory: after a relaunch
     /// the first replace of a doc someone else changed asks for one read.
     doc_seen: Mutex<HashMap<(String, String, String), session_docs::DocSeen>>,
+    /// session_id → the agents' Context Library writes this run (feedback #76):
+    /// what the reviewer's turn digest lists. Capped per session; in memory,
+    /// so a relaunch forgets them — the library's git log keeps the record.
+    cl_write_log: std::sync::Mutex<HashMap<String, std::collections::VecDeque<turn_digest::ClWriteRecord>>>,
+    /// `(session, participant)` → where that participant's last turn digest
+    /// ended (feedback #76). In memory: after a relaunch the first digest's
+    /// window starts at the last row the participant read.
+    digest_cursor: std::sync::Mutex<HashMap<(String, String), turn_digest::DigestCursor>>,
     /// session_id → "the session is waiting for user input" flag, shared with
     /// the session's `ActivityTracker` (it derives `AwaitingUser` from it) and
     /// the ring's D35 halt gate. When a halting tool (mark_awaiting_user /
@@ -694,6 +703,8 @@ impl SignalingBridge {
             data_dir,
             session_projects: Mutex::new(HashMap::new()),
             doc_seen: Mutex::new(HashMap::new()),
+            cl_write_log: std::sync::Mutex::new(HashMap::new()),
+            digest_cursor: std::sync::Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             session_sequencer: Mutex::new(HashMap::new()),
             session_activity: Mutex::new(HashMap::new()),
@@ -1279,7 +1290,7 @@ impl SignalingBridge {
             .unwrap_or_default()
     }
 
-    fn is_reviewer(&self, session_id: &str, agent: &str) -> bool {
+    pub(crate) fn is_reviewer(&self, session_id: &str, agent: &str) -> bool {
         self.session_reviewers
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1368,6 +1379,15 @@ impl SignalingBridge {
         // What each participant had seen of the session's docs (feedback #102)
         // dies with the session.
         self.doc_seen.lock().await.retain(|(sid, _, _), _| sid != session_id);
+        // …and so do the reviewer's digest sources (feedback #76).
+        self.cl_write_log
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(session_id);
+        self.digest_cursor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .retain(|(sid, _), _| sid != session_id);
         // A push re-run's nonce (round 12) is consumed within its own run; a
         // closed session's leftover must not stay redeemable.
         self.push_nonces
@@ -2886,6 +2906,11 @@ mod tests {
                 (s.into(), "hands".into(), "plan".into()),
                 session_docs::DocSeen { version: "v".into(), covered_to: usize::MAX },
             );
+            b.cl_write_log.lock().unwrap().insert(s.into(), std::collections::VecDeque::new());
+            b.digest_cursor
+                .lock()
+                .unwrap()
+                .insert((s.into(), "eyes".into()), turn_digest::DigestCursor::default());
             // A gate still executing: the mark is inserted directly, so no
             // guard removes it behind the test's back.
             b.running_gates.lock().unwrap().insert(
@@ -2982,13 +3007,20 @@ mod tests {
         check!("doc_seen", b.doc_seen.lock().await, |m, s| {
             m.keys().any(|(k, _, _)| k == s)
         });
+        check!("cl_write_log", b.cl_write_log.lock().unwrap(), |m, s| {
+            m.contains_key(s)
+        });
+        check!("digest_cursor", b.digest_cursor.lock().unwrap(), |m, s| {
+            m.keys().any(|(k, _)| k == s)
+        });
 
         // Tracks THIS test's manual `check!` list, so it moves when a map is
         // legitimately added or removed — 16 until round 6 deleted
         // `session_open_blocking` with the rest of the router's orphaned cache,
         // 16 again since `running_gates` became a map that carries each run's
-        // start (2026-10-03), 17 with `doc_seen` (feedback #102, 2026-10-12).
-        assert_eq!(report.len(), 17, "a map was dropped from this test's sweep");
+        // start (2026-10-03), 17 with `doc_seen` (feedback #102, 2026-10-12),
+        // 19 with `cl_write_log` + `digest_cursor` (feedback #76, 2026-10-13).
+        assert_eq!(report.len(), 19, "a map was dropped from this test's sweep");
         let undrained: Vec<&str> = report
             .iter()
             .filter(|(_, doomed, _)| *doomed)

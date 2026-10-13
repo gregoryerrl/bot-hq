@@ -633,6 +633,18 @@ pub struct ClRead {
 /// Per-session free-form document. Agents use this for plans, investigation
 /// findings, and scratch notes that should NOT pollute the CL. Isolated per
 /// session; archived with the session row on close. `slug` is the agent-
+/// One changed session document without its body — what the reviewer's turn
+/// digest lists (feedback #76): `Storage::session_documents_changed_since`.
+#[derive(Debug, Clone, FromRow, PartialEq, Eq)]
+pub struct SessionDocumentChange {
+    pub slug: String,
+    pub phase: Option<String>,
+    pub last_writer: Option<String>,
+    pub updated_at: String,
+    /// The body's size in bytes.
+    pub bytes: i64,
+}
+
 /// chosen identifier; UNIQUE per (session_id, slug) so writes are idempotent.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct SessionDocument {
