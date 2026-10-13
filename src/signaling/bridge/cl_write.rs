@@ -2406,6 +2406,17 @@ mod tests {
             !bridge.should_nudge_close("s1").await,
             "a cl_write_file should lift the close-out nudge"
         );
+        // After a relaunch the in-memory flag is gone, but the write is on
+        // disk and in the index: a new bridge over the same storage must not
+        // nudge either — the recap would say "written this session" beside it.
+        let relaunched = SignalingBridge::new_with(None, Some(_tmp.path().to_path_buf()));
+        relaunched.set_storage(_storage.clone()).await;
+        relaunched.register_session("s1".into(), Some("bot-hq".into())).await;
+        assert!(
+            !relaunched.should_nudge_close("s1").await,
+            "the durable CL write lifts the nudge across a relaunch"
+        );
+        assert!(relaunched.should_nudge_close("s2").await, "an untouched session is still nudged");
     }
 
     #[tokio::test]

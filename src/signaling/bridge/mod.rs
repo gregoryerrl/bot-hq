@@ -1956,12 +1956,17 @@ impl SignalingBridge {
         if !storage.adherence_nudges_enabled().await {
             return false;
         }
-        let mut gate = self.session_close_gate.lock().await;
-        let state = gate.entry(session_id.to_string()).or_default();
-        if state.cl_written || state.close_nudged {
+        // The same evidence the recap reads (`close_gate_flags`): the
+        // in-memory flag, else the durable one — a CL write this session made
+        // BEFORE a relaunch. Reading the flag alone re-nudged a session whose
+        // delta was on disk, while the card said "written this session"
+        // (s-42bf34b3, 2026-10-13: the close after the relaunch).
+        let (written, nudged) = self.close_gate_flags(session_id).await;
+        if written || nudged {
             return false;
         }
-        state.close_nudged = true;
+        let mut gate = self.session_close_gate.lock().await;
+        gate.entry(session_id.to_string()).or_default().close_nudged = true;
         true
     }
 
