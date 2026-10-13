@@ -917,7 +917,7 @@ impl SignalingBridge {
                 }
                 if let Some(row_id) = row.result_row_id {
                     if let Ok(Some(content)) = storage.message_content(row_id).await {
-                        out.push_str(&format!(", {} bytes of output", content.len()));
+                        out.push_str(&format!(", {} bytes of output", gate_output_bytes(&content)));
                     }
                 }
                 out
@@ -2427,6 +2427,22 @@ pub(super) fn gate_output_body(content: &str) -> &str {
     }
 }
 
+/// How many bytes the COMMAND wrote, from a gate's delivery row: the figure
+/// the run's own footer carries (`[action_gate → exit N · B output bytes · …]`,
+/// stdout + stderr), else — a row without the footer, or a refusal — the
+/// output body's length. The ledger and the reviewer's digest used to print
+/// the whole row's length here (verdict line, markers and footer included), so
+/// a 35-byte output read as 188 (EYES, s-42bf34b3).
+pub(super) fn gate_output_bytes(content: &str) -> usize {
+    let body = gate_output_body(content);
+    let footer = body.lines().rev().find(|l| l.starts_with("[action_gate → exit"));
+    footer
+        .and_then(|f| f.split(" · ").nth(1))
+        .and_then(|s| s.strip_suffix(" output bytes").or_else(|| s.strip_suffix(" output byte")))
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        .unwrap_or_else(|| body.trim_end().len())
+}
+
 /// The output part of a gate's delivery row, for `gate_status`: what follows
 /// the row's `Output:` line (the verdict above it restates the command the
 /// caller already has), cut to its last [`GATE_STATUS_OUTPUT_TAIL_BYTES`] on a
@@ -2977,7 +2993,11 @@ mod tests {
             .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "newest first: {ledger}");
         assert!(ledger.contains("pending the user's approval `echo pending`"), "{ledger}");
-        assert!(ledger.contains("approved, exit 0 after") && ledger.contains("bytes of output"), "{ledger}");
+        // `touch` prints nothing: the count is the command's, not the row's.
+        assert!(ledger.contains("approved, exit 0 after") && ledger.contains(", 0 bytes of output"), "{ledger}");
+        assert_eq!(gate_output_bytes("Gate x approved: `printf a`\nOutput:\nurgent-smoke approved at 06:08:15Z\n[action_gate → exit 0 · 35 output bytes · shell zsh]"), 35);
+        assert_eq!(gate_output_bytes("verdict\nOutput:\nx\n[action_gate → exit 0 · 1 output byte · shell zsh]"), 1);
+        assert_eq!(gate_output_bytes("verdict\nOutput:\nNOT RUN: the body file changed\n"), 30, "no footer: the body's length");
         assert!(ledger.contains("rejected (not yet, CI is red) `rm -rf build`"), "{ledger}");
         assert!(!ledger.contains("1234567890abcdefghij"), "the command is redacted: {ledger}");
         assert!(ledger.contains("hands"), "{ledger}");
