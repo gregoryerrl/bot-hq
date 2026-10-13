@@ -218,6 +218,11 @@ pub struct SessionTrayView {
     pub command_text: Option<String>,
     pub asked_at: String,
     pub answered_at: Option<String>,
+    /// Why the parking agent marked this gate URGENT (feedback #52): the
+    /// card shows it, the session tile turns red, and the OS notification
+    /// fires even while bot-hq is focused, again every ten minutes until the
+    /// gate is answered (at most six times). Null for an ordinary gate.
+    pub urgent_reason: Option<String>,
     /// True when this is a PENDING gated command whose requesting agent has moved
     /// on (client timeout / restart) — approving runs the command blind, so the
     /// UI warns + requires confirm. Computed at list time from the live in-memory
@@ -241,6 +246,7 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
             command_text: e.command_text,
             asked_at: e.asked_at,
             answered_at: e.answered_at,
+            urgent_reason: e.urgent_reason,
             stale: false,
         }
     }
@@ -343,6 +349,7 @@ mod tests {
             command_text: Some("git push".into()),
             asked_at: asked_at.into(),
             answered_at: None,
+            urgent_reason: None,
             stale: false,
         }
     }
@@ -467,8 +474,10 @@ mod tests {
             exec_kind: None,
             run_timeout_secs: None,
             pinned_scripts: None,
+            urgent_reason: Some("prod budget overrun".into()),
         };
         let view: SessionTrayView = entry.into();
+        assert_eq!(view.urgent_reason.as_deref(), Some("prod budget overrun"));
         assert_eq!(view.options, vec!["Approve", "Reject"]);
         assert_eq!(view.command_text.as_deref(), Some("gh api user"));
         assert_eq!(view.status, "pending");

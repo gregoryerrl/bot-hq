@@ -47,6 +47,9 @@ export interface NeedsYou {
   questions: number;
   /** Approval gates (`isApproval`) — a gate holds the session until answered. */
   approvals: number;
+  /** Of those, the gates the parking agent marked URGENT (feedback #52): the
+   *  tile turns red and the OS notification repeats until they are answered. */
+  urgent: number;
   /** Halted and waiting for the user: an ordinary halt, or a temporary one
    *  whose wake time has PASSED — the wake is held while the session is
    *  paused, stopped or behind a pending gate, and then it is the user's move
@@ -64,7 +67,12 @@ export interface NeedsYou {
  * on a clock. A legacy `halt` tray row counts as neither kind.
  */
 export function needsYouBySession(
-  pending: readonly { session_id: string; kind: string; options: readonly string[] }[],
+  pending: readonly {
+    session_id: string;
+    kind: string;
+    options: readonly string[];
+    urgent_reason?: string | null;
+  }[],
   halts: readonly {
     session_id: string;
     declared_by: string;
@@ -75,10 +83,13 @@ export function needsYouBySession(
 ): Record<string, NeedsYou> {
   const out: Record<string, NeedsYou> = {};
   const entry = (sid: string) =>
-    (out[sid] ??= { questions: 0, approvals: 0, halt: null, wakesAt: null });
+    (out[sid] ??= { questions: 0, approvals: 0, urgent: 0, halt: null, wakesAt: null });
   for (const p of pending) {
-    if (isApproval(p)) entry(p.session_id).approvals += 1;
-    else if (isTrayItem(p)) entry(p.session_id).questions += 1;
+    if (isApproval(p)) {
+      const e = entry(p.session_id);
+      e.approvals += 1;
+      if (p.urgent_reason) e.urgent += 1;
+    } else if (isTrayItem(p)) entry(p.session_id).questions += 1;
   }
   for (const h of halts) {
     const wake = h.wake_at ? parseUtcMs(h.wake_at) : Number.NaN;
@@ -97,8 +108,12 @@ export function needsYou(n: NeedsYou | undefined): boolean {
  *  "halted — your move" — never folded into one number. */
 export function needsYouParts(n: NeedsYou): string[] {
   const parts: string[] = [];
-  if (n.approvals > 0) {
-    parts.push(n.approvals === 1 ? "approval waiting" : `${n.approvals} approvals waiting`);
+  if (n.urgent > 0) {
+    parts.push(n.urgent === 1 ? "URGENT approval" : `${n.urgent} URGENT approvals`);
+  }
+  const ordinary = n.approvals - n.urgent;
+  if (ordinary > 0) {
+    parts.push(ordinary === 1 ? "approval waiting" : `${ordinary} approvals waiting`);
   }
   if (n.questions > 0) parts.push(n.questions === 1 ? "1 question" : `${n.questions} questions`);
   if (n.halt) parts.push("halted — your move");

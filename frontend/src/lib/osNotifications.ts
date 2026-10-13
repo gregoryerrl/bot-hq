@@ -90,6 +90,46 @@ export function planFlush(
   };
 }
 
+// ---- urgent gates (feedback #52, the user's desktop tier) ----------------
+//
+// An URGENT gate is the one escalation that ignores the focus check, the
+// cooldown and the coalescing: the parking agent said the user must see it
+// NOW (a production incident), so it fires at once — focused or not — and
+// again every ten minutes until the gate is answered, at most six repeats.
+// No phone push: the user's pick was the desktop tier. The hook owns the
+// timers; this is the policy.
+
+/** Re-notify an unanswered urgent gate this often… */
+export const URGENT_RENOTIFY_MS = 10 * 60_000;
+/** …and at most this many times after the first notification. */
+export const URGENT_RENOTIFY_MAX = 6;
+
+export interface UrgentGate {
+  choiceId: string;
+  sessionId: string;
+  agent: string;
+  reason: string;
+  command: string;
+}
+
+/** The toast for an urgent gate: the reason first, then the command's first
+ *  line — what the user needs to decide whether to open bot-hq now. `repeat`
+ *  is 0 for the first notification, then 1..URGENT_RENOTIFY_MAX. */
+export function urgentToast(g: UrgentGate, repeat: number): Toast {
+  const command = g.command.split("\n").find((l) => l.trim() !== "")?.trim() ?? "";
+  const still = repeat > 0 ? ` (still waiting, ${repeat}/${URGENT_RENOTIFY_MAX})` : "";
+  return {
+    title: `bot-hq — URGENT approval${still}`,
+    body: snip(command ? `${g.reason} — ${command}` : g.reason),
+  };
+}
+
+/** Delay until the next re-notification after `repeats` already sent, or
+ *  `null` once the cap is reached — the gate still shows red in the app. */
+export function nextUrgentDelay(repeats: number): number | null {
+  return repeats < URGENT_RENOTIFY_MAX ? URGENT_RENOTIFY_MS : null;
+}
+
 // ---- user preference (per-machine, mirrors the update-banner dismiss) ----
 
 const PREF_KEY = "bot-hq:os-notifications";

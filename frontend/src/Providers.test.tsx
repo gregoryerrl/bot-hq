@@ -371,4 +371,100 @@ describe("Providers — the OS-notification wire", () => {
     await vi.advanceTimersByTimeAsync(2_000);
     expect(mockSend).not.toHaveBeenCalled();
   });
+
+  // Feedback #52 (the user's desktop tier): an URGENT gate notifies at once
+  // even while focused, repeats every ten minutes until answered, and stops
+  // at six repeats.
+  it("an urgent gate notifies at once while focused and repeats until answered", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    renderProviders();
+    emit("session:gate_urgent", {
+      session_id: "s1",
+      choice_id: "g1",
+      agent: "hands",
+      reason: "the nightly job is burning the shared budget",
+      command: "gcloud run jobs executions cancel nightly",
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({
+      title: "bot-hq — URGENT approval",
+      body: "the nightly job is burning the shared budget — gcloud run jobs executions cancel nightly",
+    });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockSend.mock.calls[1][0]).toMatchObject({
+      title: "bot-hq — URGENT approval (still waiting, 1/6)",
+    });
+    // Answered: the repeats stop.
+    emit("session:choice_resolved", { choice_id: "g1", picked: "Approve" });
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
+  it("an unanswered urgent gate stops repeating after six repeats", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    renderProviders();
+    emit("session:gate_urgent", {
+      session_id: "s1",
+      choice_id: "g2",
+      agent: "hands",
+      reason: "rollback",
+      command: "gcloud run deploy --image previous",
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(3 * 60 * 60_000);
+    expect(mockSend).toHaveBeenCalledTimes(7);
+    expect(mockSend.mock.calls[6][0]).toMatchObject({
+      title: "bot-hq — URGENT approval (still waiting, 6/6)",
+    });
+  });
+
+  it("a relaunch with an urgent gate still parked notifies again", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_pending_tray") {
+        return [
+          {
+            id: 1,
+            session_id: "s1",
+            choice_id: "g3",
+            agent: "hands",
+            kind: "approval",
+            prompt: "run?",
+            options: ["Approve", "Reject"],
+            status: "pending",
+            picked_option: null,
+            command_text: "gcloud run jobs executions cancel nightly",
+            asked_at: "2026-10-13T00:00:00.000Z",
+            answered_at: null,
+            urgent_reason: "budget overrun",
+            stale: false,
+          },
+        ];
+      }
+      return [];
+    });
+    renderProviders();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({
+      body: "budget overrun — gcloud run jobs executions cancel nightly",
+    });
+  });
+
+  it("the Off toggle silences an urgent gate too", async () => {
+    const { setOsNotificationsEnabled } = await import("./lib/osNotifications");
+    setOsNotificationsEnabled(false);
+    renderProviders();
+    emit("session:gate_urgent", {
+      session_id: "s1",
+      choice_id: "g4",
+      agent: "hands",
+      reason: "r",
+      command: "c",
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
 });

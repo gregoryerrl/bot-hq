@@ -2,9 +2,46 @@ import { describe, expect, it } from "vitest";
 import {
   BURST_THRESHOLD,
   COOLDOWN_MS,
+  URGENT_RENOTIFY_MAX,
+  URGENT_RENOTIFY_MS,
+  nextUrgentDelay,
   planFlush,
+  urgentToast,
   type EscalationEvent,
 } from "./osNotifications";
+
+// Feedback #52: the urgent gate's toast and its repeat schedule.
+describe("urgent gates", () => {
+  const gate = {
+    choiceId: "694e9824-x",
+    sessionId: "s-1",
+    agent: "hands",
+    reason: "Cloud Run job is burning the shared Meta budget",
+    command: "\n  gcloud run jobs executions cancel nightly --region us-east1\nsecond line",
+  };
+
+  it("leads with the reason, then the command's first line", () => {
+    const t = urgentToast(gate, 0);
+    expect(t.title).toBe("bot-hq — URGENT approval");
+    expect(t.body).toBe(
+      "Cloud Run job is burning the shared Meta budget — gcloud run jobs executions cancel nightly --region us-east1",
+    );
+    expect(urgentToast({ ...gate, command: "" }, 0).body).toBe(gate.reason);
+  });
+
+  it("counts the repeats in the title", () => {
+    expect(urgentToast(gate, 3).title).toBe(`bot-hq — URGENT approval (still waiting, 3/${URGENT_RENOTIFY_MAX})`);
+  });
+
+  it("repeats every ten minutes, six times, then stops", () => {
+    expect(URGENT_RENOTIFY_MS).toBe(600_000);
+    expect(URGENT_RENOTIFY_MAX).toBe(6);
+    for (let sent = 0; sent < URGENT_RENOTIFY_MAX; sent++) {
+      expect(nextUrgentDelay(sent)).toBe(URGENT_RENOTIFY_MS);
+    }
+    expect(nextUrgentDelay(URGENT_RENOTIFY_MAX)).toBeNull();
+  });
+});
 
 const q = (sessionId: string, snippet = "pick one"): EscalationEvent => ({
   sessionId,

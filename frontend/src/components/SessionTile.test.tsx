@@ -19,7 +19,7 @@ const session: SessionInfo = {
   last_author: null,
 };
 
-const NONE = { questions: 0, approvals: 0, halt: null, wakesAt: null };
+const NONE = { questions: 0, approvals: 0, urgent: 0, halt: null, wakesAt: null };
 
 function renderTile(props: Partial<React.ComponentProps<typeof SessionTile>> = {}) {
   return render(
@@ -97,6 +97,23 @@ describe("SessionTile", () => {
   it("shows the question count in the indicator", () => {
     renderTile({ needs: { ...NONE, questions: 2 } });
     expect(screen.getByTestId("needs-you")).toHaveTextContent("2 questions");
+  });
+
+  // Feedback #52: an URGENT gate turns the tile red — border, bar and the
+  // needs-you line — and names itself.
+  it("turns red on an urgent gate", () => {
+    renderTile({ needs: { ...NONE, approvals: 1, urgent: 1 } });
+    const tile = screen.getByRole("link", { name: session.title });
+    expect(tile.className).toMatch(/border-error/);
+    expect(tile).toHaveAttribute("data-urgent", "true");
+    expect(screen.getByTestId("needs-you")).toHaveTextContent("URGENT approval");
+  });
+
+  it("stays the ordinary needs-you colour on a plain gate", () => {
+    renderTile({ needs: { ...NONE, approvals: 1 } });
+    const tile = screen.getByRole("link", { name: session.title });
+    expect(tile.className).not.toMatch(/border-error/);
+    expect(tile).not.toHaveAttribute("data-urgent");
   });
 
   it("shows the first line of the latest message + author tag in Quickview", () => {

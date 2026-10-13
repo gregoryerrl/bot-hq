@@ -2554,6 +2554,13 @@ export type SessionTrayView = { id: number; session_id: string; choice_id: strin
  */
 command_text: string | null; asked_at: string; answered_at: string | null; 
 /**
+ * Why the parking agent marked this gate URGENT (feedback #52): the
+ * card shows it, the session tile turns red, and the OS notification
+ * fires even while bot-hq is focused, again every ten minutes until the
+ * gate is answered (at most six times). Null for an ordinary gate.
+ */
+urgent_reason: string | null; 
+/**
  * True when this is a PENDING gated command whose requesting agent has moved
  * on (client timeout / restart) — approving runs the command blind, so the
  * UI warns + requires confirm. Computed at list time from the live in-memory

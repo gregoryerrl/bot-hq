@@ -34,7 +34,10 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
-pub use action_gate::{command_from_file, validate_run_timeout, GateRequest, GATE_HISTORY_DEFAULT};
+pub use action_gate::{
+    command_from_file, validate_run_timeout, validate_urgent_reason, GateRequest, GATE_HISTORY_DEFAULT,
+    URGENT_RENOTIFY_MAX, URGENT_RENOTIFY_MINUTES,
+};
 pub(crate) use action_gate::ParkOutcome;
 mod cl_facade;
 mod cl_push;
@@ -318,6 +321,18 @@ pub enum SignalingEvent {
     SessionAttention {
         session_id: String,
         state: Option<String>,
+    },
+    /// A gated command parked for the user is URGENT (feedback #52): the
+    /// parking agent's reason, for the notification that fires even while the
+    /// window is focused and re-fires until the gate is answered. Sent when
+    /// an urgent gate becomes PENDING — at its park, or when a queued publish
+    /// the reviewer has read is promoted.
+    GateUrgent {
+        session_id: String,
+        choice_id: String,
+        agent: String,
+        reason: String,
+        command: String,
     },
 }
 

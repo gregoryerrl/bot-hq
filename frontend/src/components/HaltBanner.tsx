@@ -20,6 +20,9 @@ export type TrayRow = {
    *  is the discriminator between "somebody is blocked on this RIGHT NOW" and
    *  "a question is waiting whenever you get to it". */
   command_text: string | null;
+  /** Why the parking agent marked a gate URGENT (feedback #52); absent or
+   *  null on an ordinary row. The card shows it in red. */
+  urgent_reason?: string | null;
 };
 
 /**

@@ -100,6 +100,23 @@ impl PendingChoiceEvent {
     pub const EVENT_NAME: &'static str = "session:pending_choice";
 }
 
+/// Emitted when a gated command parked for the user is URGENT (feedback #52):
+/// the OS notification fires at once even while the window is focused, and
+/// again every ten minutes until the gate is answered (at most six times); the
+/// session tile turns red. The durable row carries the same `urgent_reason`.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct GateUrgentEvent {
+    pub session_id: String,
+    pub choice_id: String,
+    pub agent: String,
+    pub reason: String,
+    pub command: String,
+}
+
+impl GateUrgentEvent {
+    pub const EVENT_NAME: &'static str = "session:gate_urgent";
+}
+
 /// Emitted when a session document is written/updated (`session_doc_write`),
 /// so the doc pane refreshes without a manual tab-switch.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]

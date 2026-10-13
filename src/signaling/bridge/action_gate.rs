@@ -50,6 +50,33 @@ pub struct GateRequest {
     pub approve_after: Option<String>,
     /// A bound for the run, `1..=RUN_TIMEOUT_MAX_SECS`, validated by the caller.
     pub run_timeout_secs: Option<u64>,
+    /// Why this gate is URGENT (feedback #52), validated by the caller
+    /// ([`validate_urgent_reason`]). `Some` parks the command whatever the
+    /// keyword list says, like `require_approval`, and the user is notified at
+    /// once — even while bot-hq is focused — and again every ten minutes until
+    /// they answer; the session's tile turns red.
+    pub urgent_reason: Option<String>,
+}
+
+/// The most characters an urgent gate's reason may have — it is a
+/// notification's body, not a report.
+pub const URGENT_REASON_MAX_CHARS: usize = 200;
+
+/// An urgent gate's reason as the card and the notification show it: trimmed,
+/// one line, non-empty, at most [`URGENT_REASON_MAX_CHARS`] characters.
+pub fn validate_urgent_reason(reason: &str) -> Result<String> {
+    let one_line: String = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        anyhow::bail!("urgent_reason must say why the user must see this gate now");
+    }
+    let chars = one_line.chars().count();
+    if chars > URGENT_REASON_MAX_CHARS {
+        anyhow::bail!(
+            "urgent_reason is {chars} characters; at most {URGENT_REASON_MAX_CHARS} — it is the \
+             notification's body, not the report"
+        );
+    }
+    Ok(one_line)
 }
 
 /// Lower-case hex SHA-256 of `text`.
@@ -202,12 +229,15 @@ impl SignalingBridge {
         // listed production or staging reads parks for the user's approval —
         // read by the reviewer first — whatever the keyword list says.
         let listed = self.data_read_in(&session_id, &command).await.is_some();
-        if req.require_approval || listed {
+        // An URGENT gate parks whatever the list says (feedback #52): a command
+        // that must reach the user NOW is one they must see before it runs.
+        if req.require_approval || listed || req.urgent_reason.is_some() {
             let outcome = self
                 .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
                 .await?;
             let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
-            return Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound));
+            let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref()).await;
+            return Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound) + &urgency);
         }
         // Two-tier resolve (session snapshot → global fallback) — previously
         // this read only the global list, so a gear-tab session override was
@@ -229,7 +259,8 @@ impl SignalingBridge {
                     .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
                     .await?;
                 let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
-                Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound))
+                let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref()).await;
+                Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound) + &urgency)
             }
         }
     }
@@ -267,6 +298,84 @@ impl SignalingBridge {
             }
         }
         Bound::Requested(secs)
+    }
+
+    /// Mark the gate the park produced URGENT (0097, feedback #52) and say what
+    /// follows. A fresh park that is PENDING fires `GateUrgent` now and posts a
+    /// channel row (the audit: whoever marked it, and why, is on record); a
+    /// fresh QUEUED publish keeps the mark on its row and `promote_queued_row`
+    /// fires the event when the reviewer's read parks it. An identical re-issue
+    /// returns the EXISTING gate, whose urgency stands as it was.
+    async fn record_urgency(
+        &self,
+        session_id: &str,
+        agent: &str,
+        command: &str,
+        outcome: &ParkOutcome,
+        reason: Option<&str>,
+    ) -> String {
+        let Some(reason) = reason else { return String::new() };
+        let (gate_id, existing, queued) = match outcome {
+            ParkOutcome::Parked { gate_id, existing, .. } => (gate_id, *existing, false),
+            ParkOutcome::Queued { gate_id, existing } => (gate_id, *existing, true),
+        };
+        if existing {
+            return "\nThe existing gate stands as it was parked; this call's urgency does not change it."
+                .to_string();
+        }
+        let Some(storage) = self.storage.lock().await.clone() else { return String::new() };
+        match storage.set_tray_urgent_reason(gate_id, reason).await {
+            Ok(true) => {}
+            Ok(false) => return "\n⚠ The gate was answered before it could be marked urgent.".to_string(),
+            Err(e) => {
+                tracing::warn!(gate_id = %gate_id, error = %e, "the gate's urgency was not recorded");
+                return "\n⚠ The urgency could not be recorded; the gate is parked as an ordinary one.".to_string();
+            }
+        }
+        if !queued {
+            self.fire_gate_urgent(&storage, session_id, agent, gate_id, reason, command).await;
+            return format!(
+                "\nURGENT ({reason}): the user is notified now, even with bot-hq focused, and again every \
+                 {} minutes until they answer (at most {} times); the session tile is red and the card \
+                 shows the reason.",
+                URGENT_RENOTIFY_MINUTES, URGENT_RENOTIFY_MAX
+            )
+        }
+        format!(
+            "\nURGENT ({reason}): once the reviewer's read parks it for the user, they are notified at \
+             once and again every {} minutes until they answer (at most {} times).",
+            URGENT_RENOTIFY_MINUTES, URGENT_RENOTIFY_MAX
+        )
+    }
+
+    /// The urgent gate is PENDING for the user: the event the notification
+    /// rides, and the channel row that is its audit.
+    pub(super) async fn fire_gate_urgent(
+        &self,
+        storage: &crate::storage::Storage,
+        session_id: &str,
+        agent: &str,
+        gate_id: &str,
+        reason: &str,
+        command: &str,
+    ) {
+        let _ = self.event_tx.send(SignalingEvent::GateUrgent {
+            session_id: session_id.to_string(),
+            choice_id: gate_id.to_string(),
+            agent: agent.to_string(),
+            reason: reason.to_string(),
+            command: command.to_string(),
+        });
+        let id8: String = gate_id.chars().take(8).collect();
+        let _ = crate::core::post_system_notice(
+            storage,
+            Some(self),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            format!("🚨 Gate {id8} is URGENT ({agent}): {reason} — the user is being notified until they answer."),
+            None,
+        )
+        .await;
     }
 
     /// The project's listed data read `command` runs, if any (group K) — read
@@ -657,7 +766,8 @@ impl SignalingBridge {
             let redacted = crate::policy::secret_scan::redact_string(command.to_string());
             let shown = super::util::command_excerpt(&redacted).into_owned();
             let shown = if shown.contains('\n') { format!("\n    {}", shown.replace('\n', "\n    ")) } else { format!(" `{shown}`") };
-            lines.push(format!("- {id8} · {} · {} · {state}{shown}", row.asked_at, row.agent));
+            let urgent = if row.urgent_reason.is_some() { " · URGENT" } else { "" };
+            lines.push(format!("- {id8} · {} · {}{urgent} · {state}{shown}", row.asked_at, row.agent));
             if lines.len() >= limit {
                 break;
             }
@@ -777,10 +887,14 @@ impl SignalingBridge {
         // the right text was parked. The hash is of the WHOLE text; the echo
         // below is an excerpt when the command is long (EYES 63ec61dd).
         let footer = format!(
-            "\n(command sha256 {}{})",
+            "\n(command sha256 {}{}{})",
             sha256_hex(full_command),
             match row.run_timeout_secs {
                 Some(secs) => format!("; run bounded at {secs} s"),
+                None => String::new(),
+            },
+            match row.urgent_reason.as_deref() {
+                Some(reason) => format!("; URGENT: {reason}"),
                 None => String::new(),
             }
         );
@@ -1948,7 +2062,7 @@ impl SignalingBridge {
         } else {
             ApprovalContext {
                 kind: ViolationKind::ToolBlocklist,
-                action: command,
+                action: command.clone(),
                 detail: Some("tool-gate".to_string()),
                 command: None,
             }
@@ -1970,6 +2084,11 @@ impl SignalingBridge {
             None,
         )
         .await;
+        // An urgent publish (feedback #52) was marked while queued; the user's
+        // notification starts now that it is theirs to answer.
+        if let Some(reason) = row.urgent_reason.as_deref() {
+            self.fire_gate_urgent(storage, session_id, &row.agent, &row.choice_id, reason, &command).await;
+        }
         true
     }
 
@@ -2142,6 +2261,12 @@ pub(super) fn park_outcome_text(outcome: &ParkOutcome, command: &str) -> String 
 /// The shortest prefix `gate_status` resolves — the eight characters a gate id
 /// is quoted with in chat, the same floor `flag_finding`'s `gate_id` has.
 const GATE_ID_PREFIX_MIN: usize = 8;
+
+/// An urgent gate's re-notification cadence and cap (feedback #52, the user's
+/// desktop tier): the frontend's `useOsNotifications` applies them; the tool
+/// text states them.
+pub const URGENT_RENOTIFY_MINUTES: u64 = 10;
+pub const URGENT_RENOTIFY_MAX: u64 = 6;
 
 /// The most rows `gate_history` returns (feedback #88); its default is 20.
 pub const GATE_HISTORY_MAX: usize = 100;
@@ -2411,6 +2536,7 @@ mod tests {
                     require_approval: false,
                     approve_after: None,
                     run_timeout_secs: Some(300),
+                    urgent_reason: None,
                 },
             )
             .await
@@ -3975,6 +4101,83 @@ mod tests {
         // An RPC from the reviewer inside the window is stronger evidence: queued again.
         bridge.note_agent_rpc("s1", "eyes");
         assert!(matches!(bridge.queue_close_card("s1", "hands", "fifth try", "").await.unwrap(), CloseQueue::Queued(_)));
+    }
+
+    /// Feedback #52 (the user's desktop tier): `urgent_reason` parks the
+    /// command whatever the keyword list says, marks the row, fires
+    /// `GateUrgent` for the notification that ignores focus and repeats, posts
+    /// the audit row, and says so in the reply; an identical re-issue returns
+    /// the existing gate as it was. A queued outward publish keeps the mark and
+    /// fires the event only when the reviewer's read parks it for the user.
+    #[tokio::test]
+    async fn an_urgent_gate_parks_unconditionally_and_fires_its_notification() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, path, _body) = outward_fixture(&data, &repo).await;
+        let mut events = bridge.subscribe();
+        let reason = validate_urgent_reason("  the nightly job is\n burning the shared budget ").unwrap();
+        assert_eq!(reason, "the nightly job is burning the shared budget");
+        assert!(validate_urgent_reason(" \n ").is_err());
+        assert!(validate_urgent_reason(&"x".repeat(URGENT_REASON_MAX_CHARS + 1)).is_err());
+        // No keyword matches `printf`, so without the mark this would RUN.
+        let req = |reason: Option<&str>| GateRequest {
+            command: "printf 'rows: 42\\n'".into(),
+            urgent_reason: reason.map(str::to_string),
+            ..GateRequest::default()
+        };
+        let reply = bridge.action_gate_request("s1".into(), "hands".into(), req(Some(&reason))).await.unwrap();
+        assert!(reply.starts_with("action_gate: parked for the user"), "{reply}");
+        assert!(reply.contains("URGENT (the nightly job is burning the shared budget): the user is notified now"), "{reply}");
+        assert!(reply.contains("every 10 minutes until they answer (at most 6 times)"), "{reply}");
+        let gate = storage.pending_gate_ids("s1").await.unwrap().pop().expect("parked, not run");
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert_eq!(row.urgent_reason.as_deref(), Some("the nightly job is burning the shared budget"));
+        // The event the notification rides, with the reason and the command.
+        let mut fired = None;
+        while let Ok(ev) = events.try_recv() {
+            if let SignalingEvent::GateUrgent { choice_id, reason, command, agent, session_id } = ev {
+                fired = Some((choice_id, reason, command, agent, session_id));
+            }
+        }
+        assert_eq!(
+            fired,
+            Some((gate.clone(), reason.clone(), "printf 'rows: 42\\n'".to_string(), "hands".to_string(), "s1".to_string()))
+        );
+        // The audit row, and the status/ledger wording.
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains(&format!("🚨 Gate {} is URGENT (hands): the nightly job", &gate[..8]))), "{:?}", rows.last().map(|m| &m.content));
+        assert!(bridge.gate_status(&gate).await.unwrap().contains("; URGENT: the nightly job is burning the shared budget)"));
+        assert!(bridge.gate_history("s1", 20, None).await.unwrap().contains(" · hands · URGENT · pending"));
+        // An identical re-issue: the existing gate, its urgency as it was.
+        let again = bridge.action_gate_request("s1".into(), "hands".into(), req(Some("different reason"))).await.unwrap();
+        assert!(again.contains("The existing gate stands as it was parked; this call's urgency does not change it."), "{again}");
+        assert_eq!(storage.get_tray_entry(&gate).await.unwrap().unwrap().urgent_reason.as_deref(), Some("the nightly job is burning the shared budget"));
+        // Without the mark the same command simply runs (no keyword gates it).
+        bridge.resolve_choice(&gate, "Reject".into()).await.unwrap();
+        let ran = bridge.action_gate_request("s1".into(), "hands".into(), req(None)).await.unwrap();
+        assert!(ran.contains("rows: 42") && ran.contains("[action_gate → exit 0"), "{ran}");
+        // A queued outward publish: marked while queued, the event fires at promotion.
+        while events.try_recv().is_ok() {}
+        let outward = GateRequest {
+            command: format!("gh issue comment 5 --body-file {path}"),
+            urgent_reason: Some("incident update".into()),
+            ..GateRequest::default()
+        };
+        let reply = bridge.action_gate_request("s1".into(), "hands".into(), outward).await.unwrap();
+        assert!(reply.starts_with("action_gate: QUEUED") && reply.contains("URGENT (incident update): once the reviewer's read parks it"), "{reply}");
+        let queued = storage.queued_gates_for_session("s1").await.unwrap().pop().unwrap();
+        assert_eq!(queued.urgent_reason.as_deref(), Some("incident update"));
+        assert!(!events.try_recv().is_ok_and(|e| matches!(e, SignalingEvent::GateUrgent { .. })), "nothing fires while queued");
+        storage.commit_delivery(eyes, &[(queued.body_row_id.unwrap(), None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&queued.choice_id).await.unwrap().unwrap().status, "pending");
+        let mut promoted = false;
+        while let Ok(ev) = events.try_recv() {
+            if let SignalingEvent::GateUrgent { choice_id, reason, .. } = ev {
+                promoted = choice_id == queued.choice_id && reason == "incident update";
+            }
+        }
+        assert!(promoted, "the notification fires when the publish becomes the user's to answer");
     }
 
     /// Feedback #76 (+ #61): the reviewer's dealt turn opens with a digest of

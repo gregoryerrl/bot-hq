@@ -10,7 +10,7 @@ use super::*;
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
      body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
-     run_timeout_secs, pinned_scripts";
+     run_timeout_secs, pinned_scripts, urgent_reason";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -413,6 +413,22 @@ impl Storage {
             .await
             .with_context(|| format!("recording gate {choice_id}'s run bound"))?;
         Ok(())
+    }
+
+    /// Record why a gate is URGENT (0097, feedback #52) — on a row still
+    /// waiting (pending or queued); an answered row keeps its history as it
+    /// was. Returns whether a row was marked.
+    pub async fn set_tray_urgent_reason(&self, choice_id: &str, reason: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET urgent_reason = ? \
+             WHERE choice_id = ? AND status IN ('pending', 'queued')",
+        )
+        .bind(reason)
+        .bind(choice_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("marking gate {choice_id} urgent"))?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// Record the SHA-256 of an edit's LIVE body as its reviewer's diff saw

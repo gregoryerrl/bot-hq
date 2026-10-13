@@ -249,6 +249,18 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **An urgent gate finds you instead of waiting to be noticed.** On 2026-10-01
+  an agent parked the cancel and the rollback for a job overrunning a shared
+  API budget at 06:23Z; you approved them at 08:18Z, because nothing told you
+  they were waiting. An agent can now mark a gate urgent with a one-line
+  reason (`action_gate(urgent_reason)`). The command parks whatever the Tool
+  Gate list says, the OS notification fires at once even while bot-hq is the
+  focused window, and it repeats every ten minutes until you answer — at most
+  six times. The session's tile turns red and names the urgent approval, the
+  card leads with the reason, and a `🚨` row in the chat records who marked it
+  and why. A relaunch with an urgent gate still parked notifies again. No
+  phone push — this is the desktop tier you picked — and the Settings
+  notifications toggle still silences everything.
 - **The reviewer's turn opens with what its peer's prose could not show it.**
   A reviewer receives only what the other participants write in the channel;
   their tool calls never reach it, so a Context Library write or a session-doc

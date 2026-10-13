@@ -33,6 +33,22 @@ describe("ApprovalGate", () => {
     expect(screen.getByText("gh pr create --base main")).toBeInTheDocument();
   });
 
+  // Feedback #52: an URGENT gate says so in red, reason first; an ordinary
+  // gate shows nothing of the kind.
+  it("shows an urgent gate's reason in red, and nothing on an ordinary one", () => {
+    const { rerender } = render(
+      <ApprovalGate rows={[approval({ urgent_reason: "the nightly job is burning the shared budget" })]} onResolve={resolved()} />,
+    );
+    expect(screen.getByText("🚨 URGENT APPROVAL")).toBeInTheDocument();
+    expect(screen.getByTestId("gate-urgent-reason")).toHaveTextContent(
+      "the nightly job is burning the shared budget",
+    );
+    expect(screen.getByRole("group", { name: "Approval required" }).className).toMatch(/border-error/);
+    rerender(<ApprovalGate rows={[approval()]} onResolve={resolved()} />);
+    expect(screen.getByText("⛔ APPROVAL")).toBeInTheDocument();
+    expect(screen.queryByTestId("gate-urgent-reason")).not.toBeInTheDocument();
+  });
+
   // Feedback #87 c: the executor's close card said the recap's detail was
   // "yours to act on while the card is up", and the user approved before it
   // had finished. The card now says when its declarer is still mid-turn — a

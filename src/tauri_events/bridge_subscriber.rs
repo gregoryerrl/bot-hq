@@ -21,7 +21,7 @@ use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
     AgentContextEvent, AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent,
-    FindingsChangedEvent, PendingChoiceEvent, PhaseChangedEvent,
+    FindingsChangedEvent, GateUrgentEvent, PendingChoiceEvent, PhaseChangedEvent,
     SessionActivityEvent, SessionAttentionEvent, SessionClosedEvent, SESSION_HALT_CLEARED,
     SESSION_RESYNC, SESSION_STAGE_DELIVERED,
 };
@@ -216,6 +216,13 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
             let payload = SessionAttentionEvent { session_id, state };
             emit_event(
                 SessionAttentionEvent::EVENT_NAME,
+                serde_json::to_value(&payload).unwrap_or(Value::Null),
+            );
+        }
+        SignalingEvent::GateUrgent { session_id, choice_id, agent, reason, command } => {
+            let payload = GateUrgentEvent { session_id, choice_id, agent, reason, command };
+            emit_event(
+                GateUrgentEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }

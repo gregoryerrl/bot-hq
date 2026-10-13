@@ -17,9 +17,22 @@ describe("needsYouBySession", () => {
 
   it("counts questions and approval gates apart, per session", () => {
     const n = needsYouBySession([question("a"), question("a"), gate("a"), gate("b")], [], NOW);
-    expect(n.a).toEqual({ questions: 2, approvals: 1, halt: null, wakesAt: null });
+    expect(n.a).toEqual({ questions: 2, approvals: 1, urgent: 0, halt: null, wakesAt: null });
     expect(n.b.approvals).toBe(1);
     expect(needsYouParts(n.a)).toEqual(["approval waiting", "2 questions"]);
+  });
+
+  // Feedback #52: an URGENT gate is named first and apart from the ordinary
+  // ones — the tile turns red on it.
+  it("counts an urgent gate apart and names it first", () => {
+    const urgent = { ...gate("a"), urgent_reason: "prod budget overrun" };
+    const n = needsYouBySession([urgent, gate("a"), question("a")], [], NOW);
+    expect(n.a).toEqual({ questions: 1, approvals: 2, urgent: 1, halt: null, wakesAt: null });
+    expect(needsYouParts(n.a)).toEqual(["URGENT approval", "approval waiting", "1 question"]);
+    const two = needsYouBySession([urgent, urgent], [], NOW);
+    expect(needsYouParts(two.a)).toEqual(["2 URGENT approvals"]);
+    const plain = needsYouBySession([{ ...gate("a"), urgent_reason: null }], [], NOW);
+    expect(plain.a.urgent).toBe(0);
   });
 
   it("names a halt as the user's move, with its reason", () => {

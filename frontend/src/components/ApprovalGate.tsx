@@ -130,15 +130,20 @@ export function ApprovalGate({
     }
   };
 
+  const urgent = row.urgent_reason ?? null;
+
   return (
     <div
       role="group"
       aria-label="Approval required"
-      className="border-t border-primary/40 bg-surface-container-low p-3"
+      className={cn(
+        "border-t bg-surface-container-low p-3",
+        urgent ? "border-error/70" : "border-primary/40",
+      )}
     >
       <div className="flex items-baseline gap-2">
-        <span className="font-label-caps text-label-caps text-primary">
-          ⛔ APPROVAL
+        <span className={cn("font-label-caps text-label-caps", urgent ? "text-error" : "text-primary")}>
+          {urgent ? "🚨 URGENT APPROVAL" : "⛔ APPROVAL"}
         </span>
         <span className={cn("text-sm font-semibold", authorColorClass(who, hues))}>
           {who}
@@ -161,6 +166,16 @@ export function ApprovalGate({
         )}
       </div>
 
+      {/* Feedback #52: the parking agent's reason — why this one must not
+          wait. The same line rides the OS notification. */}
+      {urgent && (
+        <p
+          data-testid="gate-urgent-reason"
+          className="mt-1.5 rounded border border-error/50 bg-error-container/30 px-2 py-1 text-sm font-medium text-on-surface"
+        >
+          🚨 {urgent}
+        </p>
+      )}
       <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-on-surface">
         {gatePrompt(row)}
       </p>

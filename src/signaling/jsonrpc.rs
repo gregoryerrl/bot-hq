@@ -1059,7 +1059,7 @@ async fn call_tool(
             Ok(ToolCallResult::text(msg))
         }
         "action_gate" => {
-            use crate::signaling::bridge::{command_from_file, validate_run_timeout, GateRequest};
+            use crate::signaling::bridge::{command_from_file, validate_run_timeout, validate_urgent_reason, GateRequest};
             let invalid_params = |m: &str| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, m.to_string());
             // Feedback #82: `command_path` hands over a long body as a file.
             // Its text REPLACES `command` here, before any classification, so
@@ -1096,11 +1096,21 @@ async fn call_tool(
                         .and_then(|s| validate_run_timeout(s).map_err(|e| invalid_params(&e.to_string())))?,
                 ),
             };
+            // Feedback #52: an URGENT gate — the user is notified now, focused
+            // or not, and again until they answer; the reason rides the card.
+            let urgent_reason = match args.get("urgent_reason") {
+                None | Some(Value::Null) => None,
+                Some(v) => Some(
+                    v.as_str()
+                        .ok_or_else(|| invalid_params("urgent_reason must be a string"))
+                        .and_then(|r| validate_urgent_reason(r).map_err(|e| invalid_params(&e.to_string())))?,
+                ),
+            };
             let output = bridge
                 .action_gate_request(
                     caller.session_id.clone(),
                     caller.agent.clone(),
-                    GateRequest { command, source, require_approval, approve_after, run_timeout_secs },
+                    GateRequest { command, source, require_approval, approve_after, run_timeout_secs, urgent_reason },
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;

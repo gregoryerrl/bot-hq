@@ -346,6 +346,12 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub pinned_scripts: Option<String>,
+    /// Why the parking agent marked this gate URGENT (0097, feedback #52):
+    /// the user is notified at once and again every ten minutes until they
+    /// answer, and the session's tile turns red. NULL for an ordinary gate.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub urgent_reason: Option<String>,
 }
 
 impl SessionTrayEntry {

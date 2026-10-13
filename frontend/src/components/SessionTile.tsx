@@ -48,6 +48,9 @@ function SessionTileImpl({
   const navigate = useNavigate();
   const closed = session.closed_at !== null;
   const needsInput = needsYou(needs);
+  // Feedback #52: an URGENT gate is the one state that paints the whole tile
+  // red — the user has to find it from across the dashboard.
+  const urgent = (needs?.urgent ?? 0) > 0;
   const tint = phaseTintClasses(phase, closed);
   // B2: session-level health dot (problem-only on the tile). Worst of the
   // session's agents.
@@ -77,23 +80,28 @@ function SessionTileImpl({
       aria-label={session.title}
       onClick={open}
       onKeyDown={onTileKey}
+      data-urgent={urgent ? "true" : undefined}
       className={cn(
         "group relative flex cursor-pointer flex-col overflow-hidden rounded-lg border bg-surface",
         "transition-colors duration-150",
-        needsInput
-          ? "border-primary/60 hover:border-primary"
-          : cn("border-outline-variant", tint?.hoverRing),
+        urgent
+          ? "border-error hover:border-error"
+          : needsInput
+            ? "border-primary/60 hover:border-primary"
+            : cn("border-outline-variant", tint?.hoverRing),
       )}
     >
       {/* Slot 1: top accent bar */}
       <div
         className={cn(
           "absolute left-0 right-0 top-0 h-1 transition-opacity",
-          needsInput
-            ? "bg-primary opacity-100"
-            : tint
-              ? cn(tint.bar, "opacity-0 group-hover:opacity-100")
-              : "opacity-0",
+          urgent
+            ? "bg-error opacity-100"
+            : needsInput
+              ? "bg-primary opacity-100"
+              : tint
+                ? cn(tint.bar, "opacity-0 group-hover:opacity-100")
+                : "opacity-0",
         )}
         aria-hidden
       />

@@ -1261,6 +1261,26 @@ runs in four places:
 - `action_gate`, before it parks or runs, under `gate_shell`;
 - `terminal_exec`, under the terminal's `$SHELL`.
 
+**An URGENT gate reaches the user instead of waiting to be noticed** (feedback
+#52; the user's pick was the desktop tier — no phone push). `action_gate`'s
+`urgent_reason` (one line, at most 200 characters; `validate_urgent_reason`)
+parks the command whatever the keyword list says, exactly like
+`require_approval`, and `record_urgency` writes it to the row
+(`session_tray.urgent_reason`, 0097) once the park has produced a fresh gate
+(an identical re-issue returns the existing gate, whose urgency stands). A gate
+that is PENDING fires `SignalingEvent::GateUrgent` → `session:gate_urgent`
+(session, gate, agent, reason, command) and posts the `🚨 Gate … is URGENT`
+channel row — the audit of who marked it and why; a QUEUED outward publish keeps
+the mark and `promote_queued_row` fires the event when the reviewer's read makes
+it the user's to answer. The frontend (`useOsNotifications`) sends that one
+toast at once, focused or not, outside the burst queue and its cooldown, and
+repeats it every `URGENT_RENOTIFY_MS` (10 min) until `session:choice_resolved`
+names the gate — at most `URGENT_RENOTIFY_MAX` (6) repeats; at mount it reads
+the pending tray once, so a relaunch with an urgent gate still parked notifies
+again. The Settings Off toggle still silences it. The session tile turns red
+(`NeedsYou.urgent`, "URGENT approval"), the card leads with `🚨 URGENT APPROVAL`
+and the reason, and `gate_status` / `gate_history` carry the mark.
+
 ---
 
 ## Session policy

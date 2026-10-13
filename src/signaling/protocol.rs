@@ -435,6 +435,10 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "approve_after": {
                         "type": "string",
                         "description": "Optional: what must happen first; the card shows \"Approve only after: …\"."
+                    },
+                    "urgent_reason": {
+                        "type": "string",
+                        "description": "Only for a live incident: why the user must see this gate NOW (one line, ≤200 chars). Parks the command like require_approval; the user is notified at once even with bot-hq focused and again every 10 min until they answer (6 at most), and the session tile turns red. The mark and your reason are on the record."
                     }
                 },
                 "required": []
