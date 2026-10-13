@@ -1758,6 +1758,33 @@ impl SignalingBridge {
                     .join("\n")
             ));
         }
+        // Scheduled runs (feedback #66a; EYES 2f046a6f): a close CANCELS them —
+        // nobody would be left to read their output — so the card says which
+        // approved commands stop with it, before the user approves.
+        let scheduled = self.scheduled_gates_for_session(session_id).await;
+        if !scheduled.is_empty() {
+            let list = scheduled
+                .iter()
+                .map(|r| {
+                    format!(
+                        "- {} · due {} UTC · `{}`",
+                        &r.choice_id[..r.choice_id.len().min(8)],
+                        r.run_not_before.as_deref().map(action_gate::window_time).unwrap_or_default(),
+                        crate::policy::secret_scan::redact(r.command_text.as_deref().unwrap_or(""))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            card.push(format!(
+                "{} scheduled run(s) — approved commands waiting for their window — will be CANCELLED by \
+                 this close and will not run.",
+                scheduled.len()
+            ));
+            detail.push(format!(
+                "Scheduled run(s) the close cancels — reject the close to let them run, or re-issue them \
+                 in a later session:\n{list}"
+            ));
+        }
         let (cl_written, _) = self.close_gate_flags(session_id).await;
         card.push(if cl_written {
             "CL learnings delta: written this session.".to_string()

@@ -10,7 +10,7 @@ use super::*;
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
      body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
-     run_timeout_secs, pinned_scripts, urgent_reason, run_not_before, run_not_after";
+     run_timeout_secs, pinned_scripts, urgent_reason, run_not_before, run_not_after, run_started_at";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -430,16 +430,49 @@ impl Storage {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Claim the run of an approved gate (0100, EYES 2577e626): the ONE
+    /// atomic stamp both run paths take before executing. `true` = this caller
+    /// owns the run; `false` = it was already claimed (a run is in progress or
+    /// done), or the row has a result or a refusal — run nothing.
+    pub async fn claim_gate_run(&self, choice_id: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET run_started_at = ? \
+             WHERE choice_id = ? AND run_started_at IS NULL \
+               AND result_row_id IS NULL AND run_refusal IS NULL",
+        )
+        .bind(now_utc())
+        .bind(choice_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("claiming the run of gate {choice_id}"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// The runs a previous bot-hq process was cut off in (0100): claimed, with
+    /// no result and no refusal. Reported at boot, never re-run.
+    pub async fn interrupted_gate_runs(&self) -> Result<Vec<SessionTrayEntry>> {
+        let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
+             WHERE run_started_at IS NOT NULL AND result_row_id IS NULL AND run_refusal IS NULL \
+             ORDER BY id ASC"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the interrupted gate runs")?;
+        Ok(rows)
+    }
+
     /// The approved, windowed gates whose run is DUE at `now` and has not
-    /// happened: approved before their window opened (no result row, no
-    /// refusal), with `run_not_before` at or before `now`. The scheduler runs
-    /// them; a cancelled one carries a `run_refusal` and is not here.
+    /// started: approved before their window opened (no result row, no
+    /// refusal, no claim), with `run_not_before` at or before `now`. The
+    /// scheduler runs them; a cancelled one carries a `run_refusal`, a running
+    /// or finished one a `run_started_at`, and neither is here.
     pub async fn due_scheduled_gates(&self, now: &str) -> Result<Vec<SessionTrayEntry>> {
         let rows = sqlx::query_as::<_, SessionTrayEntry>(&format!(
             "SELECT {TRAY_COLUMNS} FROM session_tray \
              WHERE status = 'answered' AND picked_option = 'Approve' AND command_text IS NOT NULL \
                AND run_not_before IS NOT NULL AND run_not_before <= ? \
-               AND result_row_id IS NULL AND run_refusal IS NULL \
+               AND result_row_id IS NULL AND run_refusal IS NULL AND run_started_at IS NULL \
              ORDER BY run_not_before ASC, id ASC"
         ))
         .bind(now)

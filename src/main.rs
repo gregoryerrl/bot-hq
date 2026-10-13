@@ -208,6 +208,12 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
             }
             let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
             bridge.set_storage(storage.clone()).await;
+            // A run the previous process was cut off in is reported, never
+            // re-run (0100) — before the scheduler can look at the table.
+            let interrupted = bridge.report_interrupted_gate_runs().await;
+            if interrupted > 0 {
+                tracing::warn!(interrupted, "approved gate runs the previous process was cut off in; reported, not re-run");
+            }
             // Windowed gates approved before their window opened run from here
             // (feedback #66a); a relaunch re-reads the due rows, so nothing is
             // re-armed by hand.

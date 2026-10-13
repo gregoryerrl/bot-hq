@@ -85,6 +85,7 @@ pub fn is_scheduled(row: &crate::storage::SessionTrayEntry) -> bool {
         && row.run_not_before.is_some()
         && row.result_row_id.is_none()
         && row.run_refusal.is_none()
+        && row.run_started_at.is_none()
 }
 
 /// The longest one wait of a temporary halt's timer runs before it re-reads
@@ -1576,6 +1577,34 @@ impl SignalingBridge {
                 .map(std::time::Duration::from_secs)
                 .unwrap_or(crate::policy::tool_gate::DEFAULT_TIMEOUT)
         };
+        // **The one claim before any run** (0100, EYES 2577e626): the stamp
+        // both paths take atomically, so an approval inside the window and the
+        // scheduler's tick can never both run the command, and a run the app
+        // was cut off in is found at boot. A claim that fails means a run is
+        // in progress or done — nothing runs twice, and this is not a refusal
+        // of the gate, so no refusal is recorded.
+        if let Some(storage) = self.storage.lock().await.clone() {
+            match storage.claim_gate_run(choice_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let started = row
+                        .as_ref()
+                        .and_then(|r| r.run_started_at.as_deref())
+                        .map(super::action_gate::window_time)
+                        .unwrap_or_else(|| "earlier".to_string());
+                    body.push_str(&format!(
+                        "NOT RUN AGAIN: this command's run already started at {started} UTC (it is \
+                         running or finished); gate_status has its outcome."
+                    ));
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(?e, choice_id, "the gate run could not be claimed; not running");
+                    body.push_str("NOT RUN: bot-hq could not record that the run started, so it did not start it.");
+                    return None;
+                }
+            }
+        }
         // F9: while this runs the session is WAITING, not idle — the watchdog
         // reads the mark; the guard clears it whichever way we leave.
         let running = self.note_gate_running(session_id, choice_id, limit);
@@ -1853,6 +1882,57 @@ impl SignalingBridge {
         ran
     }
 
+    /// At boot (0100): the runs the previous process was cut off in — claimed,
+    /// no result, no refusal — are REPORTED, never re-run: whether the command
+    /// did its work is unknown, and running it again is the one thing that
+    /// must not happen. Each gets a refusal (`gate_status` says it), and its
+    /// session, if still open, a `⛔` row. Returns how many were found.
+    pub async fn report_interrupted_gate_runs(&self) -> usize {
+        let Some(storage) = self.storage.lock().await.clone() else { return 0 };
+        let rows = match storage.interrupted_gate_runs().await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "the interrupted gate runs could not be read");
+                return 0;
+            }
+        };
+        for row in &rows {
+            let started = row.run_started_at.as_deref().map(super::action_gate::window_time).unwrap_or_default();
+            let short = format!(
+                "its run started at {started} UTC and bot-hq stopped before it finished; whether the command \
+                 did its work is unknown and it was NOT run again"
+            );
+            if let Err(e) = storage.set_tray_run_refusal(&row.choice_id, &short).await {
+                tracing::warn!(?e, choice_id = %row.choice_id, "could not record the interrupted run");
+                continue;
+            }
+            let open = storage
+                .get_session(&row.session_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.closed_at.is_none());
+            if open {
+                let id8: String = row.choice_id.chars().take(8).collect();
+                let _ = crate::core::post_system_notice(
+                    &storage,
+                    Some(self),
+                    &row.session_id,
+                    MessageKind::SystemNotice,
+                    format!(
+                        "⛔ Gate {id8}'s approved command started at {started} UTC and bot-hq stopped before it \
+                         finished. It was NOT run again — check the target yourself before re-issuing: `{}`",
+                        crate::policy::secret_scan::redact(row.command_text.as_deref().unwrap_or(""))
+                    ),
+                    None,
+                )
+                .await;
+            }
+            tracing::warn!(choice_id = %row.choice_id, session = %row.session_id, "an approved gate's run was interrupted by a previous process; reported, not re-run");
+        }
+        rows.len()
+    }
+
     /// The scheduler loop (feedback #66a): every [`SCHEDULED_GATE_TICK`] run
     /// what is due. Holds a `Weak`, so it ends with the bridge. Started once by
     /// `main.rs` after storage is wired; a restart needs no re-arm — the due
@@ -1866,6 +1946,55 @@ impl SignalingBridge {
                 bridge.run_due_scheduled_gates().await;
             }
         });
+    }
+
+    /// The session's scheduled gates (feedback #66a): approved, windowed,
+    /// waiting for their window — `is_scheduled` over the answered gates.
+    pub async fn scheduled_gates_for_session(&self, session_id: &str) -> Vec<crate::storage::SessionTrayEntry> {
+        let Some(storage) = self.storage.lock().await.clone() else { return Vec::new() };
+        storage
+            .answered_gates_for_session(session_id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(is_scheduled)
+            .collect()
+    }
+
+    /// A close cancels the session's scheduled gates (EYES 2f046a6f): an
+    /// approved command waiting for its window would otherwise run unattended
+    /// after the session — with no participant left to read its output. Each
+    /// gets a refusal and a `⛔` row; the close recap names them first, so the
+    /// user approves the close knowing what it stops. Returns how many.
+    pub async fn cancel_scheduled_at_close(&self, session_id: &str) -> usize {
+        let scheduled = self.scheduled_gates_for_session(session_id).await;
+        let Some(storage) = self.storage.lock().await.clone() else { return 0 };
+        let mut cancelled = 0usize;
+        for row in &scheduled {
+            let due = row.run_not_before.as_deref().map(super::action_gate::window_time).unwrap_or_default();
+            if let Err(e) = storage
+                .set_tray_run_refusal(&row.choice_id, &format!("the session closed before the scheduled run (it was due at {due} UTC)"))
+                .await
+            {
+                tracing::warn!(?e, choice_id = %row.choice_id, "could not cancel a scheduled gate at close");
+                continue;
+            }
+            let id8: String = row.choice_id.chars().take(8).collect();
+            let _ = crate::core::post_system_notice(
+                &storage,
+                Some(self),
+                session_id,
+                MessageKind::SystemNotice,
+                format!(
+                    "⛔ Scheduled gate {id8} cancelled at close — it was due at {due} UTC and will not run: `{}`",
+                    crate::policy::secret_scan::redact(row.command_text.as_deref().unwrap_or(""))
+                ),
+                None,
+            )
+            .await;
+            cancelled += 1;
+        }
+        cancelled
     }
 
     /// The user's Cancel on a scheduled gate (feedback #66a): an approved,

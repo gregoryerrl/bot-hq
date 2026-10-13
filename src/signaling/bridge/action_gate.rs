@@ -4320,6 +4320,76 @@ mod tests {
         assert!(bridge.gate_status(&gate3).await.unwrap().contains("approved but NOT RUN — the run window closed at"));
     }
 
+    /// EYES 2577e626: an approval INSIDE the window runs at once, and while that
+    /// run is in progress the row looks like a due scheduled gate; the scheduler
+    /// must not run it a second time. One atomic claim (`run_started_at`, 0100)
+    /// guards both paths; a run the app was cut off in is reported at boot and
+    /// never re-run; a pre-claimed row's approval runs nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_approved_run_in_progress_is_never_run_again() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let stamp = |mins: i64| (chrono::Utc::now() + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let windowed = |cmd: &str, start: i64, end: i64| GateRequest {
+            command: cmd.into(),
+            run_window: Some(RunWindow { not_before: stamp(start), not_after: stamp(end) }),
+            ..GateRequest::default()
+        };
+        // Inside the window: approving runs at once — a slow command, so the
+        // scheduler ticks while it runs.
+        bridge.action_gate_request("s1".into(), "hands".into(), windowed("sleep 1; printf 'slow-done\\n'", -1, 10)).await.unwrap();
+        let gate = storage.pending_gate_ids("s1").await.unwrap().pop().unwrap();
+        let (b, g) = (std::sync::Arc::clone(&bridge), gate.clone());
+        let approval = tokio::spawn(async move { b.resolve_choice(&g, "Approve".into()).await.unwrap() });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert!(row.run_started_at.is_some() && row.result_row_id.is_none(), "claimed, still running: {row:?}");
+        assert!(!super::super::tray::is_scheduled(&row), "a running gate is not a scheduled one");
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0, "the scheduler leaves a claimed row alone");
+        let body = match approval.await.unwrap() { crate::signaling::ResolveOutcome::DeliveredOutOfBand { body, .. } => body, other => panic!("{other:?}") };
+        assert!(body.contains("slow-done") && body.contains("[action_gate → exit 0"), "{body}");
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0, "finished: still not due");
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert_eq!(rows.iter().filter(|m| m.content.contains("slow-done")).count(), 1, "the output landed exactly once");
+        assert!(bridge.gate_status(&gate).await.unwrap().contains("It exited 0"));
+        // A run the app was cut off in: claimed, no result. At boot it is
+        // reported and refused, never re-run — even when its window is open.
+        bridge.action_gate_request("s1".into(), "hands".into(), windowed("printf 'never-again\\n'", -1, 10)).await.unwrap();
+        let cut = storage.pending_gate_ids("s1").await.unwrap().pop().unwrap();
+        // Approve with the row pre-claimed, as a dying process would have left it:
+        // the approval's own run is refused by the claim, nothing executes.
+        assert!(storage.claim_gate_run(&cut).await.unwrap());
+        assert!(!storage.claim_gate_run(&cut).await.unwrap(), "a second claim fails");
+        let body = match bridge.resolve_choice(&cut, "Approve".into()).await.unwrap() { crate::signaling::ResolveOutcome::DeliveredOutOfBand { body, .. } => body, other => panic!("{other:?}") };
+        assert!(body.contains("NOT RUN AGAIN: this command's run already started"), "{body}");
+        assert!(!body.contains("[action_gate → exit"), "{body}");
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0, "never due");
+        assert_eq!(bridge.report_interrupted_gate_runs().await, 1);
+        let row = storage.get_tray_entry(&cut).await.unwrap().unwrap();
+        assert!(row.run_refusal.as_deref().unwrap_or("").contains("bot-hq stopped before it finished"), "{row:?}");
+        assert!(bridge.gate_status(&cut).await.unwrap().starts_with("approved but NOT RUN — its run started at"), "{}", bridge.gate_status(&cut).await.unwrap());
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("⛔ Gate") && m.content.contains("bot-hq stopped before it finished")), "the session is told");
+        assert!(!rows.iter().any(|m| m.content.contains("never-again\n[action_gate")), "it never ran");
+        assert_eq!(bridge.report_interrupted_gate_runs().await, 0, "reported once");
+        // EYES 2f046a6f: a scheduled gate is named on the close recap and
+        // cancelled by the close, so nothing runs unattended after the session.
+        bridge.action_gate_request("s1".into(), "hands".into(), windowed("printf 'after-close\\n'", 30, 40)).await.unwrap();
+        let later = storage.pending_gate_ids("s1").await.unwrap().pop().unwrap();
+        bridge.resolve_choice(&later, "Approve".into()).await.unwrap();
+        assert_eq!(bridge.scheduled_gates_for_session("s1").await.len(), 1);
+        let recap = bridge.close_recap("s1").await;
+        assert!(recap.card.contains("1 scheduled run(s) — approved commands waiting for their window — will be CANCELLED by this close"), "{}", recap.card);
+        assert!(recap.detail.contains(&later[..8]) && recap.detail.contains("printf 'after-close"), "{}", recap.detail);
+        assert_eq!(bridge.cancel_scheduled_at_close("s1").await, 1);
+        assert!(bridge.scheduled_gates_for_session("s1").await.is_empty());
+        assert!(bridge.gate_status(&later).await.unwrap().contains("the session closed before the scheduled run"));
+        sqlx::query("UPDATE session_tray SET run_not_before = ? WHERE choice_id = ?")
+            .bind(stamp(-1)).bind(&later).execute(storage.pool()).await.unwrap();
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0, "cancelled at close: never runs");
+    }
+
     /// Feedback #52 (the user's desktop tier): `urgent_reason` parks the
     /// command whatever the keyword list says, marks the row, fires
     /// `GateUrgent` for the notification that ignores focus and repeats, posts

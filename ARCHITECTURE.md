@@ -1308,9 +1308,21 @@ calls `run_due_scheduled_gates` every `SCHEDULED_GATE_TICK` (10 s):
 each runs through the same `maybe_run_gated` (`deferred`, so the start is not
 re-checked while the end is), its output lands as a `[system]` row linked by
 `set_tray_run_result`, and `ChoiceResolved` refreshes the UI. No in-memory
-timer, so a relaunch re-arms nothing. `cancel_scheduled_gate` (the tauri
-command behind the Cancel on the `ScheduledRuns` strip) records a
-`run_refusal` the scheduler skips, with an audit record and a `⛔` row.
+timer, so a relaunch re-arms nothing. **Every run is claimed first** (EYES
+2577e626; `session_tray.run_started_at`, 0100): `claim_gate_run` is one
+atomic `UPDATE … WHERE run_started_at IS NULL` that both paths take before
+executing — a gate approved inside its window runs at once, and while it runs
+the row would otherwise look due to the scheduler; the claimed row is excluded
+from `due_scheduled_gates`, `is_scheduled` is false for it, and a second claim
+runs nothing ("NOT RUN AGAIN"). At boot `report_interrupted_gate_runs` turns a
+claimed row with no result and no refusal — a run the previous process was
+cut off in — into a refusal and a `⛔` row in its session; it is never re-run,
+because whether the command did its work is unknown. `cancel_scheduled_gate`
+(the tauri command behind the Cancel on the `ScheduledRuns` strip) records a
+`run_refusal` the scheduler skips, with an audit record and a `⛔` row. A CLOSE
+cancels the session's scheduled gates the same way (EYES 2f046a6f) — nobody
+would be left to read the output — and the close recap names them on the card
+first, so the user approves the close knowing what it stops.
 
 **An URGENT gate reaches the user instead of waiting to be noticed** (feedback
 #52; the user's pick was the desktop tier — no phone push). `action_gate`'s

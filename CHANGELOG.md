@@ -285,7 +285,13 @@ and in `docs/rebuild-archive/`.
   unattended, posting the output as a `[system]` row linked to the gate.
   Approved inside the window it runs at once; after the window closes it is
   refused and says so. A relaunch loses nothing — the due runs are read from
-  the table. `gate_status` reports "scheduled" until the run.
+  the table. `gate_status` reports "scheduled" until the run. A command runs
+  once and only once: the run is claimed before it starts, so the scheduler
+  never runs a command that an approval inside the window is already running,
+  and a run that bot-hq was quit in the middle of is reported at the next
+  start — not run again, since whether it did its work is unknown. Closing a
+  session cancels its scheduled runs (nobody would be left to read the
+  output); the close card says which, so you can reject the close instead.
 - **An urgent gate finds you instead of waiting to be noticed.** On 2026-10-01
   an agent parked the cancel and the rollback for a job overrunning a shared
   API budget at 06:23Z; you approved them at 08:18Z, because nothing told you

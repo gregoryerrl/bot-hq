@@ -361,6 +361,13 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub run_not_after: Option<String>,
+    /// When bot-hq claimed the run of this approved command (0100): the one
+    /// atomic stamp both run paths take before executing, so a windowed gate
+    /// approved inside its window cannot also be run by the scheduler, and a
+    /// run the app was cut off in is reported at boot instead of re-run.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub run_started_at: Option<String>,
 }
 
 impl SessionTrayEntry {

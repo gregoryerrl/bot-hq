@@ -1509,6 +1509,12 @@ impl AppState {
         // retires its row too, and silent loss is what the durable queue exists
         // to prevent.
         self.bridge.announce_queued_dropped_at_close(id).await;
+        // An approved command still waiting for its run window would run
+        // unattended after the close (EYES 2f046a6f): cancelled, with a row.
+        let cancelled = self.bridge.cancel_scheduled_at_close(id).await;
+        if cancelled > 0 {
+            tracing::info!(session_id = %id, cancelled, "scheduled gate runs cancelled by the close");
+        }
         if let Err(e) = self.storage.withdraw_pending_tray_for_session(id).await {
             tracing::warn!(?e, session_id = %id, "withdraw_pending_tray_for_session failed");
         }
