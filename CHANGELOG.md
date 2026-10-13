@@ -249,6 +249,17 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A document an agent leaves for you to act on survives the session.** The
+  end-of-day message, a time-tracker entry, a follow-up note — drafts you post
+  under your own name — lived in session documents that were archived with the
+  session, so an agent copied them into the project's handoff file by hand to
+  keep them reachable. An agent can now write such a document with
+  `kind: "user_action"`: its tab is badged FOR YOU, and the dashboard shows a
+  **Your action items** panel listing every such document from every session,
+  open or closed, with its first line, Open (which lands on the document's
+  tab) and Dismiss. Dismissed items leave the list and the document stays;
+  an agent that rewrites one lists it again. No review step in this first
+  slice — that is the second half of the suggestion, still to decide.
 - **Approve a command any time; it runs inside its window.** Some commands may
   run only in a slot — a production merge in the six minutes a deploy cannot
   hurt anything — and until now the agent waited for the slot in a shell loop,

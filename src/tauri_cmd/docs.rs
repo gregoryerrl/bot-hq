@@ -18,6 +18,12 @@ pub struct SessionDocumentView {
     pub created_at: String,
     pub updated_at: String,
     pub phase: Option<String>,
+    /// `user_action` for one of the user's action items (feedback #89): the
+    /// doc's tab says so, and it is listed on the dashboard across sessions
+    /// until dismissed. Null for an ordinary doc.
+    pub kind: Option<String>,
+    /// When the user dismissed it from the Action items list; null while listed.
+    pub dismissed_at: Option<String>,
 }
 
 impl From<SessionDocument> for SessionDocumentView {
@@ -30,8 +36,69 @@ impl From<SessionDocument> for SessionDocumentView {
             created_at: d.created_at,
             updated_at: d.updated_at,
             phase: d.phase,
+            kind: d.kind,
+            dismissed_at: d.dismissed_at,
         }
     }
+}
+
+/// One of the user's action items (feedback #89): a `user_action` doc not yet
+/// dismissed, from any session, open or closed.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct UserActionItemView {
+    pub session_id: String,
+    pub session_title: String,
+    pub session_closed_at: Option<String>,
+    pub slug: String,
+    pub updated_at: String,
+    pub last_writer: Option<String>,
+    /// The body's first non-empty line.
+    pub preview: String,
+    pub bytes: i64,
+}
+
+/// The user's open action items across every session, newest first.
+#[tauri::command]
+#[specta::specta]
+pub async fn list_user_action_items(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+) -> Result<Vec<UserActionItemView>, AppError> {
+    let Some(storage) = bridge.storage_handle().await else {
+        return Ok(Vec::new());
+    };
+    let items = storage.user_action_items().await?;
+    Ok(items
+        .into_iter()
+        .map(|i| UserActionItemView {
+            session_id: i.session_id,
+            session_title: i.session_title,
+            session_closed_at: i.session_closed_at,
+            slug: i.slug,
+            updated_at: i.updated_at,
+            last_writer: i.last_writer,
+            preview: i.preview,
+            bytes: i.bytes,
+        })
+        .collect())
+}
+
+/// Dismiss one of the user's action items: it leaves the list; the document
+/// stays in its session. Returns whether a listed item was dismissed.
+#[tauri::command]
+#[specta::specta]
+pub async fn dismiss_user_action_item(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+    slug: String,
+) -> Result<bool, AppError> {
+    let Some(storage) = bridge.storage_handle().await else {
+        return Ok(false);
+    };
+    let dismissed = storage.dismiss_user_action_item(&session_id, &slug).await?;
+    if dismissed {
+        bridge.notify_doc_changed(&session_id);
+    }
+    Ok(dismissed)
 }
 
 #[tauri::command]

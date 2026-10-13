@@ -655,7 +655,14 @@ tabs (I/P/A/V chips), which drive `session_doc_search(session_id,
 phase=<x>)`, followed by one tab per **custom document** — an untagged
 `session_documents` row the session wrote (a task checklist, an issue
 write-up; round 11, the user's ideas.md), named by its slug; the phase docs'
-archived versions (`<slug>@<n>`) are not tabs. Each IPAV tab renders matching
+archived versions (`<slug>@<n>`) are not tabs. A custom doc written with
+`kind: "user_action"` (feedback #89, the user's first slice — no review step)
+is one of the user's action items: its pill carries a FOR YOU badge (DONE once
+dismissed), and the dashboard's **Your action items** panel
+(`ActionItemsPanel`, `list_user_action_items`) lists every such doc across
+sessions, open or closed, with Open (lands on the session with `?doc=<slug>`,
+which the pane selects) and Dismiss (`dismiss_user_action_item` →
+`dismissed_at`; the doc stays). A re-mark un-dismisses. Each IPAV tab renders matching
 `session_documents` rows; counts surface on the chips. The A tab also renders
 the live color-coded `git diff` for the session's working repo via the
 `compute_apply_diff` Tauri command (`src/tauri_cmd/docs.rs`, parser
@@ -1517,7 +1524,8 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   per-session docs: one rewritable doc per IPAV phase (`phase` set), the
   reviewer's co-located `<phase>-eyes` doc, archived versions (`<slug>@<n>`,
   untagged: what a replace or an in-place edit superseded) and custom
-  documents (untagged, own tab). The MCP tools keep a long doc readable: a
+  documents (untagged, own tab). `kind` (0099) is `user_action` for one of
+  the user's action items and `dismissed_at` when they put it away. The MCP tools keep a long doc readable: a
   reply carries at most 48 KB of body (`DOC_REPLY_BUDGET_BYTES`), a doc past
   it is listed by its size and headings, and `session_doc_read` returns one
   section (`heading`), a line range (`lines`) or the matching lines (`grep`).

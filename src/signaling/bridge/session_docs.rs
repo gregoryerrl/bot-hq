@@ -576,6 +576,15 @@ impl SignalingBridge {
         Ok(id)
     }
 
+    /// Tell the UI a session's documents changed — the doc pane and the
+    /// dashboard's Action items list refetch (feedback #89: a dismiss changes
+    /// a doc's row without a write).
+    pub fn notify_doc_changed(&self, session_id: &str) {
+        let _ = self.event_tx.send(SignalingEvent::DocChanged {
+            session_id: session_id.to_string(),
+        });
+    }
+
     /// Why `writer`'s replace of `current` is refused, or `None` when it may
     /// go ahead: the doc's last writer is someone else and the writer has not
     /// seen the current version whole since.

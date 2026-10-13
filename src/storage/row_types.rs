@@ -683,4 +683,30 @@ pub struct SessionDocument {
     #[serde(default)]
     #[sqlx(default)]
     pub promoted_at: Option<String>,
+    /// `user_action` for a doc the user must act on under their own name
+    /// (0099, feedback #89): it stays in their Action items list after the
+    /// session closes, until dismissed. `None` for an ordinary doc.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub kind: Option<String>,
+    /// When the user dismissed it from the Action items list (0099).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub dismissed_at: Option<String>,
+}
+
+/// One of the user's action items across sessions (feedback #89): a
+/// `user_action` session doc not yet dismissed, with the session it came from.
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize, PartialEq)]
+pub struct UserActionItem {
+    pub session_id: String,
+    pub session_title: String,
+    /// The session's `closed_at`; `None` while it is open.
+    pub session_closed_at: Option<String>,
+    pub slug: String,
+    pub updated_at: String,
+    pub last_writer: Option<String>,
+    /// The body's first non-empty line, as a preview.
+    pub preview: String,
+    pub bytes: i64,
 }

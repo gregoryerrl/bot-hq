@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
@@ -124,6 +124,10 @@ function normalizePhase(raw: string | null | undefined): Phase | null {
 
 export function SessionView() {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
+  // Feedback #89: the dashboard's Action items "Open" lands here with the
+  // document to show (`?doc=<slug>`); the document pane selects its tab.
+  const [searchParams] = useSearchParams();
+  const openDocSlug = searchParams.get("doc");
   const navigate = useNavigate();
 
   const { data: session, error: sessionError } = useTauriQuery<
@@ -1131,6 +1135,7 @@ export function SessionView() {
             sessionId={sessionId}
             sessionPhase={phase}
             openTraySignal={openTraySignal}
+            openDocSlug={openDocSlug}
           />
         </div>
       </div>

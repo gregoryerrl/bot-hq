@@ -689,6 +689,11 @@ fn parse_expect_occurrences(args: &Value) -> Result<usize, JsonRpcError> {
     }
 }
 
+/// The reply's note on a `kind: "user_action"` write (feedback #89).
+const USER_ACTION_NOTE: &str = "marked as one of the user's action items: it shows in their Action items list \
+    (on the dashboard, across sessions, after this one closes too) until they dismiss it; the doc's own tab says so. \
+    Tell the user in chat what it is and where it is.";
+
 fn doc_write_reply(id: i64, slug: &str, redacted: usize, extra: Option<&str>) -> String {
     let mut notes: Vec<String> = Vec::new();
     if redacted > 0 {
@@ -1519,6 +1524,28 @@ async fn call_tool(
                     .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e))?,
             };
             let phase = parse_optional_phase(&args)?;
+            // Feedback #89 (the user's first slice): `kind: "user_action"` marks
+            // a doc the user must act on under their own name. Untagged only —
+            // a phase doc is the work's narrative, not an item of theirs.
+            let user_action = match args.get("kind").and_then(Value::as_str) {
+                None => false,
+                Some(crate::storage::DOC_KIND_USER_ACTION) => {
+                    if phase.is_some() {
+                        return Err(JsonRpcError::new(
+                            JsonRpcError::INVALID_PARAMS,
+                            "kind: \"user_action\" is for an untagged doc — give no phase; the action \
+                             item is a custom document the user acts on, not the phase's narrative",
+                        ));
+                    }
+                    true
+                }
+                Some(other) => {
+                    return Err(JsonRpcError::new(
+                        JsonRpcError::INVALID_PARAMS,
+                        format!("unknown kind '{other}' — the one kind is 'user_action'"),
+                    ))
+                }
+            };
             // Default "replace" keeps every existing caller unchanged; an
             // unrecognised mode is refused rather than silently replacing, since
             // a caller that meant to append would otherwise destroy the doc.
@@ -1574,7 +1601,17 @@ async fn call_tool(
                         )
                         .await
                         .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("{e:#}")))?;
-                    Ok(ToolCallResult::text(doc_write_reply(id, &slug, redacted, None)))
+                    let mut note = None;
+                    if user_action {
+                        if let Some(storage) = bridge.storage_handle().await {
+                            storage
+                                .set_session_document_kind(&caller.session_id, &slug, Some(crate::storage::DOC_KIND_USER_ACTION))
+                                .await
+                                .map_err(internal_err_no_prefix)?;
+                        }
+                        note = Some(USER_ACTION_NOTE);
+                    }
+                    Ok(ToolCallResult::text(doc_write_reply(id, &slug, redacted, note)))
                 }
             }
         }
@@ -5139,6 +5176,56 @@ mod tests {
             "msg: {}",
             err.message
         );
+    }
+
+    /// Feedback #89 (the user's first slice): `kind: "user_action"` marks the
+    /// doc as one of the user's action items — listed across sessions, open
+    /// or closed, until dismissed; a dismiss leaves the doc; a rewrite lists it
+    /// again. Untagged only; the one other kind value is refused.
+    #[tokio::test]
+    async fn session_doc_write_kind_user_action_lists_the_doc_until_dismissed() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "ad-manager EOD", None).await.unwrap();
+        let who = caller();
+        let write = |args: serde_json::Value| {
+            dispatch(req("tools/call", json!({"name": "session_doc_write", "arguments": args}), 1), &who, &bridge)
+        };
+        let ok = write(json!({"slug": "eod-draft", "body": "# EOD\n\nToday we shipped the thing.\nMore.", "kind": "user_action"}))
+            .await
+            .unwrap();
+        let text = serde_json::to_value(ok.unwrap()).unwrap()["result"]["content"][0]["text"].as_str().unwrap().to_string();
+        assert!(text.contains("marked as one of the user's action items"), "{text}");
+        let items = storage.user_action_items().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!((items[0].session_id.as_str(), items[0].slug.as_str(), items[0].preview.as_str()), ("s1", "eod-draft", "EOD"));
+        assert_eq!(items[0].session_title, "ad-manager EOD");
+        assert!(items[0].session_closed_at.is_none());
+        let doc = storage.session_document_by_slug("s1", "eod-draft").await.unwrap().unwrap();
+        assert_eq!(doc.kind.as_deref(), Some("user_action"));
+        // Dismissed: off the list, the doc stays; a second dismiss changes nothing.
+        assert!(storage.dismiss_user_action_item("s1", "eod-draft").await.unwrap());
+        assert!(!storage.dismiss_user_action_item("s1", "eod-draft").await.unwrap());
+        assert!(storage.user_action_items().await.unwrap().is_empty());
+        assert!(storage.session_document_by_slug("s1", "eod-draft").await.unwrap().unwrap().dismissed_at.is_some());
+        // Rewritten as an action item again: listed again (the agent changed
+        // what the user had put away). A plain doc is never listed.
+        write(json!({"slug": "eod-draft", "body": "# EOD v2", "kind": "user_action"})).await.unwrap();
+        assert_eq!(storage.user_action_items().await.unwrap().len(), 1);
+        write(json!({"slug": "notes", "body": "scratch"})).await.unwrap();
+        assert_eq!(storage.user_action_items().await.unwrap().len(), 1);
+        // Refusals: a phase, and an unknown kind.
+        let err = write(json!({"slug": "plan", "body": "x", "phase": "plan", "kind": "user_action"})).await.unwrap_err();
+        assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
+        assert!(err.message.contains("untagged doc"), "{}", err.message);
+        let err = write(json!({"slug": "d", "body": "x", "kind": "reviewed"})).await.unwrap_err();
+        assert!(err.message.contains("the one kind is 'user_action'"), "{}", err.message);
+        // Closed sessions keep their items on the list.
+        storage.close_session("s1", false).await.unwrap();
+        let items = storage.user_action_items().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].session_closed_at.is_some());
     }
 
     /// **The phase-doc router keys on the CAPABILITY, never on a slug.**

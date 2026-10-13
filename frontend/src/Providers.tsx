@@ -66,7 +66,7 @@ const TRAY_KEYS = [
 // A phase advance changes only the chip, not doc data (docs refresh via DOC_KEYS
 // on a `doc_changed` event) — so `session_doc_search` belongs only in DOC_KEYS.
 const PHASE_KEYS = ["get_session_phase"] as const;
-const DOC_KEYS = ["session_doc_search"] as const;
+const DOC_KEYS = ["session_doc_search", "list_user_action_items"] as const;
 const CLOSE_KEYS = [
   "list_sessions",
   "list_closed_sessions",

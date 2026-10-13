@@ -1254,6 +1254,29 @@ async sessionDocDelete(sessionId: string, slug: string) : Promise<Result<boolean
 }
 },
 /**
+ * The user's open action items across every session, newest first.
+ */
+async listUserActionItems() : Promise<Result<UserActionItemView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_user_action_items") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Dismiss one of the user's action items: it leaves the list; the document
+ * stays in its session. Returns whether a listed item was dismissed.
+ */
+async dismissUserActionItem(sessionId: string, slug: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dismiss_user_action_item", { sessionId, slug }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Run `git diff --no-color <session_start_sha>` (falling back to
  * `git diff HEAD` if the anchor was never captured) inside the session's
  * `working_repo_path`, then classify each line via [`parse_diff_lines`].
@@ -2476,7 +2499,17 @@ participants: ParticipantPick[] | null }
  * (mirrors `SessionInfo`); the React side reads `has_repo` / `dirty_count`.
  */
 export type SessionDirty = { has_repo: boolean; dirty_count: number }
-export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null }
+export type SessionDocumentView = { id: number; session_id: string; slug: string; body: string; created_at: string; updated_at: string; phase: string | null; 
+/**
+ * `user_action` for one of the user's action items (feedback #89): the
+ * doc's tab says so, and it is listed on the dashboard across sessions
+ * until dismissed. Null for an ordinary doc.
+ */
+kind: string | null; 
+/**
+ * When the user dismissed it from the Action items list; null while listed.
+ */
+dismissed_at: string | null }
 /**
  * The session's declared halt (rc3 D35) — a SESSION state, never a tray row.
  * `None` = not halted. One slot by construction; the freshest declaration is
@@ -2668,6 +2701,15 @@ snapshot_b64: string; cols: number; rows: number }
  * `SessionInfo` return-type convention) — the React side reads these names.
  */
 export type UpdateInfo = { current_version: string; latest_version: string; update_available: boolean; release_url: string; release_notes: string | null; published_at: string | null }
+/**
+ * One of the user's action items (feedback #89): a `user_action` doc not yet
+ * dismissed, from any session, open or closed.
+ */
+export type UserActionItemView = { session_id: string; session_title: string; session_closed_at: string | null; slug: string; updated_at: string; last_writer: string | null; 
+/**
+ * The body's first non-empty line.
+ */
+preview: string; bytes: number }
 /**
  * Outcome of a pre-flight model probe (B5).
  */

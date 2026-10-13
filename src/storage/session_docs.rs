@@ -33,7 +33,10 @@ pub fn phase_doc_slug(slug: &str) -> Option<&'static str> {
 /// Full column projection for a `SessionDocument` row — shared by
 /// `session_documents_for` and `session_document_by_slug`.
 const DOCUMENT_COLUMNS: &str =
-    "id, session_id, slug, body, created_at, updated_at, phase, last_writer, promoted_to, promoted_at";
+    "id, session_id, slug, body, created_at, updated_at, phase, last_writer, promoted_to, promoted_at, kind, dismissed_at";
+
+/// The one document kind besides "ordinary" (0099, feedback #89).
+pub const DOC_KIND_USER_ACTION: &str = "user_action";
 
 impl Storage {
     /// Upsert a per-session document by (session_id, slug). On conflict the
@@ -95,6 +98,70 @@ impl Storage {
             .await
             .with_context(|| format!("recording the writer of session doc {session_id}/{slug}"))?;
         Ok(())
+    }
+
+    /// Mark a document as one of the user's action items (0099, feedback
+    /// #89) — or clear the mark with `None`. A re-mark un-dismisses it: the
+    /// agent rewrote something the user had already put away.
+    pub async fn set_session_document_kind(&self, session_id: &str, slug: &str, kind: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE session_documents SET kind = ?, dismissed_at = NULL WHERE session_id = ? AND slug = ?",
+        )
+        .bind(kind)
+        .bind(session_id)
+        .bind(slug)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("marking session doc {session_id}/{slug} kind {kind:?}"))?;
+        Ok(())
+    }
+
+    /// The user dismissed an action item (0099): it leaves the list; the doc
+    /// itself stays. Returns whether a row changed.
+    pub async fn dismiss_user_action_item(&self, session_id: &str, slug: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_documents SET dismissed_at = ? \
+             WHERE session_id = ? AND slug = ? AND kind = ? AND dismissed_at IS NULL",
+        )
+        .bind(now_utc())
+        .bind(session_id)
+        .bind(slug)
+        .bind(DOC_KIND_USER_ACTION)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("dismissing action item {session_id}/{slug}"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// The user's open action items across EVERY session, open or closed,
+    /// newest first (0099, feedback #89): `user_action` docs not dismissed.
+    pub async fn user_action_items(&self) -> Result<Vec<UserActionItem>> {
+        let rows: Vec<(String, String, Option<String>, String, String, Option<String>, String, i64)> = sqlx::query_as(
+            "SELECT d.session_id, s.title, s.closed_at, d.slug, d.updated_at, d.last_writer, d.body, \
+                    LENGTH(CAST(d.body AS BLOB)) \
+             FROM session_documents d JOIN sessions s ON s.id = d.session_id \
+             WHERE d.kind = ? AND d.dismissed_at IS NULL \
+             ORDER BY d.updated_at DESC",
+        )
+        .bind(DOC_KIND_USER_ACTION)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the user's action items")?;
+        Ok(rows
+            .into_iter()
+            .map(|(session_id, session_title, session_closed_at, slug, updated_at, last_writer, body, bytes)| {
+                UserActionItem {
+                    session_id,
+                    session_title,
+                    session_closed_at,
+                    slug,
+                    updated_at,
+                    last_writer,
+                    preview: preview_line(&body),
+                    bytes,
+                }
+            })
+            .collect())
     }
 
     /// Record that `slug` was promoted to the Context Library as `to`
@@ -635,4 +702,19 @@ mod session_doc_tests {
         assert_eq!(doc.id, id_a);
         assert_eq!(doc.body, "v2");
     }
+}
+
+/// A doc's first non-empty line, markdown heading marks dropped, cut to 160
+/// characters — the Action items list's one-line preview.
+pub(crate) fn preview_line(body: &str) -> String {
+    let line = body
+        .lines()
+        .map(|l| l.trim().trim_start_matches('#').trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.chars().count() <= 160 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(159).collect();
+    format!("{cut}…")
 }

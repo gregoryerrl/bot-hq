@@ -404,6 +404,39 @@ describe("custom document tabs", () => {
     expect(await screen.findByText("apply doc")).toBeInTheDocument();
   });
 
+  // Feedback #89: a `user_action` doc's tab says it is for the user, and the
+  // dashboard's Open (`openDocSlug`) lands on that tab.
+  it("badges an action item's tab and opens it on request", async () => {
+    const eod = {
+      id: 4,
+      session_id: "s1",
+      slug: "eod-draft",
+      body: "Today we shipped the thing.",
+      phase: null,
+      kind: "user_action",
+      dismissed_at: null,
+      created_at: "2026-08-18T10:03:00Z",
+      updated_at: "2026-08-18T10:03:00Z",
+    };
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "session_doc_search") return Promise.resolve([...docs, eod]);
+      if (cmd === "compute_apply_diff") return Promise.resolve({ lines: [], note: null });
+      return Promise.resolve([]);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <DocumentPane sessionId="s1" sessionPhase="apply" openDocSlug="eod-draft" />
+      </QueryClientProvider>,
+    );
+    const tab = await screen.findByRole("tab", { name: /eod-draft/ });
+    expect(tab).toHaveTextContent("FOR YOU");
+    expect(screen.getAllByTestId("action-item-badge")).toHaveLength(1);
+    // Opened on arrival: the body shows without a click.
+    expect(await screen.findByText("Today we shipped the thing.")).toBeInTheDocument();
+    expect(tab).toHaveAttribute("aria-selected", "true");
+  });
+
   // Round 12 — the user's ideas.md: custom documents are the user's to edit,
   // delete and create; the I/P/A/V documents stay the participants'.
   it("lets the user edit a custom document, and offers no editor on a phase doc", async () => {

@@ -27,6 +27,7 @@ import { cn } from "../lib/cn";
 import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { RescanIcon, WarnIcon } from "../components/icons";
 import { PresetOfferBanner } from "./PresetOfferCard";
+import { ActionItemsPanel } from "../components/ActionItemsPanel";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
@@ -649,6 +650,9 @@ export function Dashboard() {
         </Button>
       </div>
       <PresetOfferBanner />
+      {/* Feedback #89: the documents agents left for the user to act on, from
+          every session, until dismissed. */}
+      <ActionItemsPanel />
       {creating && (
         <>
           {/* Scrim — click anywhere outside the dialog to dismiss */}

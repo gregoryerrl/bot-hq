@@ -60,7 +60,7 @@ pub use participants::{
     PARTICIPATION_MODES, UNREAD_BATCH_LIMIT, WIRE_BODY_CLAMP_BYTES, WIRE_JOIN,
 };
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
-pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, REVIEWER_CODOC_SLUGS};
+pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, DOC_KIND_USER_ACTION, REVIEWER_CODOC_SLUGS};
 #[cfg(test)]
 pub(crate) use participants::untimed_wire;
 pub use tray::{
@@ -71,7 +71,7 @@ pub use row_types::{
     AgentConfig, AgentFeedback, CancelEvent, ClFolder, ClIndexEntry, ClRead,
     Finding, FindingSeverity, FindingStatus, Message, MessageKind, Model, Plugin, Project,
     QuestionKind, RetrievalStats, Session, SessionDocument, SessionDocumentChange, SessionTrayEntry,
-    SessionWithPreview,
+    SessionWithPreview, UserActionItem,
 };
 pub(crate) use time::{cutoff_days_ago, now_utc};
 pub use messages::{messages_tail_sql, participant_text_since_sql};

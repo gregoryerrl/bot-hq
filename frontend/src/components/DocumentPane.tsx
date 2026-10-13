@@ -51,6 +51,12 @@ interface DocumentPaneProps {
    * back to a phase as before.
    */
   openTraySignal?: number;
+  /**
+   * A custom document's slug to open on arrival (feedback #89): the
+   * dashboard's Action items "Open" lands on the session with `?doc=<slug>`.
+   * Any change selects that doc's tab when the session has it.
+   */
+  openDocSlug?: string | null;
 }
 
 interface ComputeApplyDiffResult {
@@ -62,6 +68,7 @@ export const DocumentPane = memo(function DocumentPane({
   sessionId,
   sessionPhase,
   openTraySignal,
+  openDocSlug = null,
 }: DocumentPaneProps) {
   const [activePhase, setActivePhase] = useState<Phase>(
     sessionPhase ?? "investigate",
@@ -115,6 +122,15 @@ export const DocumentPane = memo(function DocumentPane({
       customSlug ? (customDocs.find((d) => d.slug === customSlug) ?? null) : null,
     [customDocs, customSlug],
   );
+  // The parent's "open this document" (the dashboard's Action items Open):
+  // once the docs have loaded and the slug is one of them, its tab shows.
+  const hasOpenDoc = openDocSlug != null && customDocs.some((d) => d.slug === openDocSlug);
+  useEffect(() => {
+    if (openDocSlug && hasOpenDoc) {
+      setShowTray(false);
+      setCustomSlug(openDocSlug);
+    }
+  }, [openDocSlug, hasOpenDoc]);
 
   // Apply tab gets a live git diff above the phase=apply session docs.
   // Refetches on session change; Apply tab visibility doesn't matter for the
@@ -259,6 +275,8 @@ export const DocumentPane = memo(function DocumentPane({
             <CustomDocPill
               key={d.id}
               slug={d.slug}
+              actionItem={d.kind === "user_action"}
+              dismissed={d.dismissed_at != null}
               selected={!showTray && customDoc?.slug === d.slug}
               onSelect={() => {
                 setShowTray(false);
@@ -548,11 +566,22 @@ function CustomDocPill({
   slug,
   selected,
   onSelect,
+  actionItem = false,
+  dismissed = false,
 }: {
   slug: string;
   selected: boolean;
   onSelect: () => void;
+  /** One of the user's action items (feedback #89): the tab says so. */
+  actionItem?: boolean;
+  /** …already dismissed from the dashboard list. */
+  dismissed?: boolean;
 }) {
+  const title = actionItem
+    ? dismissed
+      ? `${slug} — an action item for you, dismissed from the dashboard list`
+      : `${slug} — an action item for you: a draft to post or a step only you can take; listed on the dashboard until you dismiss it`
+    : `${slug} — a custom document this session wrote`;
   return (
     <button
       type="button"
@@ -565,8 +594,19 @@ function CustomDocPill({
           ? "border-on-surface/70 bg-surface-container-high/80 text-on-surface"
           : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
       )}
-      title={`${slug} — a custom document this session wrote`}
+      title={title}
     >
+      {actionItem && (
+        <span
+          data-testid="action-item-badge"
+          className={cn(
+            "shrink-0 rounded px-1 font-label-caps text-[10px] leading-4",
+            dismissed ? "bg-surface-container-high text-on-surface-variant" : "bg-tertiary/20 text-tertiary",
+          )}
+        >
+          {dismissed ? "DONE" : "FOR YOU"}
+        </span>
+      )}
       <span className="truncate">{slug}</span>
     </button>
   );
