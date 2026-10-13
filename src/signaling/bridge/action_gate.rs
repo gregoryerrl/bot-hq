@@ -2111,7 +2111,10 @@ fn revises_queued_gate(
     f: &crate::storage::Finding,
     row: &crate::storage::SessionTrayEntry,
 ) -> bool {
-    f.severity == "advisory"
+    // A queued CLOSE card has no body to revise (EYES d95f95c7): an advisory
+    // naming it is a note, not a hold.
+    row.kind != crate::storage::QuestionKind::Close.as_str()
+        && f.severity == "advisory"
         && f.status == "open"
         && f.gate_id.as_deref().is_some_and(|g| g != "none" && g == row.choice_id)
 }
@@ -3897,11 +3900,14 @@ mod tests {
         let (bridge, storage, eyes, _path, _body) = outward_fixture(&data, &repo).await;
         let mut ring = ring_for(&bridge).await;
         drain(&mut ring);
-        let card = bridge
+        use super::super::CloseQueue;
+        let CloseQueue::Queued(card) = bridge
             .queue_close_card("s1", "hands", "CL learnings delta: written this session.", "nothing open")
             .await
             .unwrap()
-            .expect("a reviewer exists: queued");
+        else {
+            panic!("a reviewer exists: queued")
+        };
         let row = storage.get_tray_entry(&card).await.unwrap().unwrap();
         assert_eq!((row.status.as_str(), row.kind.as_str()), ("queued", "close"));
         assert!(row.command_text.is_none());
@@ -3911,7 +3917,7 @@ mod tests {
         assert_eq!(summons_in(&drain(&mut ring)), vec![eyes]);
         assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty(), "nothing parked for the user yet");
         // A second close while queued: the same card.
-        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), Some(card.clone()));
+        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), CloseQueue::Queued(card.clone()));
         // Not read: stays queued. Read: parks for the user as a close card.
         bridge.settle_queued_outward("s1", eyes).await;
         assert_eq!(storage.get_tray_entry(&card).await.unwrap().unwrap().status, "queued");
@@ -3923,10 +3929,10 @@ mod tests {
         let rows = storage.messages_for_session("s1", None).await.unwrap();
         assert!(rows.iter().any(|m| m.content.contains("The close card") && m.content.contains("is now PARKED for the user")), "{:?}", rows.last().map(|m| &m.content));
         // While a close card is pending, a further close returns it too.
-        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), Some(card.clone()));
+        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), CloseQueue::Queued(card.clone()));
         bridge.resolve_choice(&card, "Reject".into()).await.unwrap();
         // A queued close a blocking finding names is withdrawn: the session keeps working.
-        let card2 = bridge.queue_close_card("s1", "hands", "second try", "").await.unwrap().unwrap();
+        let CloseQueue::Queued(card2) = bridge.queue_close_card("s1", "hands", "second try", "").await.unwrap() else { panic!("queued") };
         let body2 = storage.get_tray_entry(&card2).await.unwrap().unwrap().body_row_id.unwrap();
         storage.commit_delivery(eyes, &[(body2, None)]).await.unwrap();
         bridge
@@ -3936,6 +3942,33 @@ mod tests {
         bridge.settle_queued_outward("s1", eyes).await;
         assert_eq!(storage.get_tray_entry(&card2).await.unwrap().unwrap().status, "withdrawn");
         assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
+        // An ADVISORY naming a queued close is a note, not a #69 revise hold
+        // (EYES d95f95c7): no hold row, and the read still parks the card.
+        let CloseQueue::Queued(card3) = bridge.queue_close_card("s1", "hands", "third try", "").await.unwrap() else { panic!("queued") };
+        let body3 = storage.get_tray_entry(&card3).await.unwrap().unwrap().body_row_id.unwrap();
+        storage.commit_delivery(eyes, &[(body3, None)]).await.unwrap();
+        drain(&mut ring);
+        bridge
+            .eyes_flag_for_gate("s1".into(), "eyes".into(), crate::storage::FindingSeverity::Advisory, "the recap could name the CI run".into(), None, Some(card3.clone()))
+            .await
+            .unwrap();
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(!rows.iter().any(|m| m.content.contains("is HELD for a revision")), "{:?}", rows.last().map(|m| &m.content));
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&card3).await.unwrap().unwrap().status, "pending", "advisory noted, close parked");
+        assert_eq!(gate_opened_in(&drain(&mut ring)), vec![card3.clone()]);
+        bridge.resolve_choice(&card3, "Reject".into()).await.unwrap();
+        // A reviewer that is down (stalled/dead, no RPC within the liveness
+        // window) cannot read the recap: the caller parks the card directly.
+        bridge.notify_agent_health("s1".to_string(), "eyes", "stalled");
+        assert_eq!(
+            bridge.queue_close_card("s1", "hands", "fourth try", "").await.unwrap(),
+            CloseQueue::ReviewerDown("eyes".to_string())
+        );
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty(), "nothing queued for a down reviewer");
+        // An RPC from the reviewer inside the window is stronger evidence: queued again.
+        bridge.note_agent_rpc("s1", "eyes");
+        assert!(matches!(bridge.queue_close_card("s1", "hands", "fifth try", "").await.unwrap(), CloseQueue::Queued(_)));
     }
 
     /// Feedback #69: an ADVISORY finding that names a queued publish is a

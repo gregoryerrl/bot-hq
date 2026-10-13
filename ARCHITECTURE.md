@@ -1290,8 +1290,12 @@ and detail — as the body row the reviewer must read, and summons the reviewer;
 the same `settle_queued_outward` that settles a queued publish parks it for the
 user once the reviewer's turn ends with the recap read (the promotion carries
 the close card's approval context), or withdraws it when a blocking finding
-names the gate, and the session keeps working. A solo roster parks directly, as
-before. The learnings-delta nudge below stays as the arm's one refusal; the UI
+names the gate, and the session keeps working. An advisory naming a close is a
+note, not a #69 revise hold (`revises_queued_gate` skips kind `close`; no hold
+row). The result is a `CloseQueue`: `NoReviewer` (a solo roster) parks directly,
+as before; `ReviewerDown` (the reviewer's cached health stalled/dead with no RPC
+inside `REVIEWER_LIVENESS_WINDOW`) parks directly too, and the arm's reply says
+the recap was not read. The learnings-delta nudge below stays as the arm's one refusal; the UI
 Close button (`tauri_cmd`) and `Capability::CloseSession` are untouched.
 
 A session that ends before anyone wrote anything down is D15's gap. The

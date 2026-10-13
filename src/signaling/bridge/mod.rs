@@ -58,6 +58,18 @@ mod tray;
 pub use tray::{gate_age_secs, Withdrawal, STALE_GATE_MAX_AGE_SECS};
 mod util;
 
+/// What `queue_close_card` did with an agent's close (feedback #73 (2)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CloseQueue {
+    /// Queued for the reviewer's read (or the existing queued/pending card).
+    Queued(String),
+    /// No reviewer in the session: the caller parks the card directly.
+    NoReviewer,
+    /// The reviewer (slug) is Stalled/Dead and not recently active: the caller
+    /// parks the card directly and says the review was skipped.
+    ReviewerDown(String),
+}
+
 /// What an agent's close surfaces once (0081): `card` is the user-facing recap
 /// on the close card; `detail` is the executor-facing material behind it (the
 /// staleness sweep's hit list, the open advisories) — empty when there is none.
@@ -1735,7 +1747,7 @@ impl SignalingBridge {
         agent: &str,
         recap_card: &str,
         recap_detail: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<CloseQueue> {
         let storage = self
             .storage
             .lock()
@@ -1743,8 +1755,17 @@ impl SignalingBridge {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
         let Some(reviewer) = self.queued_reviewer(session_id, agent).await else {
-            return Ok(None);
+            return Ok(CloseQueue::NoReviewer);
         };
+        // A reviewer that is Stalled/Dead and not recently active cannot take
+        // the read; waiting on its turn would leave the close stuck with no
+        // card for the user (EYES d95f95c7). Park directly, and say so.
+        let health = self.current_agent_health(session_id, &reviewer.slug);
+        let down = health.as_deref().is_some_and(|h| h.eq_ignore_ascii_case("stalled") || h.eq_ignore_ascii_case("dead"))
+            && !self.agent_rpc_recent(session_id, &reviewer.slug, findings::REVIEWER_LIVENESS_WINDOW);
+        if down {
+            return Ok(CloseQueue::ReviewerDown(reviewer.slug.clone()));
+        }
         let close_kind = crate::storage::QuestionKind::Close.as_str();
         if let Some(existing) = storage
             .queued_gates_for_session(session_id)
@@ -1753,7 +1774,7 @@ impl SignalingBridge {
             .chain(storage.tray_entries_for_session(session_id).await?.into_iter().filter(|r| r.status == "pending"))
             .find(|r| r.kind == close_kind)
         {
-            return Ok(Some(existing.choice_id));
+            return Ok(CloseQueue::Queued(existing.choice_id));
         }
         let choice_id = uuid::Uuid::new_v4().to_string();
         let question = crate::policy::secret_scan::redact_string(format!(
@@ -1789,7 +1810,7 @@ impl SignalingBridge {
         };
         storage.set_tray_body_row(&choice_id, row.message_id()).await?;
         self.summon_participant(session_id, reviewer.id).await;
-        Ok(Some(choice_id))
+        Ok(CloseQueue::Queued(choice_id))
     }
 
     /// Park an AGENT's close for the user's word (0081): a `close` card in the

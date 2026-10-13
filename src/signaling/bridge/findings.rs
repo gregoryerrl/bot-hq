@@ -106,7 +106,18 @@ impl SignalingBridge {
         // A REVISE (feedback #69; EYES cd098697): the executor is told once,
         // in the channel, that its publish is held and the two ways out —
         // `gate_status` says the same until it moves.
-        if let (FindingSeverity::Advisory, Some(gate)) = (severity, gate.as_deref().filter(|g| *g != "none")) {
+        // …never for a queued CLOSE card, which has no body to revise and is
+        // not held by an advisory (EYES d95f95c7).
+        let is_close = match gate.as_deref() {
+            Some(g) if g != "none" => storage
+                .get_tray_entry(g)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.kind == crate::storage::QuestionKind::Close.as_str()),
+            _ => false,
+        };
+        if let (FindingSeverity::Advisory, Some(gate), false) = (severity, gate.as_deref().filter(|g| *g != "none"), is_close) {
             let text = format!(
                 "⏸ Queued publish {} is HELD for a revision by advisory finding {} ({summary}). It will \
                  not park for the user on its own. Two ways out: change the body file and re-issue the \

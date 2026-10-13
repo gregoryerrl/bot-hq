@@ -1167,11 +1167,12 @@ async fn call_tool(
             // BEFORE the user sees the card. With a reviewer in the session the
             // close is queued for its read and parks after its turn; without
             // one it parks directly, as before.
-            if let Some(card) = bridge
+            let queued = bridge
                 .queue_close_card(&caller.session_id, &caller.agent, &recap.card, &recap.detail)
                 .await
-                .map_err(internal_err_no_prefix)?
-            {
+                .map_err(internal_err_no_prefix)?;
+            use crate::signaling::bridge::CloseQueue;
+            if let CloseQueue::Queued(card) = &queued {
                 return Ok(ToolCallResult::text(format!(
                     "close QUEUED for the reviewer's read (card {card}) — the recap is posted for \
                      them; after their turn the card parks for the user's approval on its own, or a \
@@ -1181,6 +1182,15 @@ async fn call_tool(
                     recap.card
                 )));
             }
+            // A reviewer that is down cannot read the recap (EYES d95f95c7):
+            // the card parks directly and the reply says the review was skipped.
+            let skipped = match &queued {
+                CloseQueue::ReviewerDown(slug) => format!(
+                    " The reviewer ({slug}) is stalled or dead and not recently active, so the \
+                     recap was NOT read before parking."
+                ),
+                _ => String::new(),
+            };
             let card = bridge
                 .park_close_card(&caller.session_id, &caller.agent, &recap.card)
                 .await
@@ -1188,7 +1198,7 @@ async fn call_tool(
             Ok(ToolCallResult::text(format!(
                 "close PARKED for the user's approval (card {card}) — the session closes on \
                  their Approve; on Reject a system row tells you to keep working, and their \
-                 answer text is the next instruction. No further close_session call is \
+                 answer text is the next instruction.{skipped} No further close_session call is \
                  needed. Recap on the card:\n{}{detail}",
                 recap.card
             )))
