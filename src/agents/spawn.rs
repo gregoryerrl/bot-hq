@@ -186,6 +186,12 @@ pub enum AgentEvent {
     /// background work (claude-code's interrupt cancels the process's
     /// background agents with the turn).
     BackgroundTasks { running: usize },
+    /// One API call's prompt size, mid-turn (B1e): the point-in-time `usage`
+    /// of a top-level `assistant` message, summed as the context numerator is.
+    /// Not speech and not a turn boundary; the pump compares it with the last
+    /// reported window and writes the handoff reminder's due file when a
+    /// context-row threshold is crossed inside a turn.
+    AssistantUsage { used_tokens: u64 },
     /// claude-code compacted the participant's context (`compact_boundary`):
     /// everything before is now a summary. Not speech and not a turn — it can
     /// arrive before a dealt turn's first event, in the middle of a turn, or in
@@ -1697,6 +1703,30 @@ fn shell_lint_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Valu
     }])
 }
 
+/// The mid-turn handoff reminder's `PreToolUse` entry (B1e), for BOTH
+/// postures and every tool (no matcher): `policy-check handoff-due` prints the
+/// participant's due file — written by its pump when a mid-turn reading
+/// crossed a context-row threshold — as `additionalContext`, or nothing. It is
+/// its own hook rather than a branch of the Tool Gate's allow path, so the one
+/// hook that decides permissions keeps printing nothing on allow, and the
+/// reminder also reaches a turn that never runs Bash. Exit 0 always; an older
+/// binary answers the unknown subcommand the same way.
+fn handoff_due_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Value {
+    let command = format!(
+        "\"{}\" policy-check handoff-due --data-dir \"{}\" --session \"{}\"",
+        exe.display(),
+        cfg.data_dir.display(),
+        cfg.session_id,
+    );
+    serde_json::json!({
+        "hooks": [{ "type": "command", "command": command, "timeout": HANDOFF_DUE_HOOK_TIMEOUT_SECS }],
+    })
+}
+
+/// How long claude-code waits for the `handoff-due` hook, in seconds: it
+/// reads one small file.
+pub const HANDOFF_DUE_HOOK_TIMEOUT_SECS: u64 = 5;
+
 fn build_command(cfg: &SpawnConfig) -> Command {
     let bin = cfg.claude_bin.as_deref().unwrap_or("claude");
     let mut cmd = Command::new(bin);
@@ -1835,12 +1865,16 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         let mut settings = serde_json::Map::new();
         match std::env::current_exe() {
             Ok(exe) => {
+                let mut pre_tool_use = shell_lint_hook(&exe, cfg);
+                if let Some(groups) = pre_tool_use.as_array_mut() {
+                    groups.push(handoff_due_hook(&exe, cfg));
+                }
                 settings.insert(
                     "hooks".into(),
                     serde_json::json!({
                         "SessionStart": compact_handoff_hook(&exe, cfg),
                         "PreCompact": pre_compact_hook(&exe, cfg),
-                        "PreToolUse": shell_lint_hook(&exe, cfg),
+                        "PreToolUse": pre_tool_use,
                     }),
                 );
             }
@@ -1888,10 +1922,13 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                 hook_cmd.push_str(&format!(" --session \"{}\"", cfg.session_id));
                 let mut settings = serde_json::json!({
                     "hooks": {
-                        "PreToolUse": [{
-                            "matcher": "Bash",
-                            "hooks": [{ "type": "command", "command": hook_cmd }],
-                        }],
+                        "PreToolUse": [
+                            {
+                                "matcher": "Bash",
+                                "hooks": [{ "type": "command", "command": hook_cmd }],
+                            },
+                            handoff_due_hook(&exe, cfg),
+                        ],
                         "SessionStart": compact_handoff_hook(&exe, cfg),
                         "PreCompact": pre_compact_hook(&exe, cfg),
                     }
@@ -3486,22 +3523,58 @@ mod tests {
         assert!(!s.to_string().contains("policy-check tool-gate"), "no Tool Gate hook on a read-only role: {s}");
     }
 
-    /// Feedback #96, filed by a reviewer: the read-only posture's ONE
-    /// PreToolUse entry is the shell lint, matched on Bash and bound to the
-    /// session — and the editing posture does not get it, because its Tool
-    /// Gate hook runs the same lint first.
+    /// Feedback #96, filed by a reviewer: the read-only posture's Bash-matched
+    /// PreToolUse entry is the shell lint, bound to the session — and the
+    /// editing posture does not get it, because its Tool Gate hook runs the
+    /// same lint first. The only other PreToolUse entry is the mid-turn
+    /// handoff reminder (B1e, below).
     #[test]
     fn a_read_only_role_gets_the_shell_lint_hook_and_nothing_else_before_a_tool() {
         let s = settings_arg_of(&eyes_cfg()).expect("--settings");
         let entries = s["hooks"]["PreToolUse"].as_array().expect("a PreToolUse list").clone();
-        assert_eq!(entries.len(), 1, "{s}");
+        assert_eq!(entries.len(), 2, "{s}");
         assert_eq!(entries[0]["matcher"], serde_json::json!("Bash"), "{s}");
         let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(command.contains("policy-check shell-lint"), "{command}");
         assert!(command.contains(&format!("--session \"{}\"", eyes_cfg().session_id)), "{command}");
+        assert!(entries[1]["hooks"][0]["command"].as_str().unwrap().contains("policy-check handoff-due"), "{s}");
 
         let hands = settings_arg_of(&cfg()).expect("--settings");
         assert!(!hands.to_string().contains("policy-check shell-lint"), "the Tool Gate hook lints instead: {hands}");
+    }
+
+    /// B1e: BOTH postures carry the mid-turn handoff reminder as its OWN
+    /// PreToolUse entry — no matcher (every tool, not only Bash), a short
+    /// timeout, bound to the session — and the Tool Gate / shell-lint entries
+    /// are untouched: the hook that decides permissions stays separate from
+    /// the one that only prints context. Deleting `handoff_due_hook` on either
+    /// branch turns its half red.
+    #[test]
+    fn both_postures_get_the_mid_turn_handoff_reminder_hook_apart_from_the_gate() {
+        for (who, c) in [("the edit-capable role", cfg()), ("the read-only role", eyes_cfg())] {
+            let s = settings_arg_of(&c).unwrap_or_else(|| panic!("{who} passes --settings"));
+            let entries = s["hooks"]["PreToolUse"].as_array().unwrap_or_else(|| panic!("{who}: {s}"));
+            let due: Vec<&serde_json::Value> = entries
+                .iter()
+                .filter(|e| e.to_string().contains("policy-check handoff-due"))
+                .collect();
+            assert_eq!(due.len(), 1, "{who}: one reminder entry: {s}");
+            assert!(due[0].get("matcher").is_none(), "{who}: every tool, not only Bash: {s}");
+            let hook = &due[0]["hooks"][0];
+            assert!(hook["command"].as_str().unwrap().contains(&format!("--session \"{}\"", c.session_id)), "{who}: {s}");
+            assert_eq!(hook["timeout"], serde_json::json!(HANDOFF_DUE_HOOK_TIMEOUT_SECS), "{who}: {s}");
+            // The permission-deciding entry is a different one, still Bash-matched.
+            let gate_or_lint: Vec<&serde_json::Value> = entries
+                .iter()
+                .filter(|e| {
+                    let t = e.to_string();
+                    t.contains("policy-check tool-gate") || t.contains("policy-check shell-lint")
+                })
+                .collect();
+            assert_eq!(gate_or_lint.len(), 1, "{who}: {s}");
+            assert_eq!(gate_or_lint[0]["matcher"], serde_json::json!("Bash"), "{who}: {s}");
+            assert!(!gate_or_lint[0].to_string().contains("handoff-due"), "{who}: separate entries: {s}");
+        }
     }
 
     /// Feedback #90: the CLI's "end git commit messages with" a co-author

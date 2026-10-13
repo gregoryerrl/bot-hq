@@ -302,6 +302,75 @@ pub struct UserWordsEntry {
     pub text: String,
 }
 
+// ---------------------------------------------------------------------------
+// The mid-turn reminder (B1e): `<participant>.due` beside the rendered file.
+//
+// The context rows reach a participant only at its NEXT turn, and 8 of 13
+// executor fills in s-33363011/s-93928780 compacted inside one turn with no
+// row first (EYES' count, s-079dec53). So when a reading taken mid-turn — each
+// top-level assistant message carries its prompt size — crosses a context-row
+// threshold, the pump writes this file, and the `handoff-due` PreToolUse hook
+// (every tool call, both postures) prints its text as `additionalContext` until
+// the participant writes its handoff doc, which removes the file
+// (`Storage::sync_handoff_file`). A compaction removes it too. The hook never
+// decides a permission: it prints context on the allow path or nothing.
+// ---------------------------------------------------------------------------
+
+/// The due file for one participant of one session, or `None` when either
+/// name is not a safe path segment.
+pub fn due_path(handoff_dir: &Path, session_id: &str, participant: &str) -> Option<PathBuf> {
+    (safe_segment(session_id) && safe_segment(participant))
+        .then(|| handoff_dir.join(session_id).join(format!("{participant}.due")))
+}
+
+/// Opens every due reminder, so a reader can tell it from any other context.
+pub const DUE_MARKER: &str = "[bot-hq] Your context is";
+
+/// The reminder's text for a reading of `used` of `window` tokens taken at
+/// `at` (RFC3339-Z): one paragraph, the figures, the doc's name, what to do.
+pub fn due_text(participant: &str, used: u64, window: u64, at: &str) -> String {
+    let slug = doc_slug(participant);
+    let pct = if window == 0 { 0 } else { used.saturating_mul(100) / window };
+    let point = crate::core::pump::compaction_point(window);
+    let left = match point.saturating_sub(used) {
+        0 => "at the point where claude-code compacts it".to_string(),
+        n => format!("about {} tokens before claude-code compacts it", crate::core::pump::group_thousands(n)),
+    };
+    format!(
+        "{DUE_MARKER} at {pct} % ({} of {} tokens) as of {at}, mid-turn — {left}. Rewrite your \
+         handoff doc `{slug}` NOW with session_doc_write (no phase): the user's standing \
+         instructions verbatim, what is done and verified, what is in flight and the next step, \
+         parked questions and gates by id. Then continue. This line repeats on every tool call \
+         until that doc is written; after the compaction it is what you get back.",
+        crate::core::pump::group_thousands(used),
+        crate::core::pump::group_thousands(window),
+    )
+}
+
+/// What the `handoff-due` hook prints: the reminder as a PreToolUse hook's
+/// `additionalContext` — and nothing else, in particular no
+/// `permissionDecision`, so the permission layer still decides the call
+/// (probed on CLI 2.1.291, s-42bf34b3: the context reached the model, and a
+/// `Bash(git commit:*)` deny under `dontAsk` still refused the call).
+pub fn due_hook_output(text: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": text,
+        }
+    })
+    .to_string()
+}
+
+/// Remove a due file; a missing one is fine.
+pub fn clear_due(path: &Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(?e, path = %path.display(), "removing a handoff due file");
+        }
+    }
+}
+
 /// The user-words file of one session, or `None` when the id is not a safe
 /// path segment.
 pub fn user_words_path(handoff_dir: &Path, session_id: &str) -> Option<PathBuf> {
@@ -430,6 +499,29 @@ pub fn injected_user_words(hook_output: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    /// B1e: the reminder's text names the figures, the doc and what to do; the
+    /// hook output is `additionalContext` alone — no permission decision; the
+    /// due path follows the rendered file's safety rules.
+    #[test]
+    fn the_due_reminder_is_context_only_and_names_the_doc() {
+        let text = super::due_text("hands", 910_000, 1_000_000, "2026-10-13T01:02:03.000Z");
+        assert!(text.starts_with("[bot-hq] Your context is at 91 % (910,000 of 1,000,000 tokens) as of 2026-10-13T01:02:03.000Z, mid-turn — about 57,000 tokens before claude-code compacts it."), "{text}");
+        assert!(text.contains("Rewrite your handoff doc `handoff-hands` NOW with session_doc_write (no phase)"), "{text}");
+        assert!(text.contains("repeats on every tool call until that doc is written"), "{text}");
+        let out = super::due_hook_output(&text);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], text);
+        assert!(v.get("decision").is_none() && v["hookSpecificOutput"].get("permissionDecision").is_none(), "never decides the call: {out}");
+        let dir = std::path::Path::new("/h");
+        assert_eq!(super::due_path(dir, "s-1", "hands"), Some(std::path::PathBuf::from("/h/s-1/hands.due")));
+        assert_eq!(super::due_path(dir, "../s-1", "hands"), None);
+        assert_eq!(super::due_path(dir, "s-1", "an agent"), None);
+        // At the compaction point the wording changes, and a zero window never divides.
+        assert!(super::due_text("eyes", 980_000, 1_000_000, "t").contains("at the point where claude-code compacts it"));
+        assert!(super::due_text("eyes", 5, 0, "t").starts_with("[bot-hq] Your context is at 0 %"));
+    }
+
     use super::*;
 
     #[test]

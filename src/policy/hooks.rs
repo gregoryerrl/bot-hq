@@ -157,6 +157,16 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         }
         "tool-gate" => run_tool_gate(&data_dir, project.as_deref(), sid),
         "shell-lint" => run_shell_lint(&data_dir, sid),
+        // B1e: the mid-turn handoff reminder, on EVERY tool call of both
+        // postures. Prints the due file's text as `additionalContext`, or
+        // nothing; always exit 0 and never a permission decision — the Tool
+        // Gate and the read-only deny list decide the call, not this.
+        "handoff-due" => {
+            if let Some(text) = handoff_due_text(&data_dir, sid, &hook_agent()) {
+                print!("{}", crate::agents::handoff::due_hook_output(&text));
+            }
+            Ok(0)
+        }
         "compact-handoff" => {
             if let Some(text) = compact_handoff_text(&data_dir, sid, &hook_agent(), chrono::Utc::now()) {
                 print!("{text}");
@@ -593,6 +603,19 @@ fn compact_handoff_text(
     // Stamped at print time — right after the compaction — so the age is the
     // gap between the doc's last write and the compaction.
     Some(crate::agents::handoff::stamp_age(&text, now))
+}
+
+/// What the `handoff-due` hook prints as context (B1e): the participant's due
+/// file, when the pump wrote one for a mid-turn reading and the participant
+/// has not written its handoff doc since. File reads only, like the other
+/// hooks; `None` — nothing printed — when there is no session id, the names
+/// are not path-safe, or there is no file.
+fn handoff_due_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+    let dir = crate::agents::handoff::dir_under(
+        &crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir,
+    );
+    let path = crate::agents::handoff::due_path(&dir, session_id?, agent)?;
+    std::fs::read_to_string(path).ok().filter(|t| !t.trim().is_empty())
 }
 
 /// What the `compact-user-words` hook prints: the user's own words of the
@@ -3274,6 +3297,33 @@ mod tests {
         // The subcommand itself exits 0 with or without a file.
         let args = |sid: &str| -> Vec<String> {
             ["compact-handoff", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        };
+        assert_eq!(run_cli(&args("s-1")).unwrap(), 0);
+        assert_eq!(run_cli(&args("s-none")).unwrap(), 0);
+    }
+
+    /// B1e: the `handoff-due` hook prints the due file as `additionalContext`
+    /// and nothing otherwise — exit 0 either way, never a permission decision.
+    #[test]
+    fn handoff_due_prints_the_reminder_as_context_and_nothing_without_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let local = crate::paths::Paths::for_data_dir(tmp.path().to_path_buf()).local_dir;
+        let dir = crate::agents::handoff::dir_under(&local);
+        assert_eq!(handoff_due_text(tmp.path(), Some("s-1"), "hands"), None);
+        let text = crate::agents::handoff::due_text("hands", 910_000, 1_000_000, "2026-10-13T01:00:00.000Z");
+        crate::agents::handoff::write_file(&crate::agents::handoff::due_path(&dir, "s-1", "hands").unwrap(), &text).unwrap();
+        assert_eq!(handoff_due_text(tmp.path(), Some("s-1"), "hands").as_deref(), Some(text.as_str()));
+        assert_eq!(handoff_due_text(tmp.path(), None, "hands"), None);
+        assert_eq!(handoff_due_text(tmp.path(), Some("s-1"), "eyes"), None, "another participant's turn");
+        assert_eq!(handoff_due_text(tmp.path(), Some("s-1"), "an agent"), None);
+        let out = crate::agents::handoff::due_hook_output(&text);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], text);
+        let args = |sid: &str| -> Vec<String> {
+            ["handoff-due", "--data-dir", tmp.path().to_str().unwrap(), "--session", sid]
                 .iter()
                 .map(|s| s.to_string())
                 .collect()

@@ -205,6 +205,11 @@ impl Storage {
         let Some(path) = crate::agents::handoff::file_path(dir, session_id, participant) else {
             return;
         };
+        // A write of the handoff doc is what the mid-turn reminder asked for
+        // (B1e): the due file goes, whatever reading wrote it.
+        if let Some(due) = crate::agents::handoff::due_path(dir, session_id, participant) {
+            crate::agents::handoff::clear_due(&due);
+        }
         let doc = match self.session_document_by_slug(session_id, slug).await {
             Ok(doc) => doc,
             Err(e) => {
@@ -219,6 +224,27 @@ impl Storage {
         );
         if let Err(e) = crate::agents::handoff::write_file(&path, &text) {
             tracing::warn!(?e, path = %path.display(), "writing a handoff file");
+        }
+    }
+
+    /// Write the mid-turn handoff reminder's due file for `participant`
+    /// (B1e, `agents::handoff::due_path`): the `handoff-due` hook prints
+    /// `text` on every tool call until the participant writes its handoff doc.
+    /// Best-effort, like the rendered file.
+    pub fn write_handoff_due(&self, session_id: &str, participant: &str, text: &str) {
+        let Some(dir) = self.handoff_dir.as_deref() else { return };
+        let Some(path) = crate::agents::handoff::due_path(dir, session_id, participant) else { return };
+        if let Err(e) = crate::agents::handoff::write_file(&path, text) {
+            tracing::warn!(?e, path = %path.display(), "writing a handoff due file");
+        }
+    }
+
+    /// Remove `participant`'s due file (B1e): its handoff doc was written, or
+    /// its context was compacted.
+    pub fn clear_handoff_due(&self, session_id: &str, participant: &str) {
+        let Some(dir) = self.handoff_dir.as_deref() else { return };
+        if let Some(path) = crate::agents::handoff::due_path(dir, session_id, participant) {
+            crate::agents::handoff::clear_due(&path);
         }
     }
 

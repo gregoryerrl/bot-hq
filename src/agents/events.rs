@@ -154,7 +154,13 @@ pub fn translate(
         StreamEvent::Assistant(asst) => {
             // Overwrite rather than accumulate: we want the LAST call's prompt
             // size, which is the turn's final context, not a running total.
+            // The same figure, mid-turn (B1e): each API call's prompt size is
+            // a reading the pump can act on before the turn ends.
+            let mut mid_turn = Vec::new();
             if let Some(u) = asst.message.usage.clone() {
+                if let Some(used) = used_tokens_of(&u) {
+                    mid_turn.push(AgentEvent::AssistantUsage { used_tokens: used });
+                }
                 *last_assistant_usage = Some(u);
             }
             // claude-code marks its OWN messages — an API error, a usage limit —
@@ -164,21 +170,16 @@ pub fn translate(
             // (feedback #17); a participant's own prose that merely starts
             // "API Error:" stays its speech.
             let synthetic = asst.message.model.as_deref() == Some(SYNTHETIC_MODEL);
-            asst.message
-            .content
-            .into_iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } if synthetic => Some(AgentEvent::Notice(text)),
-                ContentBlock::Text { text } => Some(AgentEvent::Text(text)),
-                ContentBlock::ToolUse { id, name, input } => Some(AgentEvent::ToolUse {
-                    id,
-                    name,
-                    input,
-                }),
-                ContentBlock::Thinking { .. } => None,
-                ContentBlock::Other => None,
-            })
-            .collect()
+            mid_turn
+                .into_iter()
+                .chain(asst.message.content.into_iter().filter_map(|block| match block {
+                    ContentBlock::Text { text } if synthetic => Some(AgentEvent::Notice(text)),
+                    ContentBlock::Text { text } => Some(AgentEvent::Text(text)),
+                    ContentBlock::ToolUse { id, name, input } => Some(AgentEvent::ToolUse { id, name, input }),
+                    ContentBlock::Thinking { .. } => None,
+                    ContentBlock::Other => None,
+                }))
+                .collect()
         }
         StreamEvent::User(u) => match u.message.content {
             UserContent::Blocks(blocks) => blocks
@@ -285,6 +286,19 @@ pub fn translate(
 /// — the primary conversation dominates its subagents — and take its window.
 /// Cumulative totals are the right signal for *which model is primary* even
 /// though they are the wrong signal for *how full it is*.
+/// The prompt size of one API call from its point-in-time `usage` object —
+/// `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`,
+/// the same numerator `parse_context_usage` reads at turn end — or `None`
+/// when none of the three is there.
+pub fn used_tokens_of(usage: &serde_json::Value) -> Option<u64> {
+    const FIELDS: [&str; 3] = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"];
+    let present = FIELDS.iter().filter_map(|k| usage.get(*k).and_then(serde_json::Value::as_u64)).collect::<Vec<_>>();
+    if present.is_empty() {
+        return None;
+    }
+    Some(present.into_iter().sum())
+}
+
 fn parse_context_usage(
     usage: Option<&serde_json::Value>,
     model_usage: &serde_json::Value,
@@ -612,12 +626,16 @@ mod tests {
         let own = parse(
             r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"text","text":"LAUNCHED"}],"usage":{"input_tokens":1000}}}"#,
         );
-        assert!(matches!(translate(own, &mut carry).as_slice(), [AgentEvent::Text(t)] if t == "LAUNCHED"));
+        // The mid-turn reading (B1e) leads the message's own events.
+        assert!(matches!(
+            translate(own, &mut carry).as_slice(),
+            [AgentEvent::AssistantUsage { used_tokens: 1000 }, AgentEvent::Text(t)] if t == "LAUNCHED"
+        ));
         assert_eq!(carry, Some(serde_json::json!({"input_tokens": 1000})));
         let helper_call = parse(
             r#"{"type":"assistant","parent_tool_use_id":"toolu_01PY","subagent_type":"general-purpose","message":{"id":"m2","content":[{"type":"text","text":"I'll start by reading the input file."},{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"echo hello-from-helper"}}],"usage":{"input_tokens":12825}}}"#,
         );
-        assert!(translate(helper_call, &mut carry).is_empty(), "a helper's text and call are not the parent's");
+        assert!(translate(helper_call, &mut carry).is_empty(), "a helper's text, call and reading are not the parent's");
         assert_eq!(
             carry,
             Some(serde_json::json!({"input_tokens": 1000})),
@@ -631,6 +649,29 @@ mod tests {
             r#"{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01PY","content":"Async agent launched successfully."}]}}"#,
         );
         assert!(matches!(translate(own_result, &mut carry).as_slice(), [AgentEvent::ToolResult { .. }]));
+    }
+
+    /// B1e: a top-level assistant message's `usage` becomes a mid-turn reading
+    /// — the three input fields summed, as the turn-end numerator is — before
+    /// the message's own events; a message without usage yields none, and the
+    /// carry for the turn-end report is unchanged by it.
+    #[test]
+    fn a_top_level_assistant_messages_usage_is_a_mid_turn_reading() {
+        let parse = |line: &str| -> StreamEvent { serde_json::from_str(line).unwrap() };
+        let mut carry = None;
+        let with_cache = parse(
+            r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}],"usage":{"input_tokens":1500,"cache_read_input_tokens":900000,"cache_creation_input_tokens":6000,"output_tokens":40}}}"#,
+        );
+        let events = translate(with_cache, &mut carry);
+        assert!(matches!(events.as_slice(), [AgentEvent::AssistantUsage { used_tokens: 907_500 }, AgentEvent::ToolUse { .. }]), "{events:?}");
+        assert_eq!(
+            carry.as_ref().and_then(used_tokens_of),
+            Some(907_500),
+            "the same numerator the turn-end report will read"
+        );
+        let without = parse(r#"{"type":"assistant","parent_tool_use_id":null,"message":{"id":"m2","content":[{"type":"text","text":"hi"}]}}"#);
+        assert!(matches!(translate(without, &mut carry).as_slice(), [AgentEvent::Text(_)]));
+        assert_eq!(used_tokens_of(&serde_json::json!({"output_tokens": 5})), None, "no input field: no reading");
     }
 
     /// claude-code's own count of the process's running background tasks, sent

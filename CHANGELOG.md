@@ -249,6 +249,17 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **An agent is reminded to write its handoff mid-turn, not only between
+  turns.** The context warnings were posted when a turn ended, so an agent
+  whose context filled inside one long turn — most of the executor's did, in
+  the two sessions measured — compacted without ever reading one. bot-hq now
+  reads each API call's prompt size as the turn runs; when it passes a warning
+  point and the agent's handoff document has not been written since, every
+  tool call the agent makes carries a one-paragraph `[bot-hq]` reminder with
+  the figures and the document's name, until the agent writes it. A
+  compaction clears the reminder. The reminder is context only — it never
+  allows or refuses a tool call; the Tool Gate and the reviewer's deny list
+  decide those exactly as before.
 - **A document an agent leaves for you to act on survives the session.** The
   end-of-day message, a time-tracker entry, a follow-up note — drafts you post
   under your own name — lived in session documents that were archived with the

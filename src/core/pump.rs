@@ -1155,6 +1155,14 @@ pub async fn pump_agent(
     // this pump has announced for the CURRENT fill of the window — a ratchet
     // that a compaction resets (see `context_threshold_notice`).
     let mut context_band_notified: u64 = 0;
+    // B1e — the mid-turn handoff reminder. `last_window` is the window the last
+    // `result` reported (a mid-turn reading carries none); `due_marked` holds
+    // the context-row thresholds whose crossing already wrote the due file
+    // this fill — one reminder per threshold per fill, nagged by the hook until
+    // the doc is written. A compaction, or a reading under half the first
+    // threshold, starts a new fill.
+    let mut last_window: Option<u64> = None;
+    let mut due_marked: Vec<u64> = Vec::new();
     // What bot-hq's post-compaction hook reported since the last compaction row
     // (`AgentEvent::HandoffInjected`): it precedes the boundary on the stream,
     // so it is held here until the `Compacted` it belongs to arrives.
@@ -1242,11 +1250,45 @@ pub async fn pump_agent(
             user_words_injected = Some(count);
             continue;
         }
+        // A mid-turn reading (B1e): compared with the last reported window;
+        // crossing a context-row threshold inside the turn writes the due file
+        // the `handoff-due` hook reads on every tool call. State, not speech.
+        if let AgentEvent::AssistantUsage { used_tokens } = event {
+            if let Some(window) = last_window {
+                let thresholds = context_row_thresholds(window);
+                if let Some(first) = thresholds.first() {
+                    if used_tokens < first / 2 {
+                        due_marked.clear();
+                    }
+                }
+                let newly: Vec<u64> = thresholds
+                    .iter()
+                    .copied()
+                    .filter(|t| *t <= used_tokens && !due_marked.contains(t))
+                    .collect();
+                if let Some(highest) = newly.iter().copied().max() {
+                    due_marked.extend(newly.iter().copied());
+                    let text = crate::agents::handoff::due_text(
+                        &cfg.slug,
+                        used_tokens,
+                        window,
+                        &crate::storage::now_utc(),
+                    );
+                    tracing::info!(agent = %cfg.slug, used_tokens, window, threshold = highest, "mid-turn context threshold crossed; handoff reminder due");
+                    storage.write_handoff_due(&cfg.session_id, &cfg.slug, &text);
+                }
+            }
+            continue;
+        }
         if let AgentEvent::Compacted { trigger, pre_tokens, post_tokens } = event {
             // The window was just emptied, so the next approach to the limit
             // is announced again (the hysteresis in `context_threshold_notice`
             // does the same from the next reading; this does not wait for one).
             context_band_notified = 0;
+            // …and the mid-turn reminder, if any, is moot: the doc was just
+            // put back (B1e).
+            due_marked.clear();
+            storage.clear_handoff_due(&cfg.session_id, &cfg.slug);
             let notice = compaction_notice(
                 &cfg.slug,
                 trigger.as_deref(),
@@ -1393,6 +1435,7 @@ pub async fn pump_agent(
         match event {
             // Handled before the turn logic, which they must never reach.
             AgentEvent::BackgroundTasks { .. }
+            | AgentEvent::AssistantUsage { .. }
             | AgentEvent::Compacted { .. }
             | AgentEvent::HandoffInjected { .. }
             | AgentEvent::UserWordsInjected { .. } => {}
@@ -1704,6 +1747,12 @@ pub async fn pump_agent(
                 // state announcement and never a per-turn nag. It ends with the
                 // state of the participant's handoff doc — the thing it gets
                 // back after the compaction this row says is near.
+                // The window the mid-turn readings are measured against (B1e).
+                if let Some(usage) = context.usable() {
+                    if usage.context_window > 0 {
+                        last_window = Some(usage.context_window);
+                    }
+                }
                 if let Some(mut notice) = context_threshold_notice(
                     &cfg.slug,
                     &context,
@@ -3927,6 +3976,66 @@ mod tests {
                 assert!(rows[0].ends_with("It has no handoff doc (`handoff-hands`)."), "got: {}", rows[0]);
             }
         }
+    }
+
+    /// B1e, the wire: a reading taken MID-TURN (an assistant message's usage)
+    /// that crosses a context-row threshold writes the participant's due file —
+    /// measured against the window the last `result` reported — once per
+    /// threshold per fill; a write of the handoff doc removes it; a compaction
+    /// removes it and re-arms; a reading with no reported window yet writes
+    /// nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_mid_turn_reading_past_a_threshold_leaves_a_due_file_until_the_handoff_doc_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (storage, state) = setup().await;
+        let storage = storage.with_handoff_dir(dir.path().to_path_buf());
+        let due = crate::agents::handoff::due_path(dir.path(), "s1", "hands").unwrap();
+        let (cfg, _ring_rx) = cfg_with_ring("hands");
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(16);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+        let usage = |used: u64| AgentEvent::AssistantUsage { used_tokens: used };
+        // No window reported yet: a huge reading cannot be placed, nothing is written.
+        ev_tx.send(usage(950_000)).await.unwrap();
+        // A turn ends with a reading: the window (1M) is now known.
+        ev_tx.send(turn_at(400_000)).await.unwrap();
+        // Mid-turn readings: under the first threshold (907,000) nothing; over it, the file.
+        ev_tx.send(usage(900_000)).await.unwrap();
+        ev_tx.send(usage(910_000)).await.unwrap();
+        // Wait for the pump to process: a later turn end is the sync point.
+        ev_tx.send(turn_at(910_000)).await.unwrap();
+        tokio::task::yield_now().await;
+        let settle = || async {
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        settle().await;
+        let text = std::fs::read_to_string(&due).expect("the due file was written");
+        assert!(text.starts_with(crate::agents::handoff::DUE_MARKER), "{text}");
+        assert!(text.contains("910,000 of 1,000,000 tokens") && text.contains("`handoff-hands`"), "{text}");
+        // The same threshold again: not rewritten (the mtime-free check: content unchanged after a doc write removed it).
+        storage.upsert_session_document("s1", "handoff-hands", "standing orders", None).await.unwrap();
+        assert!(!due.exists(), "writing the handoff doc removes the reminder");
+        ev_tx.send(usage(915_000)).await.unwrap();
+        ev_tx.send(turn_at(915_000)).await.unwrap();
+        settle().await;
+        assert!(!due.exists(), "one reminder per threshold per fill");
+        // The LAST threshold (947,000) is its own reminder.
+        ev_tx.send(usage(950_000)).await.unwrap();
+        ev_tx.send(turn_at(950_000)).await.unwrap();
+        settle().await;
+        assert!(due.exists(), "the last call is a second reminder");
+        // A compaction clears it and re-arms the fill.
+        ev_tx.send(AgentEvent::Compacted { trigger: Some("auto".into()), pre_tokens: Some(960_000), post_tokens: Some(20_000) }).await.unwrap();
+        settle().await;
+        assert!(!due.exists(), "a compaction removes the reminder");
+        ev_tx.send(usage(20_000)).await.unwrap();
+        ev_tx.send(usage(908_000)).await.unwrap();
+        ev_tx.send(turn_at(908_000)).await.unwrap();
+        settle().await;
+        assert!(due.exists(), "the next fill's crossing writes it again");
+        drop(ev_tx);
+        task.await.unwrap();
     }
 
     /// What the compaction row says, case by case — and that it stays a state

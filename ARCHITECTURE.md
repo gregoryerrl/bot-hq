@@ -583,6 +583,28 @@ mechanical (feedback #54 / #63 / #67 / #74 / #81):
   time, the doc for anything before it. The compaction row counts the messages
   put back.
 
+- **The mid-turn reminder (B1e).** The context rows are built from the
+  `result` event, so they reach a participant only at its NEXT turn — and 8 of
+  13 executor fills in two sessions compacted inside one turn with no row
+  first (EYES' count, s-079dec53). Every top-level `assistant` message carries
+  its API call's prompt size, which `translate` now emits as
+  `AgentEvent::AssistantUsage` (`events::used_tokens_of`, the turn-end
+  numerator's sum). The pump measures it against the window the last `result`
+  reported; when it crosses a `context_row_thresholds` value not yet marked
+  this fill, it writes `<data_dir>/.local/handoffs/<session>/<participant>.due`
+  (`handoff::due_text`: the figures, the doc's name, what to do). A third
+  PreToolUse hook on BOTH postures and every tool (no matcher) — `bot-hq
+  policy-check handoff-due`, its own entry, never a branch of the Tool Gate's
+  allow path — prints that file as `hookSpecificOutput.additionalContext` and
+  nothing else, exit 0 (probed on CLI 2.1.291, s-42bf34b3: the context reached
+  the model in `-p` stream-json, and a `Bash(git commit:*)` deny under
+  `dontAsk` still refused the call beside it). So the participant reads the
+  reminder on its next tool call, mid-turn, and keeps reading it until it
+  writes the doc: `Storage::sync_handoff_file` — the one choke point every
+  handoff-doc write passes — removes the file. A compaction removes it and
+  re-arms the fill; so does a reading under half the first threshold. One
+  reminder per threshold per fill (the first row and the last call).
+
 The hooks fail open: with no file they print nothing and exit 0. The files are
 rendered at spawn too (the doc's as "you have no handoff doc" until one is
 written) and removed when the session closes.
