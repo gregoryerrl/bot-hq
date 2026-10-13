@@ -352,6 +352,15 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub urgent_reason: Option<String>,
+    /// The run window (0098, feedback #66a): an Approve before `run_not_before`
+    /// schedules the run for then; after `run_not_after` the command is
+    /// refused. RFC3339-Z; NULL = runs at approval.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub run_not_before: Option<String>,
+    #[serde(default)]
+    #[sqlx(default)]
+    pub run_not_after: Option<String>,
 }
 
 impl SessionTrayEntry {

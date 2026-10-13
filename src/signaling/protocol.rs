@@ -439,6 +439,14 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "urgent_reason": {
                         "type": "string",
                         "description": "Only for a live incident: why the user must see this gate NOW (one line, ≤200 chars). Parks the command like require_approval; the user is notified at once even with bot-hq focused and again every 10 min until they answer (6 at most), and the session tile turns red. The mark and your reason are on the record."
+                    },
+                    "run_not_after": {
+                        "type": "string",
+                        "description": "A RUN WINDOW's end, RFC3339 UTC (e.g. 2026-10-13T01:24:00Z), at most 24 h ahead. The command parks; the user approves any time; after this it is refused. Give it when the command may run only in a slot (a deploy window)."
+                    },
+                    "run_not_before": {
+                        "type": "string",
+                        "description": "The window's start (needs run_not_after). An Approve before it schedules the run for then — bot-hq runs the command unattended, the output arrives as a [system] row, and the user has a Cancel until it runs."
                     }
                 },
                 "required": []
@@ -1225,7 +1233,15 @@ mod tests {
     /// (`check_open_findings` lists advisories) and #102 (`session_doc_write`
     /// refuses a stale replace) add to both sets after it. The ceilings leave
     /// those sentences room, not a tool.
-    const HANDS_ALWAYS_LOADED_BUDGET: usize = 26_500;
+    ///
+    /// Raised a third time, 2026-10-13 (s-42bf34b3), for the two gate features
+    /// the user picked from the same queue after that sizing: `urgent_reason`
+    /// (feedback #52 — a gate that notifies the user at once and repeats) and
+    /// the run window `run_not_before` / `run_not_after` (feedback #66a — a
+    /// command that runs inside a deploy slot, unattended). Three parameters
+    /// on one tool, 26,377 → ~26,900 bytes of the executor's set; the ceiling
+    /// again leaves a sentence, not a tool.
+    const HANDS_ALWAYS_LOADED_BUDGET: usize = 27_200;
     const EYES_ALWAYS_LOADED_BUDGET: usize = 17_500;
 
 

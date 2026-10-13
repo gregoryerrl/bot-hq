@@ -23,6 +23,11 @@ export type TrayRow = {
   /** Why the parking agent marked a gate URGENT (feedback #52); absent or
    *  null on an ordinary row. The card shows it in red. */
   urgent_reason?: string | null;
+  /** The run window (feedback #66a) and whether the approved command still
+   *  waits for it to open — the scheduled strip shows those with a Cancel. */
+  run_not_before?: string | null;
+  run_not_after?: string | null;
+  scheduled?: boolean;
 };
 
 /**

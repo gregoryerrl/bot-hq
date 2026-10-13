@@ -135,6 +135,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         tray::discard_choice,
         tray::list_session_tray,
         tray::list_pending_tray,
+        tray::cancel_scheduled_gate,
         // Workspace file preview (full-screen viewer)
         files::read_workspace_file,
         files::save_pasted_file,

@@ -25,6 +25,7 @@ import {
 import { useTrayStaging, stagedFor } from "../stores/trayStaging";
 import { picksDiffer, stagedKey } from "../lib/staging";
 import { ApprovalGate } from "../components/ApprovalGate";
+import { ScheduledRuns } from "../components/ScheduledRuns";
 import { ChatPane } from "../components/ChatPane";
 import { DocumentPane } from "../components/DocumentPane";
 import { type Phase } from "../components/PhasePill";
@@ -960,6 +961,19 @@ export function SessionView() {
               <ClosedSessionBar sessionId={sessionId} closedAt={closedAt} />
             ) : (
             <>
+            {/* Feedback #66a: approved commands waiting for their run window,
+                each with the user's Cancel. */}
+            <ScheduledRuns
+              rows={trayRows}
+              label={(agent) => authorLabel(agent, labels)}
+              hues={hues}
+              onCancel={async (choiceId) => {
+                await invoke("cancel_scheduled_gate", { choiceId });
+                await queryClient.invalidateQueries({
+                  queryKey: ["list_session_tray", { sessionId }],
+                });
+              }}
+            />
             {/* rc3 D30: the halt sits ABOVE the box that answers it. */}
             <HaltBanner
               halt={sessionHalt}

@@ -1261,6 +1261,28 @@ runs in four places:
 - `action_gate`, before it parks or runs, under `gate_shell`;
 - `terminal_exec`, under the terminal's `$SHELL`.
 
+**A run window lets the user approve any time while the command waits for its
+slot** (feedback #66a, the user's pick). `action_gate`'s `run_not_after`
+(required; RFC3339, at most `RUN_WINDOW_MAX_AHEAD_SECS` = 24 h ahead) and
+`run_not_before` (`validate_run_window`) park the command whatever the keyword
+list says; `card_extra` puts the window on the card and `record_run_window`
+writes it to the row (`session_tray.run_not_before` / `run_not_after`, 0098)
+once the park produced a fresh gate. At approval `maybe_run_gated` reads the
+window: closed → `refuse_approved_run` ("the run window closed at …"); not yet
+open → the approval row carries only the promise ("Scheduled: … runs it then"),
+a `⏱` notice is posted, and the row stays answered with no result and no
+refusal — `is_scheduled` (`bridge/tray.rs`), the one predicate the tray view's
+`scheduled` flag, the Cancel and `gate_status` ("approved, SCHEDULED") share.
+`spawn_scheduled_gate_runner` (started by `main.rs` after storage is wired)
+calls `run_due_scheduled_gates` every `SCHEDULED_GATE_TICK` (10 s):
+`due_scheduled_gates` reads the approved windowed rows whose start has come,
+each runs through the same `maybe_run_gated` (`deferred`, so the start is not
+re-checked while the end is), its output lands as a `[system]` row linked by
+`set_tray_run_result`, and `ChoiceResolved` refreshes the UI. No in-memory
+timer, so a relaunch re-arms nothing. `cancel_scheduled_gate` (the tauri
+command behind the Cancel on the `ScheduledRuns` strip) records a
+`run_refusal` the scheduler skips, with an audit record and a `⛔` row.
+
 **An URGENT gate reaches the user instead of waiting to be noticed** (feedback
 #52; the user's pick was the desktop tier — no phone push). `action_gate`'s
 `urgent_reason` (one line, at most 200 characters; `validate_urgent_reason`)

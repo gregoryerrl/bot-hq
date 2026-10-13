@@ -249,6 +249,21 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **Approve a command any time; it runs inside its window.** Some commands may
+  run only in a slot — a production merge in the six minutes a deploy cannot
+  hurt anything — and until now the agent waited for the slot in a shell loop,
+  parked the gate as it opened, and your approval raced the clock (on
+  2026-10-01 a merge approved one minute late was refused and waited another
+  hour). An agent can now park a command with a run window
+  (`action_gate(run_not_before, run_not_after)`; the end is required and at
+  most 24 hours ahead). The card shows the window; you approve whenever you
+  see it. Approved before the window opens, the command is scheduled: a
+  "⏱ Scheduled" line above the input shows when it runs, in how long, with a
+  Cancel that takes the approval back, and bot-hq runs it at the start,
+  unattended, posting the output as a `[system]` row linked to the gate.
+  Approved inside the window it runs at once; after the window closes it is
+  refused and says so. A relaunch loses nothing — the due runs are read from
+  the table. `gate_status` reports "scheduled" until the run.
 - **An urgent gate finds you instead of waiting to be noticed.** On 2026-10-01
   an agent parked the cancel and the rollback for a job overrunning a shared
   API budget at 06:23Z; you approved them at 08:18Z, because nothing told you

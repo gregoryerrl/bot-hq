@@ -70,6 +70,23 @@ fn executable_command(ctx: &super::ApprovalContext) -> Option<String> {
 /// Stated in the OOB row that carries the output.
 const PUSH_RERUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How often the scheduler looks for a windowed gate whose start has come
+/// (feedback #66a). The motivating windows are six minutes long; a run lands
+/// within this of its start.
+pub const SCHEDULED_GATE_TICK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// An approved, windowed gate the scheduler still owes a run: no result row,
+/// no refusal (a cancel is one), a start recorded. The tray view and the
+/// Cancel read the same predicate.
+pub fn is_scheduled(row: &crate::storage::SessionTrayEntry) -> bool {
+    row.status == "answered"
+        && matches!(gate_verdict(row.picked_option.as_deref().unwrap_or("")), crate::policy::ViolationOutcome::Approved)
+        && row.command_text.is_some()
+        && row.run_not_before.is_some()
+        && row.result_row_id.is_none()
+        && row.run_refusal.is_none()
+}
+
 /// The longest one wait of a temporary halt's timer runs before it re-reads
 /// the wall clock and the halt slot (see `arm_temporary_halt`).
 pub const HALT_WAIT_CHUNK: std::time::Duration = std::time::Duration::from_secs(60);
@@ -1278,7 +1295,7 @@ impl SignalingBridge {
             // claude-code's transcript.
             let mut run = String::new();
             gate_run = self
-                .maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut run)
+                .maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut run, false)
                 .await;
             body.push_str(&redact(&run));
         }
@@ -1479,6 +1496,7 @@ impl SignalingBridge {
         command: Option<&str>,
         picked: &str,
         body: &mut String,
+        deferred: bool,
     ) -> Option<GateRan> {
         let command = command?;
         // Only the LISTED Approve runs a parked command (`gate_verdict`): the
@@ -1493,6 +1511,61 @@ impl SignalingBridge {
             Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
             None => None,
         };
+        // The run window (0098, feedback #66a): closed → refused; not yet open
+        // → the run is SCHEDULED for its start (the scheduler calls back here
+        // with `deferred`), and this approval delivers only the promise.
+        if let Some(r) = row.as_ref() {
+            let now = crate::storage::now_utc();
+            if let Some(not_after) = r.run_not_after.as_deref() {
+                if now.as_str() > not_after {
+                    let refusal = format!(
+                        "NOT RUN: the run window closed at {} UTC (now {}), so bot-hq refused to run \
+                         it. Re-issue the command with a new window if it is still wanted.",
+                        super::action_gate::window_time(not_after),
+                        super::action_gate::window_time(&now)
+                    );
+                    self.refuse_approved_run(
+                        session_id,
+                        choice_id,
+                        command,
+                        row.as_ref(),
+                        body,
+                        &refusal,
+                        &format!("the run window closed at {not_after}"),
+                        "approved but NOT RUN: the run window had closed",
+                    )
+                    .await;
+                    return None;
+                }
+            }
+            if let (false, Some(not_before)) = (deferred, r.run_not_before.as_deref()) {
+                if now.as_str() < not_before {
+                    body.push_str(&format!(
+                        "Scheduled: the run window opens at {} UTC, so bot-hq runs `{command}` then, \
+                         unattended, unless the user cancels it from the Tray tab first. The output \
+                         arrives as its own row when it runs; gate_status says \"scheduled\" until then.",
+                        super::action_gate::window_time(not_before)
+                    ));
+                    if let Some(storage) = self.storage.lock().await.clone() {
+                        let _ = crate::core::post_system_notice(
+                            &storage,
+                            Some(self),
+                            session_id,
+                            MessageKind::SystemNotice,
+                            format!(
+                                "⏱ Gate {} approved — scheduled to run at {} UTC (window closes {}): `{command}`",
+                                &choice_id[..choice_id.len().min(8)],
+                                super::action_gate::window_time(not_before),
+                                r.run_not_after.as_deref().map(super::action_gate::window_time).unwrap_or_default()
+                            ),
+                            None,
+                        )
+                        .await;
+                    }
+                    return None;
+                }
+            }
+        }
         let push_rerun = crate::policy::push_rerun_refspecs(command);
         let limit = if push_rerun.is_some() {
             PUSH_RERUN_TIMEOUT
@@ -1711,6 +1784,144 @@ impl SignalingBridge {
                 ran(None)
             }
         })
+    }
+
+    /// Run every scheduled gate whose window has opened (feedback #66a): the
+    /// approved, windowed rows with no result and no refusal whose
+    /// `run_not_before` is at or before now. Each runs through the same
+    /// `maybe_run_gated` an approval does (body hashes, pins, the window's end),
+    /// its output lands as a `[system]` row linked to the gate, and the UI is
+    /// told. Returns how many ran (or were refused). Called by the scheduler
+    /// loop every [`SCHEDULED_GATE_TICK`] and directly by tests.
+    pub async fn run_due_scheduled_gates(&self) -> usize {
+        let Some(storage) = self.storage.lock().await.clone() else { return 0 };
+        let now = crate::storage::now_utc();
+        let due = match storage.due_scheduled_gates(&now).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "the due scheduled gates could not be read");
+                return 0;
+            }
+        };
+        let mut ran = 0usize;
+        for row in due {
+            let Some(command) = row.command_text.clone() else { continue };
+            let id8: String = row.choice_id.chars().take(8).collect();
+            let mut body = format!(
+                "⏱ Scheduled gate {id8} ran at {} UTC — approved by the user at {} for the window {} – {}: \
+                 `{}`\n",
+                super::action_gate::window_time(&now),
+                row.answered_at.as_deref().map(super::action_gate::window_time).unwrap_or_default(),
+                row.run_not_before.as_deref().map(super::action_gate::window_time).unwrap_or_default(),
+                row.run_not_after.as_deref().map(super::action_gate::window_time).unwrap_or_default(),
+                crate::policy::secret_scan::redact(&command)
+            );
+            let mut run = String::new();
+            let outcome = self
+                .maybe_run_gated(&row.session_id, &row.choice_id, Some(&command), "Approve", &mut run, true)
+                .await;
+            body.push_str(&crate::policy::secret_scan::redact(&run));
+            let receipt = crate::core::post_system_notice(
+                &storage,
+                Some(self),
+                &row.session_id,
+                MessageKind::Text,
+                body,
+                None,
+            )
+            .await;
+            if let Some(gate_ran) = outcome {
+                if let Err(e) = storage
+                    .set_tray_run_result(
+                        &row.choice_id,
+                        receipt.as_ref().map(|r| r.message_id()),
+                        gate_ran.exit_code,
+                        gate_ran.ran_ms,
+                    )
+                    .await
+                {
+                    tracing::warn!(?e, choice_id = %row.choice_id, "could not record the scheduled gate's run result");
+                }
+            }
+            // The tray tab and the scheduled strip refetch on this.
+            let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+                choice_id: row.choice_id.clone(),
+                picked: "Approve".to_string(),
+            });
+            ran += 1;
+        }
+        ran
+    }
+
+    /// The scheduler loop (feedback #66a): every [`SCHEDULED_GATE_TICK`] run
+    /// what is due. Holds a `Weak`, so it ends with the bridge. Started once by
+    /// `main.rs` after storage is wired; a restart needs no re-arm — the due
+    /// rows are read from the table.
+    pub fn spawn_scheduled_gate_runner(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(SCHEDULED_GATE_TICK).await;
+                let Some(bridge) = weak.upgrade() else { break };
+                bridge.run_due_scheduled_gates().await;
+            }
+        });
+    }
+
+    /// The user's Cancel on a scheduled gate (feedback #66a): an approved,
+    /// windowed command that has not run yet is marked refused — the scheduler
+    /// skips it — with a channel row saying so. Errs when the gate is not
+    /// scheduled (already ran, refused, cancelled, or never windowed).
+    pub async fn cancel_scheduled_gate(&self, choice_id: &str) -> Result<String> {
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+        let row = storage
+            .get_tray_entry(choice_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no gate {choice_id}"))?;
+        if !is_scheduled(&row) {
+            anyhow::bail!("gate {choice_id} is not scheduled (it ran, was refused, or has no run window)");
+        }
+        let command = row.command_text.clone().unwrap_or_default();
+        let now = crate::storage::now_utc();
+        let short = format!("cancelled by the user at {} before the scheduled run", super::action_gate::window_time(&now));
+        storage.set_tray_run_refusal(choice_id, &short).await?;
+        if let Some(log) = self.violations.as_ref() {
+            let _ = log
+                .record(
+                    row.session_id.clone(),
+                    row.agent.clone(),
+                    crate::policy::ViolationKind::ToolBlocklist,
+                    command.clone(),
+                    crate::policy::ViolationOutcome::Denied,
+                    Some("approved, then cancelled by the user before the scheduled run".into()),
+                )
+                .await;
+        }
+        let id8: String = choice_id.chars().take(8).collect();
+        let _ = crate::core::post_system_notice(
+            &storage,
+            Some(self),
+            &row.session_id,
+            MessageKind::SystemNotice,
+            format!(
+                "⛔ Scheduled gate {id8} was cancelled by the user before it ran (it was due at {} UTC); it \
+                 will not run: `{}`",
+                row.run_not_before.as_deref().map(super::action_gate::window_time).unwrap_or_default(),
+                crate::policy::secret_scan::redact(&command)
+            ),
+            None,
+        )
+        .await;
+        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+            choice_id: choice_id.to_string(),
+            picked: "Approve".to_string(),
+        });
+        Ok(format!("scheduled gate {id8} cancelled; it will not run"))
     }
 
     /// Refuse an APPROVED gate at run time: the refusal in its result row,

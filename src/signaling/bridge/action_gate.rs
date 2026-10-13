@@ -56,6 +56,69 @@ pub struct GateRequest {
     /// once — even while bot-hq is focused — and again every ten minutes until
     /// they answer; the session's tile turns red.
     pub urgent_reason: Option<String>,
+    /// The run window (feedback #66a), validated by the caller
+    /// ([`validate_run_window`]): the user approves whenever they see the card;
+    /// an Approve before `not_before` schedules the run for then, unattended,
+    /// and after `not_after` the command is refused.
+    pub run_window: Option<RunWindow>,
+}
+
+/// A gated command's run window — RFC3339-Z stamps, as the row stores them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunWindow {
+    pub not_before: String,
+    pub not_after: String,
+}
+
+/// The furthest ahead a run window may end: the user's bound (feedback #66a).
+pub const RUN_WINDOW_MAX_AHEAD_SECS: i64 = 24 * 3600;
+
+/// A run window from the agent's stamps, checked against `now`: both RFC3339
+/// (any offset; stored as UTC), the end required and after the start, after
+/// `now`, and at most [`RUN_WINDOW_MAX_AHEAD_SECS`] ahead; a missing start is
+/// `now` (approve and it runs, until the end).
+pub fn validate_run_window(
+    now: chrono::DateTime<chrono::Utc>,
+    not_before: Option<&str>,
+    not_after: &str,
+) -> Result<RunWindow> {
+    let parse = |name: &str, s: &str| -> Result<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(s.trim())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .map_err(|e| anyhow::anyhow!("{name} must be an RFC3339 time such as 2026-10-13T01:18:00Z (got `{s}`: {e})"))
+    };
+    let end = parse("run_not_after", not_after)?;
+    let start = match not_before {
+        Some(s) => parse("run_not_before", s)?,
+        None => now,
+    };
+    if end <= now {
+        anyhow::bail!(
+            "run_not_after {} is already past (now {}) — the window has closed; nothing was parked",
+            end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+    }
+    if end <= start {
+        anyhow::bail!("run_not_after must be after run_not_before");
+    }
+    if (end - now).num_seconds() > RUN_WINDOW_MAX_AHEAD_SECS {
+        anyhow::bail!(
+            "run_not_after may be at most 24 h ahead (it is {:.1} h ahead) — the user's bound on an \
+             unattended run",
+            (end - now).num_seconds() as f64 / 3600.0
+        );
+    }
+    let fmt = |t: chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    Ok(RunWindow { not_before: fmt(start), not_after: fmt(end) })
+}
+
+/// `2026-10-13T01:18:00.000Z` → `01:18Z (Oct 13)` for a card or a row.
+pub(super) fn window_time(stamp: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(stamp) {
+        Ok(t) => t.with_timezone(&chrono::Utc).format("%H:%MZ (%b %-d)").to_string(),
+        Err(_) => stamp.to_string(),
+    }
 }
 
 /// The most characters an urgent gate's reason may have — it is a
@@ -231,13 +294,14 @@ impl SignalingBridge {
         let listed = self.data_read_in(&session_id, &command).await.is_some();
         // An URGENT gate parks whatever the list says (feedback #52): a command
         // that must reach the user NOW is one they must see before it runs.
-        if req.require_approval || listed || req.urgent_reason.is_some() {
+        if req.require_approval || listed || req.urgent_reason.is_some() || req.run_window.is_some() {
             let outcome = self
-                .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
+                .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref(), req.run_window.as_ref())
                 .await?;
             let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
             let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref()).await;
-            return Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound) + &urgency);
+            let window = self.record_run_window(&outcome, req.run_window.as_ref()).await;
+            return Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound) + &urgency + &window);
         }
         // Two-tier resolve (session snapshot → global fallback) — previously
         // this read only the global list, so a gear-tab session override was
@@ -256,7 +320,7 @@ impl SignalingBridge {
                 .map(|run| run.text + &request_extras(&req, requested)),
             Some(GateMode::Gate) => {
                 let outcome = self
-                    .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref())
+                    .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref(), None)
                     .await?;
                 let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
                 let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref()).await;
@@ -298,6 +362,38 @@ impl SignalingBridge {
             }
         }
         Bound::Requested(secs)
+    }
+
+    /// Record the run window on the gate the park produced (0098, feedback
+    /// #66a) and say what follows. An identical re-issue returns the existing
+    /// gate, whose window (or lack of one) stands.
+    async fn record_run_window(&self, outcome: &ParkOutcome, window: Option<&RunWindow>) -> String {
+        let Some(window) = window else { return String::new() };
+        let (gate_id, existing) = match outcome {
+            ParkOutcome::Parked { gate_id, existing, .. } | ParkOutcome::Queued { gate_id, existing } => {
+                (gate_id, *existing)
+            }
+        };
+        if existing {
+            return "\nThe existing gate stands as it was parked; this call's run window does not change it."
+                .to_string();
+        }
+        let Some(storage) = self.storage.lock().await.clone() else { return String::new() };
+        match storage.set_tray_run_window(gate_id, &window.not_before, &window.not_after).await {
+            Ok(true) => format!(
+                "\nRun window: {} – {} UTC. The user may approve any time; an Approve before the window \
+                 opens schedules the run for {} (unattended, with a Cancel on their Tray tab until then), \
+                 and after it closes the command is refused. The output arrives as its own row when it runs.",
+                window_time(&window.not_before),
+                window_time(&window.not_after),
+                window_time(&window.not_before)
+            ),
+            Ok(false) => "\n⚠ The gate was answered before its run window could be recorded.".to_string(),
+            Err(e) => {
+                tracing::warn!(gate_id = %gate_id, error = %e, "the gate's run window was not recorded");
+                "\n⚠ The run window could not be recorded; the gate runs at approval.".to_string()
+            }
+        }
     }
 
     /// Mark the gate the park produced URGENT (0097, feedback #52) and say what
@@ -488,7 +584,7 @@ impl SignalingBridge {
         }
         let reviewer = self.session_reviewers(&session_id).iter().any(|slug| slug == &agent);
         let outcome = self
-            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer, None)
+            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer, None, None)
             .await?;
         Ok(park_outcome_text(&outcome, &command))
     }
@@ -513,24 +609,27 @@ impl SignalingBridge {
         agent: &str,
         command: &str,
     ) -> Result<ParkOutcome> {
-        self.park_gated_command_with(session_id, agent, command, None).await
+        self.park_gated_command_with(session_id, agent, command, None, None).await
     }
 
-    /// [`Self::park_gated_command`] with the card's "approve only after" line.
-    /// A command that runs one of the project's listed data reads (group K)
-    /// is reviewed first like an outward publish, by `data_read_review`.
+    /// [`Self::park_gated_command`] with the card's "approve only after" line
+    /// and its run window (feedback #66a). A command that runs one of the
+    /// project's listed data reads (group K) is reviewed first like an outward
+    /// publish, by `data_read_review`.
     pub(crate) async fn park_gated_command_with(
         &self,
         session_id: &str,
         agent: &str,
         command: &str,
         approve_after: Option<&str>,
+        window: Option<&RunWindow>,
     ) -> Result<ParkOutcome> {
-        self.park_gated_command_as(session_id, agent, command, approve_after, false, None).await
+        self.park_gated_command_as(session_id, agent, command, approve_after, false, None, window).await
     }
 
     /// The park, with whose read a listed command is: `reviewer_read` is the
     /// reviewer's own (`read_gate`), whose card says so (EYES).
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn park_gated_command_as(
         &self,
         session_id: &str,
@@ -539,11 +638,12 @@ impl SignalingBridge {
         approve_after: Option<&str>,
         reviewer_read: bool,
         prod_read_card: Option<&str>,
+        window: Option<&RunWindow>,
     ) -> Result<ParkOutcome> {
         let listed = self.data_read_in(session_id, command).await;
         let reader = reviewer_read.then_some(agent);
         let scripts = self.script_pins(session_id, command).await;
-        let mut card_extra = card_extra(command, scripts, listed.as_ref(), approve_after, reader);
+        let mut card_extra = card_extra(command, scripts, listed.as_ref(), approve_after, reader, window);
         if let Some(card) = prod_read_card {
             card_extra = format!("\n\n{card}{card_extra}");
         }
@@ -800,6 +900,12 @@ impl SignalingBridge {
                 if let Some(refusal) = row.run_refusal.as_deref() {
                     return format!("approved but NOT RUN ({refusal})");
                 }
+                if super::tray::is_scheduled(row) {
+                    return format!(
+                        "approved, scheduled for {}",
+                        row.run_not_before.as_deref().map(window_time).unwrap_or_default()
+                    );
+                }
                 if self.gate_run_info(&row.session_id, &row.choice_id).is_some() {
                     return "approved, RUNNING".to_string();
                 }
@@ -893,9 +999,11 @@ impl SignalingBridge {
                 Some(secs) => format!("; run bounded at {secs} s"),
                 None => String::new(),
             },
-            match row.urgent_reason.as_deref() {
-                Some(reason) => format!("; URGENT: {reason}"),
-                None => String::new(),
+            match (row.urgent_reason.as_deref(), row.run_not_before.as_deref(), row.run_not_after.as_deref()) {
+                (Some(reason), Some(nb), Some(na)) => format!("; URGENT: {reason}; run window {} – {} UTC", window_time(nb), window_time(na)),
+                (Some(reason), _, _) => format!("; URGENT: {reason}"),
+                (None, Some(nb), Some(na)) => format!("; run window {} – {} UTC", window_time(nb), window_time(na)),
+                _ => String::new(),
             }
         );
         let command = &*super::util::command_excerpt(full_command);
@@ -941,6 +1049,16 @@ impl SignalingBridge {
                          and nothing was published. Re-issue the command; the reviewer reads \
                          the current body first."
                     )
+                } else if approved && super::tray::is_scheduled(&row) {
+                    // Feedback #66a: approved before its window opened.
+                    format!(
+                        "approved, SCHEDULED — bot-hq runs `{command}` at {} UTC (now {}), unattended, \
+                         unless the user cancels it from the Tray tab first; the window closes {}. The \
+                         output arrives as a [system] row when it runs. Do not re-run it.",
+                        row.run_not_before.as_deref().map(window_time).unwrap_or_default(),
+                        window_time(&crate::storage::now_utc()),
+                        row.run_not_after.as_deref().map(window_time).unwrap_or_default()
+                    )
                 } else if let (true, Some(run)) =
                     (approved, self.gate_run_info(&row.session_id, &row.choice_id))
                 {
@@ -977,7 +1095,8 @@ impl SignalingBridge {
                                  its output."
                             .to_string(),
                     };
-                    format!("approved — bot-hq executed `{command}` at approval time.{ran} Do not re-run it.{output}")
+                    let when = if row.run_not_before.is_some() { "at its scheduled time" } else { "at approval time" };
+                    format!("approved — bot-hq executed `{command}` {when}.{ran} Do not re-run it.{output}")
                 } else {
                     format!(
                         "rejected — `{command}` was NOT run. User's answer: \"{picked}\". \
@@ -1366,8 +1485,21 @@ fn card_extra(
     listed: Option<&crate::policy::data_reads::DataRead>,
     approve_after: Option<&str>,
     reviewer: Option<&str>,
+    window: Option<&RunWindow>,
 ) -> String {
     let mut out = String::new();
+    // Feedback #66a: the window the command may run in. The user approves
+    // whenever; the run waits for the window and refuses after it.
+    if let Some(w) = window {
+        out.push_str(&format!(
+            "\n\n⏱ Runs only between {} and {} UTC. Approve any time: before the window opens your \
+             Approve schedules the run for {}, unattended — a Cancel sits on the Tray tab until then; \
+             after it closes the command is refused.",
+            window_time(&w.not_before),
+            window_time(&w.not_after),
+            window_time(&w.not_before)
+        ));
+    }
     // Feedback #83 (item 4): a command that only writes TEXT into a file — a
     // `printf` assembling a script, a heredoc — says so on the card, so the
     // user knows the Approve runs nothing in that text. Only for the pure
@@ -2537,6 +2669,7 @@ mod tests {
                     approve_after: None,
                     run_timeout_secs: Some(300),
                     urgent_reason: None,
+                    run_window: None,
                 },
             )
             .await
@@ -4101,6 +4234,90 @@ mod tests {
         // An RPC from the reviewer inside the window is stronger evidence: queued again.
         bridge.note_agent_rpc("s1", "eyes");
         assert!(matches!(bridge.queue_close_card("s1", "hands", "fifth try", "").await.unwrap(), CloseQueue::Queued(_)));
+    }
+
+    /// Feedback #66a: the run window's validation — RFC3339 in, UTC out; the
+    /// end required, after the start, ahead of now, at most 24 h ahead.
+    #[test]
+    fn a_run_window_is_validated_against_now() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-13T01:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let w = validate_run_window(now, Some("2026-10-13T09:18:00+08:00"), "2026-10-13T01:24:00Z").unwrap();
+        assert_eq!(w, RunWindow { not_before: "2026-10-13T01:18:00.000Z".into(), not_after: "2026-10-13T01:24:00.000Z".into() });
+        // No start: the window opens now.
+        assert_eq!(validate_run_window(now, None, "2026-10-13T01:24:00Z").unwrap().not_before, "2026-10-13T01:00:00.000Z");
+        let err = |nb: Option<&str>, na: &str| validate_run_window(now, nb, na).unwrap_err().to_string();
+        assert!(err(None, "2026-10-13T00:59:00Z").contains("already past"));
+        assert!(err(Some("2026-10-13T01:30:00Z"), "2026-10-13T01:24:00Z").contains("after run_not_before"));
+        assert!(err(None, "2026-10-14T01:00:01Z").contains("at most 24 h ahead"));
+        assert!(err(None, "tomorrow at 9").contains("RFC3339"));
+        assert_eq!(window_time("2026-10-13T01:18:00.000Z"), "01:18Z (Oct 13)");
+    }
+
+    /// Feedback #66a, end to end: a windowed gate approved BEFORE its window
+    /// opens is scheduled — the approval row carries the promise, the row
+    /// reads scheduled, nothing runs — and the scheduler runs it once the
+    /// start has come, posting the output as a `[system]` row linked to the
+    /// gate. The user's Cancel before then makes it a refusal the scheduler
+    /// skips; a window that has closed at approval refuses the run.
+    #[tokio::test]
+    async fn a_windowed_gate_runs_when_its_window_opens_unless_cancelled() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let in_future = |mins: i64| (chrono::Utc::now() + chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let window = |start: i64, end: i64| RunWindow { not_before: in_future(start), not_after: in_future(end) };
+        let req = |cmd: &str, w: RunWindow| GateRequest { command: cmd.into(), run_window: Some(w), ..GateRequest::default() };
+        // Parked (no keyword gates printf; the window does), the card and the
+        // reply name the window.
+        let reply = bridge.action_gate_request("s1".into(), "hands".into(), req("printf 'rows: 42\\n'", window(30, 36))).await.unwrap();
+        assert!(reply.starts_with("action_gate: parked") && reply.contains("Run window:") && reply.contains("schedules the run for"), "{reply}");
+        let gate = storage.pending_gate_ids("s1").await.unwrap().pop().unwrap();
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert!(row.run_not_before.is_some() && row.run_not_after.is_some());
+        assert!(row.prompt.contains("⏱ Runs only between") && row.prompt.contains("a Cancel sits on the Tray tab"), "{}", row.prompt);
+        // Approved early: scheduled, not run.
+        let outcome = bridge.resolve_choice(&gate, "Approve".into()).await.unwrap();
+        let body = match outcome { crate::signaling::ResolveOutcome::DeliveredOutOfBand { body, .. } => body, other => panic!("{other:?}") };
+        assert!(body.contains("Scheduled: the run window opens at") && !body.contains("[action_gate → exit"), "nothing ran: {body}");
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert!(super::super::tray::is_scheduled(&row));
+        assert!(row.result_row_id.is_none() && row.run_refusal.is_none());
+        assert!(bridge.gate_status(&gate).await.unwrap().starts_with("approved, SCHEDULED — bot-hq runs"), "{}", bridge.gate_status(&gate).await.unwrap());
+        assert!(bridge.gate_history("s1", 20, None).await.unwrap().contains("approved, scheduled for"));
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0, "the window has not opened");
+        // The window opens: the scheduler runs it and links the output row.
+        sqlx::query("UPDATE session_tray SET run_not_before = ? WHERE choice_id = ?")
+            .bind(in_future(-1)).bind(&gate).execute(storage.pool()).await.unwrap();
+        assert_eq!(bridge.run_due_scheduled_gates().await, 1);
+        let row = storage.get_tray_entry(&gate).await.unwrap().unwrap();
+        assert_eq!(row.exit_code, Some(0));
+        let output = storage.message_content(row.result_row_id.expect("linked")).await.unwrap().unwrap();
+        assert!(output.starts_with("⏱ Scheduled gate") && output.contains("rows: 42"), "{output}");
+        assert!(!super::super::tray::is_scheduled(&row));
+        assert!(bridge.gate_status(&gate).await.unwrap().contains("executed `printf 'rows: 42\\n'` at its scheduled time. It exited 0"), "{}", bridge.gate_status(&gate).await.unwrap());
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0, "runs once");
+        // Cancelled before it runs: refused, skipped by the scheduler.
+        bridge.action_gate_request("s1".into(), "hands".into(), req("printf 'later\\n'", window(30, 36))).await.unwrap();
+        let gate2 = storage.pending_gate_ids("s1").await.unwrap().pop().unwrap();
+        bridge.resolve_choice(&gate2, "Approve".into()).await.unwrap();
+        assert!(bridge.cancel_scheduled_gate(&gate2).await.unwrap().contains("cancelled"));
+        assert!(bridge.cancel_scheduled_gate(&gate2).await.is_err(), "not scheduled any more");
+        sqlx::query("UPDATE session_tray SET run_not_before = ? WHERE choice_id = ?")
+            .bind(in_future(-1)).bind(&gate2).execute(storage.pool()).await.unwrap();
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0);
+        let status = bridge.gate_status(&gate2).await.unwrap();
+        assert!(status.starts_with("approved but NOT RUN — cancelled by the user at"), "{status}");
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("⛔ Scheduled gate") && m.content.contains("cancelled by the user")));
+        // A window already closed at approval: refused at run time.
+        bridge.action_gate_request("s1".into(), "hands".into(), req("printf 'late\\n'", window(30, 36))).await.unwrap();
+        let gate3 = storage.pending_gate_ids("s1").await.unwrap().pop().unwrap();
+        sqlx::query("UPDATE session_tray SET run_not_before = ?, run_not_after = ? WHERE choice_id = ?")
+            .bind(in_future(-10)).bind(in_future(-5)).bind(&gate3).execute(storage.pool()).await.unwrap();
+        let outcome = bridge.resolve_choice(&gate3, "Approve".into()).await.unwrap();
+        let body = match outcome { crate::signaling::ResolveOutcome::DeliveredOutOfBand { body, .. } => body, other => panic!("{other:?}") };
+        assert!(body.contains("NOT RUN: the run window closed at") && !body.contains("[action_gate → exit"), "{body}");
+        assert!(bridge.gate_status(&gate3).await.unwrap().contains("approved but NOT RUN — the run window closed at"));
     }
 
     /// Feedback #52 (the user's desktop tier): `urgent_reason` parks the

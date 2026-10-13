@@ -35,8 +35,8 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 pub use action_gate::{
-    command_from_file, validate_run_timeout, validate_urgent_reason, GateRequest, GATE_HISTORY_DEFAULT,
-    URGENT_RENOTIFY_MAX, URGENT_RENOTIFY_MINUTES,
+    command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
+    RunWindow, GATE_HISTORY_DEFAULT,
 };
 pub(crate) use action_gate::ParkOutcome;
 mod cl_facade;
@@ -59,7 +59,7 @@ pub(crate) use session_docs::{
 mod terminal_tools;
 mod tray;
 mod turn_digest;
-pub use tray::{gate_age_secs, Withdrawal, STALE_GATE_MAX_AGE_SECS};
+pub use tray::{gate_age_secs, is_scheduled, Withdrawal, STALE_GATE_MAX_AGE_SECS};
 mod util;
 
 /// What `queue_close_card` did with an agent's close (feedback #73 (2)).

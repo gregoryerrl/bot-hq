@@ -208,6 +208,10 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
             }
             let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
             bridge.set_storage(storage.clone()).await;
+            // Windowed gates approved before their window opened run from here
+            // (feedback #66a); a relaunch re-reads the due rows, so nothing is
+            // re-armed by hand.
+            bridge.spawn_scheduled_gate_runner();
             if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
                 tracing::warn!(?e, "cl startup init failed — index may be partial");
             }

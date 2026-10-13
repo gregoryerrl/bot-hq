@@ -1150,6 +1150,19 @@ async listPendingTray() : Promise<Result<SessionTrayView[], AppError>> {
 }
 },
 /**
+ * The user's Cancel on a scheduled gate (feedback #66a): an approved,
+ * windowed command that has not run yet will not run. Errs when the gate is
+ * not scheduled any more.
+ */
+async cancelScheduledGate(choiceId: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_scheduled_gate", { choiceId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read a file for the viewer dialog, scoped to the session's repo + temp.
  */
 async readWorkspaceFile(sessionId: string, path: string) : Promise<Result<WorkspaceFile, AppError>> {
@@ -2560,6 +2573,18 @@ command_text: string | null; asked_at: string; answered_at: string | null;
  * gate is answered (at most six times). Null for an ordinary gate.
  */
 urgent_reason: string | null; 
+/**
+ * The run window (feedback #66a): the command runs no earlier than
+ * `run_not_before` and is refused after `run_not_after` (RFC3339 UTC).
+ * Null for a gate that runs at approval.
+ */
+run_not_before: string | null; run_not_after: string | null; 
+/**
+ * True while an approved, windowed command still waits for its window to
+ * open — the scheduled strip shows it with a Cancel. False once it ran,
+ * was refused or was cancelled.
+ */
+scheduled: boolean; 
 /**
  * True when this is a PENDING gated command whose requesting agent has moved
  * on (client timeout / restart) — approving runs the command blind, so the

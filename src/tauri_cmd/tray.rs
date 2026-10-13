@@ -223,6 +223,15 @@ pub struct SessionTrayView {
     /// fires even while bot-hq is focused, again every ten minutes until the
     /// gate is answered (at most six times). Null for an ordinary gate.
     pub urgent_reason: Option<String>,
+    /// The run window (feedback #66a): the command runs no earlier than
+    /// `run_not_before` and is refused after `run_not_after` (RFC3339 UTC).
+    /// Null for a gate that runs at approval.
+    pub run_not_before: Option<String>,
+    pub run_not_after: Option<String>,
+    /// True while an approved, windowed command still waits for its window to
+    /// open — the scheduled strip shows it with a Cancel. False once it ran,
+    /// was refused or was cancelled.
+    pub scheduled: bool,
     /// True when this is a PENDING gated command whose requesting agent has moved
     /// on (client timeout / restart) — approving runs the command blind, so the
     /// UI warns + requires confirm. Computed at list time from the live in-memory
@@ -233,6 +242,7 @@ pub struct SessionTrayView {
 impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
     fn from(e: crate::storage::SessionTrayEntry) -> Self {
         let options = e.options().unwrap_or_default();
+        let scheduled = crate::signaling::is_scheduled(&e);
         Self {
             id: e.id,
             session_id: e.session_id,
@@ -246,7 +256,10 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
             command_text: e.command_text,
             asked_at: e.asked_at,
             answered_at: e.answered_at,
+            scheduled,
             urgent_reason: e.urgent_reason,
+            run_not_before: e.run_not_before,
+            run_not_after: e.run_not_after,
             stale: false,
         }
     }
@@ -268,6 +281,18 @@ impl SessionTrayView {
             && gate_age_secs(&self.asked_at).is_none_or(|a| a > STALE_GATE_MAX_AGE_SECS);
         self
     }
+}
+
+/// The user's Cancel on a scheduled gate (feedback #66a): an approved,
+/// windowed command that has not run yet will not run. Errs when the gate is
+/// not scheduled any more.
+#[tauri::command]
+#[specta::specta]
+pub async fn cancel_scheduled_gate(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    choice_id: String,
+) -> Result<String, AppError> {
+    Ok(bridge.cancel_scheduled_gate(&choice_id).await?)
 }
 
 /// All tray rows for a session, oldest-first (the Tab filters/render decide
@@ -350,6 +375,9 @@ mod tests {
             asked_at: asked_at.into(),
             answered_at: None,
             urgent_reason: None,
+            run_not_before: None,
+            run_not_after: None,
+            scheduled: false,
             stale: false,
         }
     }
@@ -475,9 +503,13 @@ mod tests {
             run_timeout_secs: None,
             pinned_scripts: None,
             urgent_reason: Some("prod budget overrun".into()),
+            run_not_before: Some("2026-10-13T01:18:00.000Z".into()),
+            run_not_after: Some("2026-10-13T01:24:00.000Z".into()),
         };
         let view: SessionTrayView = entry.into();
         assert_eq!(view.urgent_reason.as_deref(), Some("prod budget overrun"));
+        assert_eq!(view.run_not_before.as_deref(), Some("2026-10-13T01:18:00.000Z"));
+        assert!(!view.scheduled, "pending, not approved: nothing scheduled");
         assert_eq!(view.options, vec!["Approve", "Reject"]);
         assert_eq!(view.command_text.as_deref(), Some("gh api user"));
         assert_eq!(view.status, "pending");

@@ -1059,7 +1059,9 @@ async fn call_tool(
             Ok(ToolCallResult::text(msg))
         }
         "action_gate" => {
-            use crate::signaling::bridge::{command_from_file, validate_run_timeout, validate_urgent_reason, GateRequest};
+            use crate::signaling::bridge::{
+                command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
+            };
             let invalid_params = |m: &str| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, m.to_string());
             // Feedback #82: `command_path` hands over a long body as a file.
             // Its text REPLACES `command` here, before any classification, so
@@ -1106,11 +1108,40 @@ async fn call_tool(
                         .and_then(|r| validate_urgent_reason(r).map_err(|e| invalid_params(&e.to_string())))?,
                 ),
             };
+            // Feedback #66a: a run window — the end is required (≤ 24 h ahead),
+            // the start optional; the user approves whenever and the run waits.
+            let stamp = |key: &str| match args.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => v
+                    .as_str()
+                    .map(|s| Some(s.to_string()))
+                    .ok_or_else(|| invalid_params(&format!("{key} must be an RFC3339 time string"))),
+            };
+            let run_window = match (stamp("run_not_before")?, stamp("run_not_after")?) {
+                (None, None) => None,
+                (Some(_), None) => {
+                    return Err(invalid_params(
+                        "run_not_after is required with run_not_before — the window needs an end, at most 24 h ahead",
+                    ))
+                }
+                (before, Some(after)) => Some(
+                    validate_run_window(chrono::Utc::now(), before.as_deref(), &after)
+                        .map_err(|e| invalid_params(&e.to_string()))?,
+                ),
+            };
             let output = bridge
                 .action_gate_request(
                     caller.session_id.clone(),
                     caller.agent.clone(),
-                    GateRequest { command, source, require_approval, approve_after, run_timeout_secs, urgent_reason },
+                    GateRequest {
+                        command,
+                        source,
+                        require_approval,
+                        approve_after,
+                        run_timeout_secs,
+                        urgent_reason,
+                        run_window,
+                    },
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;
