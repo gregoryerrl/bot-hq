@@ -36,7 +36,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 mod action_gate;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
-    RunWindow, GATE_HISTORY_DEFAULT,
+    GATE_HISTORY_DEFAULT,
 };
 pub(crate) use action_gate::ParkOutcome;
 mod cl_facade;
