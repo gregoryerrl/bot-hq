@@ -249,6 +249,25 @@ and in `docs/rebuild-archive/`.
 
 ### Fixed
 
+- **A `gh api` read whose endpoint holds a shell variable no longer summons
+  the reviewer.** `gh api "repos/o/r/pulls/$n"` — a GET with the number in a
+  variable, inside a loop or not — was classed as an outward publish and
+  queued for the reviewer's read before it could park for you, although
+  nothing in it publishes. A double-quoted endpoint with a literal start is
+  now read as the GET it is (the quotes keep it one argument whatever the
+  variable holds); it still parks for your approval like any other gated
+  `gh api`, and the no-approval read path still refuses every computed value.
+  An unquoted variable, a computed flag value or body, or a start that could
+  become `graphql` or a flag stays outward.
+- **Two more provider refusals pause the participant instead of halting the
+  session.** `Your organization has disabled Claude subscription access for
+  Claude Code · Use an Anthropic API key instead …` (seen 2026-10-14) and the
+  `402 … would exceed your available credits given your current in-flight
+  requests` error (2026-10-17) were not in the limit detector: both
+  participants erred one after the other and the session halted on
+  "back-to-back errored turns". They are now read as limits with no reset
+  time — the participant pauses on you at the first sighting, the account
+  and model are marked, and the peers are told not to take over its work.
 - **An agent is reminded to write its handoff mid-turn, not only between
   turns.** The context warnings were posted when a turn ended, so an agent
   whose context filled inside one long turn — most of the executor's did, in

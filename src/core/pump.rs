@@ -859,6 +859,18 @@ const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
     "payment required",
     "quota exceeded",
     "credit balance is too low",
+    // Two refusals seen live in October 2026 that fell through to the
+    // errored-turns fallback (both participants erred together and the
+    // session halted on "back-to-back errored turns" instead of pausing on
+    // the first sighting with an account mark): the CLI's `Your organization
+    // has disabled Claude subscription access for Claude Code · Use an
+    // Anthropic API key instead, or ask your admin to enable access`
+    // (s-359f36a0, 2026-10-14) and the 402 `This request would exceed your
+    // available credits given your current in-flight requests. Retry after
+    // in-flight requests settle, or add credits.` (s-61993fdf, 2026-10-17).
+    // Neither names a reset, so `limit_fallback` gives none.
+    "disabled claude subscription access",
+    "exceed your available credits",
 ];
 
 /// A provider error arrives as a terse, standalone chunk; agent ANALYSIS that
@@ -5452,6 +5464,23 @@ mod tests {
         assert_eq!(limit_fallback("You've hit your weekly limit"), Some(chrono::Duration::days(7)));
         assert_eq!(limit_fallback("You've hit your session limit"), Some(chrono::Duration::hours(5)));
         assert_eq!(limit_fallback("You're out of usage credits."), None);
+    }
+
+    /// The two October-2026 refusals, as the CLI printed them (notice rows
+    /// 208525 and 218956): limits with no reset, so the participant pauses on
+    /// the first sighting instead of the session halting on two errored turns.
+    #[test]
+    fn the_subscription_disabled_and_credit_refusals_are_limits_without_a_reset() {
+        let disabled = "Your organization has disabled Claude subscription access for Claude Code \
+                        \u{b7} Use an Anthropic API key instead, or ask your admin to enable access";
+        let credits = "API Error: 402 This request would exceed your available credits given your \
+                       current in-flight requests. Retry after in-flight requests settle, or add credits.";
+        for line in [disabled, credits] {
+            assert_eq!(detect_provider_limit(line).as_deref(), Some(line), "{line}");
+            assert_eq!(limit_fallback(line), None, "no reset is named: {line}");
+        }
+        // Prose about them stays prose.
+        assert_eq!(detect_provider_limit("we added the disabled-subscription wording to the detector"), None);
     }
 
     /// `parse_reset_time` over the four measured shapes, read in the machine's
