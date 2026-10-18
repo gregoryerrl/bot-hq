@@ -41,10 +41,27 @@ pub use violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 /// Resolved policy for a (general + per-project) overlay, or a session snapshot.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, specta::Type)]
 pub struct Policy {
-    /// Words/phrases that must not appear in commit messages or staged diffs.
-    /// Pre-commit grep blocks the commit if any match.
+    /// Words/phrases that must not appear in commit messages. The commit-msg
+    /// hook blocks the commit if any match — and, unless
+    /// [`Policy::forbidden_in_content`] says otherwise, so does the pre-commit
+    /// hook for the lines a commit ADDS to its files.
     #[serde(default)]
     pub forbidden_in_commits: Vec<String>,
+
+    /// Words/phrases the lines a commit ADDS to its files must not carry
+    /// (feedback #103). Empty = the message list applies to content too, as
+    /// it always did. Set it narrower than the message list when the message
+    /// list names things source legitimately mentions: the general policy
+    /// forbids `Claude` in a message, and that blocked a comment citing
+    /// `CLAUDE.md` and a path under `~/.claude-acct-2` in STRYKA; with a
+    /// content list holding only the attribution trailer, the trailer stays
+    /// out of source while the filename passes. Resolved PER LAYER (see
+    /// `merge`): a project's own content list replaces the general one, and
+    /// a project that sets its own message list but no content list screens
+    /// content with that message list — a general content list never narrows
+    /// a project's own words. A project that sets neither inherits general's.
+    #[serde(default)]
+    pub forbidden_in_content: Vec<String>,
 
     /// `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
     /// surfaces a per-push Approve/Reject prompt to the user and blocks on their
@@ -278,6 +295,25 @@ impl Policy {
             .map(String::as_str)
     }
 
+    /// The list the staged-CONTENT scan uses: [`Policy::forbidden_in_content`]
+    /// when set, else the message list (feedback #103).
+    pub fn content_forbidden_words(&self) -> &[String] {
+        if self.forbidden_in_content.is_empty() {
+            &self.forbidden_in_commits
+        } else {
+            &self.forbidden_in_content
+        }
+    }
+
+    /// [`Policy::first_forbidden_word`] over the content list — for the lines
+    /// a commit adds to its files, never for its message.
+    pub fn first_forbidden_word_in_content(&self, text: &str) -> Option<&str> {
+        self.content_forbidden_words()
+            .iter()
+            .find(|w| contains_word(text, w.as_str()))
+            .map(String::as_str)
+    }
+
     /// Does this policy forbid what the claude CLI tells an agent to append to
     /// its commits and pull requests? True when a forbidden word occurs in
     /// either text ([`cli_commit_trailer`], [`CLI_PR_FOOTER`]) — the common
@@ -319,6 +355,34 @@ impl Policy {
             );
             out.push_str("Forbidden words:\n");
             for w in &self.forbidden_in_commits {
+                out.push_str(&format!("- `{w}`\n"));
+            }
+            out.push('\n');
+            if self.forbidden_in_content.is_empty() {
+                out.push_str(
+                    "The same words are refused in the lines a commit ADDS to its files \
+                     (the pre-commit hook scans the staged diff).\n\n",
+                );
+            } else {
+                out.push_str(
+                    "In the lines a commit ADDS to its files (the pre-commit hook scans \
+                     the staged diff) only these are refused:\n",
+                );
+                for w in &self.forbidden_in_content {
+                    out.push_str(&format!("- `{w}`\n"));
+                }
+                out.push('\n');
+            }
+        } else if !self.forbidden_in_content.is_empty() {
+            // A content list with no message list still refuses commits at the
+            // pre-commit hook, so the agent is told about it (EYES dc2288b4).
+            out.push_str("### Forbidden words in file content (pre-commit grep)\n\n");
+            out.push_str(
+                "The pre-commit hook refuses a commit whose ADDED lines (the staged \
+                 diff) carry any of these words — remove them from the content \
+                 before committing; do not bypass:\n",
+            );
+            for w in &self.forbidden_in_content {
                 out.push_str(&format!("- `{w}`\n"));
             }
             out.push('\n');
@@ -398,6 +462,7 @@ impl Policy {
 
     fn is_effectively_empty(&self) -> bool {
         self.forbidden_in_commits.is_empty()
+            && self.forbidden_in_content.is_empty()
             && matches!(self.push_gate, PushGateMode::Auto)
             && matches!(self.force_push, ForcePushMode::Allowed)
             && self.per_action_approval.is_empty()
@@ -417,6 +482,7 @@ impl Policy {
 /// on-disk files don't warn.
 pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
     "forbidden_in_commits",
+    "forbidden_in_content",
     "push_gate",
     "force_push",
     "per_action_approval",
@@ -433,6 +499,7 @@ pub(crate) const POLICY_KNOWN_KEYS: &[&str] = &[
 /// the `tool_gate` block).
 pub(crate) const SESSION_POLICY_KNOWN_KEYS: &[&str] = &[
     "forbidden_in_commits",
+    "forbidden_in_content",
     "push_gate",
     "force_push",
     "per_action_approval",
@@ -656,11 +723,25 @@ pub fn contains_word(haystack: &str, needle: &str) -> bool {
 /// `ask`/`blocked` but a default `auto`/`allowed` reads as "not set").
 fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
     let Some(o) = overlay else { return base };
+    // The content list defaults to the message list OF ITS OWN LAYER: a
+    // project that carries its own message list (bcc-ad-manager's
+    // load-bearing disguise list) keeps screening its content with it, even
+    // when the general policy narrows content to the attribution trailer. An
+    // empty merged content list is what says "this policy's message list".
+    // Read before the literal below moves `o.forbidden_in_commits`.
+    let overlay_sets_messages = !o.forbidden_in_commits.is_empty();
     Policy {
         forbidden_in_commits: if o.forbidden_in_commits.is_empty() {
             base.forbidden_in_commits
         } else {
             o.forbidden_in_commits
+        },
+        forbidden_in_content: if !o.forbidden_in_content.is_empty() {
+            o.forbidden_in_content
+        } else if overlay_sets_messages {
+            Vec::new()
+        } else {
+            base.forbidden_in_content
         },
         push_gate: if matches!(o.push_gate, PushGateMode::Auto) {
             base.push_gate
@@ -975,6 +1056,82 @@ mod tests {
         );
         let err = Policy::resolve(dir.path(), None, None).unwrap_err();
         assert!(err.to_string().contains("parsing"));
+    }
+
+    /// Feedback #103: the content list defaults to the message list OF ITS
+    /// LAYER, a set list replaces it for content only, and a general content
+    /// list never narrows a project's own message list (EYES 0b239dad: the
+    /// bcc projects' disguise lists screen the lines their commits add).
+    /// `Vendor` stands in for a vendor name, `Acme-Trailer` for the
+    /// attribution trailer this repo's own policy refuses in content.
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn the_content_list_defaults_to_its_own_layers_message_list() {
+        let mut general = Policy::default();
+        general.forbidden_in_commits = vec!["Acme-Trailer".into(), "Vendor".into()];
+        assert_eq!(general.content_forbidden_words(), ["Acme-Trailer", "Vendor"]);
+        assert_eq!(general.first_forbidden_word_in_content("see Vendor.md"), Some("Vendor"));
+        general.forbidden_in_content = vec!["Acme-Trailer".into()];
+        assert_eq!(general.first_forbidden_word_in_content("see Vendor.md"), None);
+        assert_eq!(
+            general.first_forbidden_word("docs: Vendor.md"),
+            Some("Vendor"),
+            "the message scan is unchanged"
+        );
+
+        // A project with its own message list screens content with THAT
+        // list — general's narrower content list does not reach it.
+        let mut project = Policy::default();
+        project.forbidden_in_commits = vec!["bot-hq".into(), "Vendor".into()];
+        let resolved = merge(general.clone(), Some(project.clone()));
+        assert_eq!(resolved.forbidden_in_commits, ["bot-hq", "Vendor"]);
+        assert!(resolved.forbidden_in_content.is_empty());
+        assert_eq!(resolved.content_forbidden_words(), ["bot-hq", "Vendor"]);
+        assert_eq!(resolved.first_forbidden_word_in_content("see Vendor.md"), Some("Vendor"));
+        // A project that sets neither list inherits general's content list.
+        let mut push_only = Policy::default();
+        push_only.push_gate = PushGateMode::Ask;
+        let resolved = merge(general.clone(), Some(push_only));
+        assert_eq!(resolved.content_forbidden_words(), ["Acme-Trailer"]);
+        // A project content list replaces general's, with or without a
+        // message list of its own.
+        project.forbidden_in_content = vec!["Initech".into()];
+        assert_eq!(merge(general.clone(), Some(project)).content_forbidden_words(), ["Initech"]);
+        let mut content_only = Policy::default();
+        content_only.forbidden_in_content = vec!["Initech".into()];
+        let resolved = merge(general, Some(content_only));
+        assert_eq!(resolved.forbidden_in_commits, ["Acme-Trailer", "Vendor"]);
+        assert_eq!(resolved.content_forbidden_words(), ["Initech"]);
+        // Unset everywhere: the message list screens content, as it always did.
+        let mut plain = Policy::default();
+        plain.forbidden_in_commits = vec!["Vendor".into()];
+        assert_eq!(merge(plain, None).content_forbidden_words(), ["Vendor"]);
+        assert!(POLICY_KNOWN_KEYS.contains(&"forbidden_in_content"));
+        assert!(SESSION_POLICY_KNOWN_KEYS.contains(&"forbidden_in_content"));
+    }
+
+    /// The prompt block says what the content scan refuses: the same words
+    /// when no content list is set, only the content list when one is, and
+    /// the content list alone when there is no message list (EYES dc2288b4 —
+    /// such a policy told its agents nothing while the hook still refused).
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn the_prompt_block_names_what_the_content_scan_refuses() {
+        let mut p = Policy::default();
+        p.forbidden_in_commits = vec!["Vendor".into()];
+        let block = p.render_system_prompt_block();
+        assert!(block.contains("The same words are refused in the lines a commit ADDS"), "{block}");
+
+        p.forbidden_in_content = vec!["Acme-Trailer".into()];
+        let block = p.render_system_prompt_block();
+        assert!(block.contains("only these are refused:\n- `Acme-Trailer`"), "{block}");
+
+        let mut content_only = Policy::default();
+        content_only.forbidden_in_content = vec!["Acme-Trailer".into()];
+        let block = content_only.render_system_prompt_block();
+        assert!(block.contains("### Forbidden words in file content"), "{block}");
+        assert!(block.contains("- `Acme-Trailer`"), "{block}");
+        assert!(!block.contains("check_commit_message"), "no message list, no message check: {block}");
     }
 
     #[test]

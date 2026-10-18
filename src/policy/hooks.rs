@@ -272,15 +272,25 @@ fn run_pre_commit(
     if check_immutable_artifacts(repo) != 0 {
         return Ok(1);
     }
-    // Layer 3 — forbidden-word scan.
+    // Layer 3 — forbidden-word scan over the lines the commit ADDS, against
+    // the CONTENT list (feedback #103: the message list, unless
+    // `forbidden_in_content` narrows it — a filename like `CLAUDE.md` may be
+    // legitimate in source while the vendor's name stays out of a message).
     let policy = Policy::resolve(data_dir, project, session_id)?;
-    if policy.forbidden_in_commits.is_empty() {
+    if policy.content_forbidden_words().is_empty() {
         return Ok(0);
     }
     let added_only = staged_lines_to_screen(repo);
-    match policy.first_forbidden_word(&added_only) {
+    match policy.first_forbidden_word_in_content(&added_only) {
         None => Ok(0),
         Some(word) => {
+            let narrowing = if policy.forbidden_in_content.is_empty() {
+                "\n(The commit-message list applies to file content too; a \
+                 `forbidden_in_content` list in the policy narrows what is \
+                 refused in content.)\n"
+            } else {
+                ""
+            };
             eprintln!(
                 "{}",
                 blocked_banner(
@@ -290,7 +300,7 @@ fn run_pre_commit(
                          Policy: {project}\n\
                          \n\
                          Remove '{word}' from the source content, then retry.\n\
-                         Do NOT bypass with --no-verify.\n",
+                         Do NOT bypass with --no-verify.\n{narrowing}",
                         project = project.unwrap_or("<none>")
                     )
                 )
@@ -533,7 +543,7 @@ fn run_post_commit(
 ) -> Result<i32> {
     audit_at_hook(data_dir, project, "post-commit");
     let policy = Policy::resolve(data_dir, project, session_id)?;
-    if policy.forbidden_in_commits.is_empty() {
+    if policy.forbidden_in_commits.is_empty() && policy.content_forbidden_words().is_empty() {
         return Ok(0);
     }
     let msg = git_output_in(repo, &["log", "-1", "--pretty=%B", "HEAD"]).unwrap_or_default();
@@ -542,10 +552,13 @@ fn run_post_commit(
     // Mirror pre-commit's added-only filter — otherwise removing a forbidden
     // word from a file logs a spurious violation against the very commit that
     // cleaned it up — and its merge rule (#39), or every merge the pre-commit
-    // allowed would log a violation here. The commit message stays in the scan
-    // as-is.
-    let combined = format!("{msg}\n{}", committed_lines_to_screen(repo));
-    if let Some(word) = policy.first_forbidden_word(&combined) {
+    // allowed would log a violation here. The message is screened with the
+    // message list and the added lines with the content list, as the two
+    // gates do.
+    let slipped = policy
+        .first_forbidden_word(&msg)
+        .or_else(|| policy.first_forbidden_word_in_content(&committed_lines_to_screen(repo)));
+    if let Some(word) = slipped {
         eprintln!(
             "bot-hq post-commit: forbidden word '{word}' slipped through \
              (sha={sha_short}). Logging violation."
@@ -2575,6 +2588,41 @@ mod tests {
         );
     }
 
+    /// Feedback #103: the pre-commit CONTENT scan reads `forbidden_in_content`
+    /// when the policy sets it, and the message list otherwise — so a filename
+    /// the message list would refuse (`Vendor.md`, standing in for
+    /// `CLAUDE.md`) passes in source once the content list is narrowed to the
+    /// attribution marker, while the message scan stays strict.
+    #[test]
+    fn the_content_scan_reads_its_own_list_and_the_message_scan_stays_strict() {
+        let repo = tempdir().unwrap();
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/p")).unwrap();
+        let policy = data.path().join("library/projects/p/policy.yaml");
+        init_repo(repo.path());
+        std::fs::write(repo.path().join("tool.py"), "# see Vendor.md for the rig\n").unwrap();
+        git(repo.path(), &["add", "tool.py"]);
+
+        // One list: the message list screens content too (as before).
+        std::fs::write(&policy, "forbidden_in_commits:\n  - Vendor\n  - Acme-Trailer\n").unwrap();
+        assert_eq!(run_pre_commit(data.path(), Some("p"), repo.path(), None).unwrap(), 1);
+
+        // A content list of its own: the filename passes, the trailer still
+        // does not, and the message scan keeps refusing the vendor's name.
+        std::fs::write(
+            &policy,
+            "forbidden_in_commits:\n  - Vendor\n  - Acme-Trailer\nforbidden_in_content:\n  - Acme-Trailer\n",
+        )
+        .unwrap();
+        assert_eq!(run_pre_commit(data.path(), Some("p"), repo.path(), None).unwrap(), 0);
+        std::fs::write(repo.path().join("tool.py"), "# see Vendor.md\n# Acme-Trailer: bot\n").unwrap();
+        git(repo.path(), &["add", "tool.py"]);
+        assert_eq!(run_pre_commit(data.path(), Some("p"), repo.path(), None).unwrap(), 1);
+        let msg_file = data.path().join("MSG");
+        std::fs::write(&msg_file, "docs: point at Vendor.md\n").unwrap();
+        assert_eq!(run_commit_msg(data.path(), Some("p"), &msg_file, None).unwrap(), 1);
+    }
+
     /// Run git in `dir`, asserting it succeeded (a fixture step that silently
     /// failed would leave a merge test proving nothing).
     fn git(dir: &Path, args: &[&str]) {
@@ -2719,6 +2767,47 @@ mod tests {
         assert!(
             violations(data.path()).contains("detected post-commit"),
             "the merge's own forbidden line must still be logged"
+        );
+    }
+
+    /// #103: the post-commit backstop screens the message with the message
+    /// list and the added lines with the content list, as the two gates do —
+    /// a filename the content list lets through logs nothing, while the same
+    /// word in the message is still a slip.
+    #[test]
+    fn post_commit_screens_content_with_the_content_list() {
+        let violations = |data: &Path| {
+            std::fs::read_to_string(
+                crate::paths::Paths::for_data_dir(data.to_path_buf()).violations_path,
+            )
+            .unwrap_or_default()
+        };
+        let data = tempdir().unwrap();
+        std::fs::create_dir_all(data.path().join("library/projects/p")).unwrap();
+        std::fs::write(
+            data.path().join("library/projects/p/policy.yaml"),
+            "forbidden_in_commits:\n  - Vendor\n  - Acme-Trailer\nforbidden_in_content:\n  - Acme-Trailer\n",
+        )
+        .unwrap();
+        let repo = tempdir().unwrap();
+        let r = repo.path();
+        init_repo(r);
+        std::fs::write(r.join("tool.py"), "# see Vendor.md for the rig\n").unwrap();
+        git(r, &["add", "tool.py"]);
+        git(r, &["commit", "-qm", "docs: point at the rig"]);
+        run_post_commit(data.path(), Some("p"), r, None).unwrap();
+        assert!(
+            !violations(data.path()).contains("detected post-commit"),
+            "a filename the content list allows was logged as a slip"
+        );
+
+        std::fs::write(r.join("tool.py"), "# see Vendor.md for the rig\n# and the notes\n").unwrap();
+        git(r, &["add", "tool.py"]);
+        git(r, &["commit", "-qm", "docs: point at Vendor.md"]);
+        run_post_commit(data.path(), Some("p"), r, None).unwrap();
+        assert!(
+            violations(data.path()).contains("forbidden word 'Vendor' detected post-commit"),
+            "the message list must still screen the message"
         );
     }
 

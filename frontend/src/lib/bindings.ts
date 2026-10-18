@@ -2277,10 +2277,27 @@ export type PluginStatus =
  */
 export type Policy = { 
 /**
- * Words/phrases that must not appear in commit messages or staged diffs.
- * Pre-commit grep blocks the commit if any match.
+ * Words/phrases that must not appear in commit messages. The commit-msg
+ * hook blocks the commit if any match — and, unless
+ * [`Policy::forbidden_in_content`] says otherwise, so does the pre-commit
+ * hook for the lines a commit ADDS to its files.
  */
 forbidden_in_commits?: string[]; 
+/**
+ * Words/phrases the lines a commit ADDS to its files must not carry
+ * (feedback #103). Empty = the message list applies to content too, as
+ * it always did. Set it narrower than the message list when the message
+ * list names things source legitimately mentions: the general policy
+ * forbids `Claude` in a message, and that blocked a comment citing
+ * `CLAUDE.md` and a path under `~/.claude-acct-2` in STRYKA; with a
+ * content list holding only the attribution trailer, the trailer stays
+ * out of source while the filename passes. Resolved PER LAYER (see
+ * `merge`): a project's own content list replaces the general one, and
+ * a project that sets its own message list but no content list screens
+ * content with that message list — a general content list never narrows
+ * a project's own words. A project that sets neither inherits general's.
+ */
+forbidden_in_content?: string[]; 
 /**
  * `git push` gate. `auto` = pushes go through; `ask` = the pre-push hook
  * surfaces a per-push Approve/Reject prompt to the user and blocks on their

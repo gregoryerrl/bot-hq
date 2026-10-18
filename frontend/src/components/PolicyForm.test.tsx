@@ -89,6 +89,35 @@ describe("PolicyForm", () => {
   });
 });
 
+describe("PolicyForm — the file-content list (#103)", () => {
+  it("says an empty content list means the message list applies", () => {
+    render(<PolicyForm value={{ forbidden_in_commits: ["Vendor"] }} onChange={() => {}} />);
+    expect(screen.getByText("Forbidden words in file content")).toBeInTheDocument();
+    expect(
+      screen.getByText("None — the message list above applies to file content too."),
+    ).toBeInTheDocument();
+  });
+
+  it("edits forbidden_in_content without touching the message list", () => {
+    const onChange = vi.fn();
+    render(
+      <PolicyForm
+        value={{ forbidden_in_commits: ["Vendor"], forbidden_in_content: ["Acme-Trailer"] }}
+        onChange={onChange}
+      />,
+    );
+    fireEvent.change(screen.getByDisplayValue("Acme-Trailer"), {
+      target: { value: "Acme-Footer" },
+    });
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        forbidden_in_commits: ["Vendor"],
+        forbidden_in_content: ["Acme-Footer"],
+      }),
+    );
+  });
+});
+
 describe("PolicyForm — the two load-bearing fields that had no UI (round 8)", () => {
   it("edits forbidden_in_commits and commit_style via onChange", () => {
     const onChange = vi.fn();

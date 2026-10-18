@@ -111,13 +111,26 @@ export function PolicyForm({
 
       <Field
         label="Forbidden words in commits"
-        hint="Words no commit may carry: the commit-msg and pre-commit hooks block them, the post-commit verifier logs a slip, and check_commit_message pre-checks the agent's message. Whole-word, case-insensitive. A non-empty project list replaces the global one."
+        hint="Words no commit message may carry: the commit-msg hook blocks them, the post-commit verifier logs a slip, and check_commit_message pre-checks the agent's message. They also screen the lines a commit adds unless the file-content list below is set. Whole-word, case-insensitive. A non-empty project list replaces the global one."
       >
         <StringList
           items={value.forbidden_in_commits ?? []}
           disabled={disabled}
           placeholder="e.g. a trailer no commit may carry"
           onChange={(forbidden_in_commits) => patch({ forbidden_in_commits })}
+        />
+      </Field>
+
+      <Field
+        label="Forbidden words in file content"
+        hint="Words the lines a commit adds to its files may not carry (the pre-commit hook scans the staged diff). Empty = the message list above screens file content too. Set it narrower to let source name what a message may not, e.g. a file called after a vendor. A project's own message list still screens its content unless the project sets this list too."
+      >
+        <StringList
+          items={value.forbidden_in_content ?? []}
+          disabled={disabled}
+          placeholder="e.g. the attribution trailer"
+          emptyText="None — the message list above applies to file content too."
+          onChange={(forbidden_in_content) => patch({ forbidden_in_content })}
         />
       </Field>
 
@@ -190,11 +203,14 @@ function Field({
 function StringList({
   items,
   placeholder,
+  emptyText = "None — nothing enforced for this list.",
   onChange,
   disabled,
 }: {
   items: string[];
   placeholder?: string;
+  /** What an empty list means — not always "nothing enforced". */
+  emptyText?: string;
   onChange: (next: string[]) => void;
   disabled?: boolean;
 }) {
@@ -204,7 +220,7 @@ function StringList({
     <div className="flex flex-col gap-2">
       {items.length === 0 && (
         <p className="font-code-sm text-code-sm text-on-surface-variant/70">
-          None — nothing enforced for this list.
+          {emptyText}
         </p>
       )}
       {items.map((it, i) => (

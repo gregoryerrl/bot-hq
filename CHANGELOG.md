@@ -196,6 +196,20 @@ and in `docs/rebuild-archive/`.
 
 ### Changed
 
+- **A policy can let file content name what a commit message may not.** One
+  list, "Forbidden words in commits", screened both the message and the lines
+  a commit adds, so a project inheriting a vendor's name from the general
+  policy could not commit a comment citing `CLAUDE.md` or a path under
+  `~/.claude-acct-2` (feedback #103). A policy may now carry a second list,
+  "Forbidden words in file content" (`forbidden_in_content`, in Settings →
+  Policy and in the YAML), that the pre-commit hook uses for the added lines
+  instead — set it to just the attribution trailer in the general policy and
+  the trailer stays out of source while the filename passes; the message scan
+  is unchanged. Nothing changes until you set it. A project that carries its
+  own message list keeps screening its content with that list unless it sets
+  a content list too, so a general content list never loosens a project's
+  own words. The agents' policy block says which words the content scan
+  refuses, including for a policy with a content list only.
 - **An agent's credentials are explicit.** Every agent, and the one-shot
   summarizer and "Test connection" probe, now starts with the inherited
   auth and billing variables cleared (`ANTHROPIC_API_KEY`,

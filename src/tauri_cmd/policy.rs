@@ -257,6 +257,8 @@ mod tests {
     fn sample_policy() -> Policy {
         Policy {
             forbidden_in_commits: vec!["bot-hq".into()],
+            // Non-empty: an empty list is what a dropped key reads back as.
+            forbidden_in_content: vec!["Acme-Trailer".into()],
             push_gate: PushGateMode::Ask,
             force_push: ForcePushMode::Blocked,
             per_action_approval: vec!["terraform apply".into()],
