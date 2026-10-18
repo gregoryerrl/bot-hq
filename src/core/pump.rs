@@ -879,6 +879,72 @@ const PROVIDER_LIMIT_PATTERNS: &[&str] = &[
 /// reviewer quoting the detector's own patterns) self-trips the halt.
 const PROVIDER_LIMIT_MAX_CHUNK: usize = 240;
 
+/// The first sentences claude-code's OWN limit messages start with — its own
+/// classifier's list in the 2.1.291 binary (`Yio` and `Xio`), plus the
+/// interactive-mode `/model to switch models` endings, which start the same
+/// way. Matched only at the START of a line of the CLI's own text
+/// ([`AgentEvent::Notice`]: claude-code marks it `<synthetic>`), never in
+/// agent prose — a participant writing "You've hit your …" is talking. The
+/// CLI's warnings (`You've used …`, `You're close to …`) are not limits.
+const CLI_LIMIT_PREFIXES: &[&str] = &[
+    "You've hit your",
+    "You've reached your",
+    "You're out of usage credits",
+    "Your org is out of usage \u{b7} add funds to continue",
+    "Your org is out of usage \u{b7} contact your admin",
+    "Your seat type doesn't include usage credits",
+    "Your seat type doesn't include usage",
+    "Your usage allocation has been disabled by your admin",
+    "Your group's usage limit is set to $0",
+    "Fable 5 requires usage credits",
+    "You're out of extra usage",
+    "Your seat type doesn't include extra usage",
+    "This service is disabled for your org",
+];
+
+/// The tail every limit line claude-code composes in print mode carries
+/// (`bot-hq` runs `claude -p`): `<first sentence> Switch to another model to
+/// continue.`, or with `, or manage usage credits at <url>,` before ` to
+/// continue.` (the composer `bro` in 2.1.291). Only its limit messages use the
+/// phrase, so a first sentence the CLI adds later is still caught.
+const CLI_LIMIT_TAIL: &str = " Switch to another model";
+
+/// The first line of the CLI's own message (`Notice` text) that is one of its
+/// limit lines (see [`CLI_LIMIT_PREFIXES`] and [`CLI_LIMIT_TAIL`]), if any.
+/// No length bound: the bound on [`detect_provider_limit`] keeps agent ANALYSIS
+/// from tripping it, and nothing here reads agent text.
+fn detect_cli_limit_notice(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|l| {
+            CLI_LIMIT_PREFIXES.iter().any(|p| l.starts_with(p))
+                || is_fable_requires_credits(l)
+                || ends_like_a_cli_limit(l)
+        })
+        .map(str::to_string)
+}
+
+/// The classifier's one pattern (`$ls`): `Fable[ <version>] requires usage
+/// credits.` — a version of at most 40 characters with no `·` in it.
+fn is_fable_requires_credits(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("Fable") else { return false };
+    let Some(at) = rest.find(" requires usage credits.") else { return false };
+    let version = &rest[..at];
+    version.is_empty()
+        || (version.starts_with(' ')
+            && (2..=41).contains(&version.chars().count())
+            && !version.contains('\u{b7}'))
+}
+
+/// `… Switch to another model to continue.` or `… Switch to another model,
+/// or manage usage credits at <url>, to continue.` — the print-mode tail.
+fn ends_like_a_cli_limit(line: &str) -> bool {
+    let Some(at) = line.find(CLI_LIMIT_TAIL) else { return false };
+    let rest = line[at + CLI_LIMIT_TAIL.len()..].trim_end();
+    rest == " to continue."
+        || (rest.starts_with(", or manage usage credits at ") && rest.ends_with(", to continue."))
+}
+
 /// The first line of `text` containing a provider-limit phrase, if any.
 /// Terse chunks only (see [`PROVIDER_LIMIT_MAX_CHUNK`]).
 fn detect_provider_limit(text: &str) -> Option<String> {
@@ -903,6 +969,9 @@ fn limit_fallback(line: &str) -> Option<chrono::Duration> {
     let l = line.to_lowercase();
     if l.contains("weekly limit") {
         Some(chrono::Duration::days(7))
+    } else if l.contains("usage limit is set to") {
+        // `Your group's usage limit is set to $0`: an allocation, no window.
+        None
     } else if l.contains("session limit") || l.contains("usage limit") {
         Some(chrono::Duration::hours(5))
     } else {
@@ -1506,7 +1575,7 @@ pub async fn pump_agent(
                     warn!(agent = %cfg.slug, "persisting a CLI notice failed");
                 }
                 if limit_line.is_none() {
-                    limit_line = detect_provider_limit(&text);
+                    limit_line = detect_cli_limit_notice(&text).or_else(|| detect_provider_limit(&text));
                     limit_from_notice = limit_line.is_some();
                 }
                 buffer.push_str(&text);
@@ -5482,6 +5551,64 @@ mod tests {
         assert_eq!(detect_provider_limit("we added the disabled-subscription wording to the detector"), None);
     }
 
+    /// The line s-8762e38a died on (notice row 220062, 2026-10-18T07:19Z) and
+    /// the rest of claude-code's own limit lines (its 2.1.291 classifier and
+    /// composer): a NOTICE that starts with one of them, or carries the
+    /// print-mode tail, is a limit with no reset. Agent prose saying the same
+    /// is not, and the CLI's warnings are not.
+    #[test]
+    fn the_clis_own_limit_lines_are_limits_on_its_notices_only() {
+        let live = "You've reached your Fable limit. Switch to another model, or manage usage \
+                    credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
+        assert_eq!(detect_cli_limit_notice(live).as_deref(), Some(live));
+        assert_eq!(detect_provider_limit(live), None, "the agent-text net stays narrow");
+        assert_eq!(limit_fallback(live), None, "the weekly Fable allowance names no reset");
+
+        let credits = ", or manage usage credits at claude.ai/admin-settings/usage,";
+        for first in [
+            "You've reached your Fable limit.",
+            "Fable 5 requires usage credits.",
+            "Fable 5.1 requires usage credits.",
+            "Opus 5.5 requires usage credits.",
+            "You've hit your monthly spend limit.",
+            "You've hit your channel's monthly spend limit.",
+            "You've hit your team's shared budget.",
+            "You're out of usage credits.",
+        ] {
+            for v in ["", credits] {
+                let line = format!("{first} Switch to another model{v} to continue.");
+                assert_eq!(detect_cli_limit_notice(&line).as_deref(), Some(line.as_str()), "{line}");
+                assert_eq!(limit_fallback(&line), None, "no reset is named: {line}");
+            }
+        }
+        for line in [
+            "You've reached your Fable limit. /model to switch models.",
+            "Your org is out of usage \u{b7} add funds to continue",
+            "Your org is out of usage \u{b7} contact your admin",
+            "Your seat type doesn't include usage credits",
+            "Your seat type doesn't include extra usage",
+            "Your usage allocation has been disabled by your admin",
+            "Your group's usage limit is set to $0",
+            "You're out of extra usage",
+            "This service is disabled for your org",
+            "Fable requires usage credits.",
+        ] {
+            assert_eq!(detect_cli_limit_notice(line).as_deref(), Some(line), "{line}");
+            assert_eq!(limit_fallback(line), None, "no reset is named: {line}");
+        }
+        // The CLI's warnings, a limit named mid-line, a stray tail, and a
+        // version the classifier's pattern refuses are not limits.
+        for line in [
+            "You've used 90% of your weekly limit \u{b7} resets Oct 5 at 2pm",
+            "You're close to your session limit",
+            "API Error: 429 you've hit your rate limit",
+            "Tip: Switch to another model with /model",
+            "Fable 5 \u{b7} beta requires usage credits.",
+        ] {
+            assert_eq!(detect_cli_limit_notice(line), None, "{line}");
+        }
+    }
+
     /// `parse_reset_time` over the four measured shapes, read in the machine's
     /// own zone (whatever it is on the test box — the expectation is built the
     /// same way), with the rollovers and the refusals.
@@ -5681,6 +5808,30 @@ mod tests {
         assert_eq!(storage.get_account_mark("", "org-1", FABLE).await.unwrap(), None, "cleared");
         drop(ev_tx);
         task.await.unwrap();
+    }
+
+    /// The wire: the Notice arm reads the CLI's own list, so the line
+    /// s-8762e38a died on marks the account and model at the first sighting,
+    /// with no reset — it used to fall through to "back-to-back errored turns".
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_fable_limit_line_marks_the_account_with_no_reset() {
+        let (storage, state) = setup().await;
+        let id = seed_marked_participant(&storage).await;
+        let (mut cfg, _ring_rx) = cfg_with_ring("hands");
+        cfg.participant_id = Some(id);
+        on_account(&mut cfg);
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(1)));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        let live = "You've reached your Fable limit. Switch to another model, or manage usage \
+                    credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
+        ev_tx.send(AgentEvent::Notice(live.into())).await.unwrap();
+        ev_tx.send(turn_complete(true)).await.unwrap();
+        drop(ev_tx);
+        task.await.unwrap();
+        let mark = storage.get_account_mark("", "org-1", FABLE).await.unwrap().expect("marked");
+        assert_eq!(mark.limited_text, live);
+        assert_eq!(mark.limited_until, None, "no reset is named");
     }
 
     /// P5: a clean turn that was already in flight when the mark was set

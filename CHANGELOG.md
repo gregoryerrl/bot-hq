@@ -282,6 +282,20 @@ and in `docs/rebuild-archive/`.
   "back-to-back errored turns". They are now read as limits with no reset
   time — the participant pauses on you at the first sighting, the account
   and model are marked, and the peers are told not to take over its work.
+- **claude-code's own limit lines pause the participant, whatever their
+  wording.** A session on Fable ended on `You've reached your Fable limit.
+  Switch to another model, or manage usage credits at … to continue.`
+  (2026-10-18): the detector did not know the line, so the session halted on
+  back-to-back errored turns and no limit mark was set. claude-code's own
+  messages are now read against its own list of limit openings — the
+  included Fable allowance, a model that requires usage credits, the monthly
+  spend limit, the team's shared budget, the organisation and seat-type
+  refusals — and against the tail it puts on every such line, so the
+  participant pauses on you at the first sighting and the account and model
+  are marked (no reset time is named, so the mark says since when). Only
+  claude-code's own messages are read this way: an agent writing the same
+  words is still just talking, and the CLI's warnings ("You've used …",
+  "You're close to …") are not limits.
 - **The close card reads as a close, and the strips above the input box
   stay in bounds.** The card an agent parks when it thinks the work is done
   was dressed as a generic "APPROVAL · is blocked until you answer" with
