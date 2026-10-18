@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { PRIVACY_URL, type TelemetryStatus } from "../lib/telemetry";
-import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
+import { errorMessage, useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { SubTabButton } from "../components/SubTabButton";
@@ -73,6 +73,8 @@ const SUBTABS: readonly SettingsSubTab[] = [
   "promptcodes",
   "archive",
   "updates",
+  "notifications",
+  "diagnostics",
 ];
 
 export function Settings() {
@@ -101,7 +103,7 @@ export function Settings() {
       <div
         role="tablist"
         aria-label="Settings tabs"
-        className="flex shrink-0 items-center gap-1 border-b border-outline-variant px-4"
+        className="flex shrink-0 flex-wrap items-center gap-1 border-b border-outline-variant px-4"
       >
         <SubTabButton
           active={tab === "roles"}
@@ -893,7 +895,7 @@ function DiagnosticsPanel() {
       setEndpointError(null);
       await invoke(cmd, args);
     } catch (e) {
-      setEndpointError(String(e));
+      setEndpointError(errorMessage(e));
     } finally {
       void status.refetch();
     }

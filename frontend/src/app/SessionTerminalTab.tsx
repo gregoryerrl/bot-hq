@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { useTauriEvent } from "../hooks/useTauriEvent";
+import { errorMessage } from "../hooks/useInvoke";
 import type { TerminalOpenView } from "../lib/bindings";
 
 // ============================================================================
@@ -145,7 +146,7 @@ export function SessionTerminalTab({
       })
       .catch((e) => {
         if (!disposed) {
-          term.writeln(`[failed to open terminal: ${String(e)}]`);
+          term.writeln(`[failed to open terminal: ${errorMessage(e)}]`);
         }
       });
 

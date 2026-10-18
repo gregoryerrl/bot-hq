@@ -19,6 +19,7 @@ import { cn } from "../lib/cn";
 import { formatRelative, formatTimestamp } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
+import { Skeleton } from "./ui/Skeleton";
 import type {
   SessionDocumentView,
   SessionTrayView,
@@ -107,9 +108,11 @@ export const DocumentPane = memo(function DocumentPane({
   // versions — a phase REPLACE parks the previous body as an untagged
   // `<slug>@<n>` doc, which is history to read via `session_doc_search`, not
   // a document to tab.
-  const { data: allDocs = [], error: docsError } = useTauriQuery<
-    SessionDocumentView[]
-  >("session_doc_search", { sessionId });
+  const {
+    data: allDocs = [],
+    error: docsError,
+    isLoading: docsLoading,
+  } = useTauriQuery<SessionDocumentView[]>("session_doc_search", { sessionId });
   const customDocs = useMemo(
     () =>
       allDocs
@@ -389,6 +392,11 @@ export const DocumentPane = memo(function DocumentPane({
                 <p className="text-sm text-on-error-container">
                   Couldn't load {activePhase} documents: {docsError.message}
                 </p>
+              ) : docsLoading ? (
+                <Skeleton
+                  className="space-y-2"
+                  rowClassName="h-4 rounded bg-surface-container"
+                />
               ) : activePhase === "apply" && applyDiff?.lines.length ? null : (
                 <p className="text-sm text-on-surface-variant">
                   No {activePhase} documents yet.
@@ -864,10 +872,11 @@ function TrayList({
   // Refreshed event-driven by GlobalEventSync (invalidates queries on the
   // session:* events) — newly-parked pending appear and answered items drop
   // without a poll or a manual tab-switch.
-  const { data: entries = [] } = useTauriQuery<SessionTrayView[]>(
-    "list_session_tray",
-    { sessionId },
-  );
+  const {
+    data: entries = [],
+    error: trayError,
+    isLoading: trayLoading,
+  } = useTauriQuery<SessionTrayView[]>("list_session_tray", { sessionId });
   const [resolveError, setResolveError] = useState<string | null>(null);
   // Discard = bin a card WITHOUT answering it (nothing is sent to the agent).
   // Confirmed first: a mis-click on a real approval gate is destructive — a
@@ -916,6 +925,16 @@ function TrayList({
   const stage = useTrayStaging((s) => s.stage);
   const unstage = useTrayStaging((s) => s.unstage);
   if (pending.length === 0) {
+    if (trayError) {
+      return (
+        <p className="text-sm text-on-error-container">
+          Couldn't load the tray: {trayError.message}
+        </p>
+      );
+    }
+    if (trayLoading) {
+      return <Skeleton className="space-y-2" rowClassName="h-4 rounded bg-surface-container" />;
+    }
     return (
       <p className="text-sm text-on-surface-variant">
         No pending input — you're all caught up.

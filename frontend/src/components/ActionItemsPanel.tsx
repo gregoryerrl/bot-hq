@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useTauriQuery } from "../hooks/useInvoke";
+import { errorMessage, useTauriQuery } from "../hooks/useInvoke";
 import { Button } from "./ui/Button";
 import { formatRelative } from "../lib/time";
 import type { UserActionItemView } from "../lib/bindings";
@@ -36,7 +36,7 @@ export function ActionItemsPanel() {
       await invoke("dismiss_user_action_item", { sessionId: item.session_id, slug: item.slug });
       await queryClient.invalidateQueries({ queryKey: ["list_user_action_items"] });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorMessage(e));
     } finally {
       setBusy(null);
     }

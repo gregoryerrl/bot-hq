@@ -27,6 +27,8 @@ function row(over: Record<string, unknown> = {}) {
 function renderPanel(rows: unknown[]) {
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === "list_agent_feedback") return Promise.resolve(rows);
+    // The filed-by label reads the filing session's roster.
+    if (cmd === "list_session_participants") return Promise.resolve([]);
     return Promise.resolve(true);
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -43,6 +45,60 @@ describe("FeedbackPanel", () => {
   beforeEach(() => {
     mockInvoke.mockClear();
     mockInvoke.mockImplementation(() => Promise.resolve([]));
+  });
+
+  it("names the filer from the filing session's roster, never by slug", async () => {
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "list_agent_feedback") return Promise.resolve([row({ agent: "eyes" })]);
+      if (cmd === "list_session_participants") {
+        const { sessionId } = (args ?? {}) as { sessionId?: string };
+        return Promise.resolve(
+          sessionId === "s-224b28ce"
+            ? [
+                {
+                  id: 2,
+                  slug: "eyes",
+                  role_display_name: "EYES",
+                  model_display_name: "DeepSeek V4 Pro",
+                  turn_position: 1,
+                  participation_mode: "active",
+                  enabled: true,
+                },
+              ]
+            : [],
+        );
+      }
+      return Promise.resolve(true);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <FeedbackPanel />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText(/EYES · DeepSeek V4 Pro/)).toBeInTheDocument();
+    expect(screen.queryByText(/^eyes ·/)).not.toBeInTheDocument();
+  });
+
+  it("shows a placeholder while loading and the empty copy only once the queue answered", async () => {
+    let resolve: (rows: unknown[]) => void = () => {};
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_agent_feedback") return new Promise((r) => (resolve = r));
+      return Promise.resolve([]);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <FeedbackPanel />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    expect(screen.queryByText(/Nothing open/)).not.toBeInTheDocument();
+    resolve([]);
+    expect(await screen.findByText(/Nothing open/)).toBeInTheDocument();
   });
 
   it("defaults to the open queue", async () => {
@@ -86,7 +142,7 @@ describe("FeedbackPanel", () => {
   it("switching to all clears the status filter", async () => {
     renderPanel([row()]);
     await screen.findByText("Gate command is unreadable");
-    fireEvent.click(screen.getByRole("button", { name: "all" }));
+    fireEvent.click(screen.getByRole("button", { name: "All" }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("list_agent_feedback", {
         status: null,

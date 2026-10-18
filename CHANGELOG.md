@@ -268,6 +268,22 @@ and in `docs/rebuild-archive/`.
   "back-to-back errored turns". They are now read as limits with no reset
   time — the participant pauses on you at the first sighting, the account
   and model are marked, and the peers are told not to take over its work.
+- **Screens say "loading" while they load, and an error reads as text.** A
+  cold open of a session flashed "Session not found." until the row arrived;
+  the Feedback panel, the document tabs, the tray tab, the Roles pane and the
+  Context tab showed their empty-state copy during the fetch and after a
+  failed one. Each now shows a placeholder while loading, the error when the
+  read failed, and the empty copy only when the answer was empty. Four
+  places that caught an error from bot-hq (cancelling a scheduled run,
+  dismissing an action item, a Diagnostics endpoint call, opening the
+  Terminal tab) printed `[object Object]`; they print the message. The
+  Feedback panel names who filed a row as `ROLE · Model` from that session's
+  roster instead of an internal name, and its filters are labelled. The
+  confirm dialog's body scrolls, so a long plugin install consent no longer
+  pushes its buttons off the window. The Settings tab row wraps instead of
+  clipping its last tabs on a narrow window (and `?tab=notifications` /
+  `?tab=diagnostics` now open those tabs), and the window has a minimum size
+  of 1024 × 540.
 - **An agent is reminded to write its handoff mid-turn, not only between
   turns.** The context warnings were posted when a turn ended, so an agent
   whose context filled inside one long turn — most of the executor's did, in

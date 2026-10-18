@@ -57,11 +57,12 @@ export function SessionContextTab({ sessionId }: { sessionId: string }) {
 // ---------------------------------------------------------------------------
 
 function ProjectFiles({ project }: { project: string }) {
-  const { data: entries = [] } = useTauriQuery<ClIndexEntryView[]>(
-    "cl_index_search",
-    { project, query: null },
-  );
-  const { data: folders = [] } = useTauriQuery<ClFolderView[]>(
+  const {
+    data: entries = [],
+    isLoading: entriesLoading,
+    error: entriesError,
+  } = useTauriQuery<ClIndexEntryView[]>("cl_index_search", { project, query: null });
+  const { data: folders = [], isLoading: foldersLoading } = useTauriQuery<ClFolderView[]>(
     "cl_folder_search",
     { project, query: null },
   );
@@ -80,7 +81,11 @@ function ProjectFiles({ project }: { project: string }) {
       <aside className="w-64 flex-shrink-0 overflow-y-auto overflow-x-hidden border-r border-outline-variant bg-surface-container py-1">
         {entries.length === 0 && folders.length === 0 ? (
           <p className="px-3 py-3 font-code-sm text-code-sm text-on-surface-variant">
-            No indexed files for this project yet.
+            {entriesError
+              ? `Couldn't read the index: ${entriesError.message}`
+              : entriesLoading || foldersLoading
+                ? "Loading…"
+                : "No indexed files for this project yet."}
           </p>
         ) : (
           <FolderNode

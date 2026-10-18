@@ -54,17 +54,19 @@ export function ConfirmDialog({
         aria-modal="true"
         aria-label={title}
         className={cn(
-          "fixed left-1/2 top-1/2 z-50 w-[min(440px,90vw)] -translate-x-1/2 -translate-y-1/2",
+          "fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[min(440px,90vw)] -translate-x-1/2 -translate-y-1/2 flex-col",
           "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
         )}
       >
-        <h2 className="mb-3 font-headline-md text-headline-md text-on-surface">
+        <h2 className="mb-3 shrink-0 font-headline-md text-headline-md text-on-surface">
           {title}
         </h2>
-        <div className="mb-5 font-code-sm text-code-sm text-on-surface-variant">
+        {/* The body scrolls on its own (a plugin's install consent can run
+            long), so the buttons below never leave the window. */}
+        <div className="mb-5 min-h-0 overflow-y-auto overflow-x-hidden font-code-sm text-code-sm text-on-surface-variant">
           {message}
         </div>
-        <div className="flex justify-end gap-2">
+        <div className="flex shrink-0 justify-end gap-2">
           <Button variant="ghost" onClick={onCancel}>
             {cancelLabel}
           </Button>

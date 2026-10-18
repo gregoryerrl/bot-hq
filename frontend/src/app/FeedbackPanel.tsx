@@ -6,9 +6,11 @@ import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Markdown } from "../components/Markdown";
 import { Button } from "../components/ui/Button";
+import { Skeleton } from "../components/ui/Skeleton";
 import { cn } from "../lib/cn";
-import { formatRelative } from "../lib/time";
+import { formatRelative, formatTimestamp } from "../lib/time";
 import { shortSessionId } from "../lib/sessionId";
+import { authorLabel, useParticipantLabels } from "../lib/participants";
 
 /** Mirror of the Rust `AgentFeedbackView` — raw invoke, no binding needed. */
 interface AgentFeedbackView {
@@ -27,6 +29,13 @@ interface AgentFeedbackView {
 type Filter = "open" | "done" | "dismissed" | "all";
 
 const FILTERS: Filter[] = ["open", "done", "dismissed", "all"];
+
+const FILTER_LABELS: Record<Filter, string> = {
+  open: "Open",
+  done: "Done",
+  dismissed: "Dismissed",
+  all: "All",
+};
 
 /**
  * The read side of `file_feedback`: issues and ideas agents raised about bot-hq
@@ -47,7 +56,9 @@ export function FeedbackPanel() {
   // visited — so without a Refresh a row filed while the tab is open never
   // appeared for the rest of the app's run (round 8).
   const {
-    data: rows = [],
+    data: rows,
+    error: loadError,
+    isLoading,
     refetch,
     isFetching,
   } = useTauriQuery<AgentFeedbackView[]>("list_agent_feedback", {
@@ -95,7 +106,7 @@ export function FeedbackPanel() {
             variant={filter === f ? "secondary" : "ghost"}
             onClick={() => setFilter(f)}
           >
-            {f}
+            {FILTER_LABELS[f]}
           </Button>
         ))}
         <button
@@ -107,10 +118,19 @@ export function FeedbackPanel() {
         </button>
       </div>
 
-      {rows.length === 0 ? (
-        <p className="font-body-md text-body-md text-on-surface-variant">
+      {loadError ? (
+        <p className="rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+          Failed to read the feedback queue: {loadError.message}
+        </p>
+      ) : isLoading || rows === undefined ? (
+        <Skeleton
+          className="space-y-2"
+          rowClassName="h-10 rounded border border-outline-variant bg-surface-container"
+        />
+      ) : rows.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-outline-variant p-8 text-center font-code-sm text-code-sm text-on-surface-variant">
           {filter === "open"
-            ? "Nothing filed. Agents raise items here with file_feedback."
+            ? "Nothing open. Agents raise items here with file_feedback."
             : `No ${filter} items.`}
         </p>
       ) : (
@@ -139,8 +159,12 @@ export function FeedbackPanel() {
                 >
                   {f.title}
                 </button>
-                <span className="shrink-0 text-[0.7rem] text-on-surface-variant">
-                  {f.agent} · {formatRelative(f.created_at) || "earlier"}
+                <span
+                  className="shrink-0 font-code-sm text-code-sm text-on-surface-variant"
+                  title={formatTimestamp(f.created_at)}
+                >
+                  <FiledBy sessionId={f.session_id} author={f.agent} /> ·{" "}
+                  {formatRelative(f.created_at) || "earlier"}
                 </span>
               </div>
 
@@ -188,4 +212,15 @@ export function FeedbackPanel() {
       )}
     </div>
   );
+}
+
+/**
+ * Who filed the row, as `ROLE · Model` from that session's roster (rc3 D10) —
+ * the stored value is the participant's slug, which never goes on screen.
+ * One roster read per distinct session; a session whose roster is gone reads
+ * "Unknown participant".
+ */
+function FiledBy({ sessionId, author }: { sessionId: string; author: string }) {
+  const { labels } = useParticipantLabels(sessionId);
+  return <>{authorLabel(author, labels)}</>;
 }

@@ -320,7 +320,7 @@ export function RolesPanel() {
               }}
               onCancelCreate={() => {}}
             />
-          ) : (
+          ) : isLoading ? null : (
             <p className="px-5 py-6 font-code-sm text-code-sm text-on-surface-variant">
               Pick a role from the list, or add one.
             </p>

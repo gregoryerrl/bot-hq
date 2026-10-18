@@ -4,6 +4,7 @@ import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { parseUtcMs } from "../lib/time";
 import type { TrayRow } from "./HaltBanner";
+import { errorMessage } from "../hooks/useInvoke";
 
 /**
  * The approved gates still waiting for their run window to open (feedback
@@ -66,7 +67,7 @@ export function ScheduledRuns({
                 try {
                   await onCancel(row.choice_id);
                 } catch (e) {
-                  setError(e instanceof Error ? e.message : String(e));
+                  setError(errorMessage(e));
                 } finally {
                   setBusy(null);
                 }

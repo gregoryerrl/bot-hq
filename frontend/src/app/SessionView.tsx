@@ -54,6 +54,7 @@ import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GearIcon, WarnIcon } from "../components/icons";
 import { SubTabButton } from "../components/SubTabButton";
+import { Skeleton } from "../components/ui/Skeleton";
 import { SessionContextTab } from "./SessionContextTab";
 import { SessionTerminalTab } from "./SessionTerminalTab";
 import { invoke } from "@tauri-apps/api/core";
@@ -130,9 +131,11 @@ export function SessionView() {
   const openDocSlug = searchParams.get("doc");
   const navigate = useNavigate();
 
-  const { data: session, error: sessionError } = useTauriQuery<
-    SessionInfo | null
-  >("get_session", { sessionId });
+  const {
+    data: session,
+    error: sessionError,
+    isLoading: sessionLoading,
+  } = useTauriQuery<SessionInfo | null>("get_session", { sessionId });
 
   // Who is in this session, in turn order — the header roster (rc3 D10) — plus
   // the key → `ROLE · Model` index every author-keyed surface below resolves
@@ -583,6 +586,19 @@ export function SessionView() {
   }, [stagedPicksKey, deliveredTick]);
 
   if (!session) {
+    // `data` is undefined for the whole first fetch (and its retry), so a cold
+    // open used to flash "Session not found" before the row arrived. Only a
+    // settled empty answer is "not found".
+    if (sessionLoading && !sessionError) {
+      return (
+        <div className="p-6" aria-busy="true" aria-label="Loading session">
+          <Skeleton
+            className="space-y-3"
+            rowClassName="h-5 rounded bg-surface-container"
+          />
+        </div>
+      );
+    }
     return (
       <div className="p-6 font-body-md text-body-md text-on-surface-variant">
         {sessionError ? (
