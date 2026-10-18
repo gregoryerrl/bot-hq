@@ -42,7 +42,7 @@ pub const DIFF_HARDENING_ARGS: &[&str] = &["--no-ext-diff", "--no-textconv"];
 /// `git -C <repo> -c … -c …`, ready for `.args([...])`. Std `Command`; the
 /// async call sites wrap it in `spawn_blocking` as they already do.
 pub fn hardened(repo: &Path) -> Command {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process::command("git");
     cmd.arg("-C").arg(repo);
     for kv in HARDENING_CONFIG {
         cmd.arg("-c").arg(kv);

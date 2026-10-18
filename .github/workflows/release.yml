@@ -111,6 +111,31 @@ jobs:
           # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      # The release exe is a GUI-subsystem program since 1.0.9 (no console
+      # window beside the app), and that attribute is release-only, so no
+      # `cargo test` run sees it. Its hooks must still read stdin and write to
+      # the pipes a hook runner hands them: run the BUILT exe's Tool Gate hook
+      # against a `gate` keyword in a throwaway data dir and assert the
+      # refusal — exit 2 and the routing text on stderr. An allowed call exits
+      # 0 and prints nothing, which would prove nothing about the pipes.
+      - name: Smoke the built exe's hook over pipes (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          set -u
+          d="$RUNNER_TEMP/bothq-hook-smoke"
+          mkdir -p "$d/config"
+          printf '%s' '[{"keyword":"rm -rf","mode":"gate"}]' > "$d/config/tool-gate.json"
+          set +e
+          printf '%s' '{"tool_name":"Bash","tool_input":{"command":"rm -rf ./scratch"}}' \
+            | ./target/release/bot-hq.exe policy-check tool-gate --data-dir "$d" 2> "$d/stderr.txt"
+          code=$?
+          set -e
+          echo "exit=$code"
+          cat "$d/stderr.txt"
+          test "$code" -eq 2
+          grep -q 'action_gate' "$d/stderr.txt"
+          grep -q 'rm -rf ./scratch' "$d/stderr.txt"
+
       # Always uploaded to the run: a manual run stops here (validation
       # build); a tag push hands them to the release job below.
       - name: Upload bundles

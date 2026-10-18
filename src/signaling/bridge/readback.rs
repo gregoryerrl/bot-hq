@@ -293,7 +293,7 @@ fn unified_diff_with(old: &str, new: &str, envs: &[(&str, &str)]) -> Result<Opti
     let (a, b) = (dir.path().join("live"), dir.path().join("approved"));
     std::fs::write(&a, old).map_err(|e| format!("writing the live body: {e}"))?;
     std::fs::write(&b, new).map_err(|e| format!("writing the approved body: {e}"))?;
-    let out = std::process::Command::new("git")
+    let out = crate::process::command("git")
         .args(["diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "-U3", "--"])
         .arg(&a)
         .arg(&b)

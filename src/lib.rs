@@ -8,6 +8,7 @@ pub mod core;
 pub mod paths;
 pub mod plugins;
 pub mod policy;
+pub mod process;
 pub mod signaling;
 pub mod storage;
 pub mod tauri_cmd;

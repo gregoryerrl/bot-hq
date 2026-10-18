@@ -321,6 +321,16 @@ and in `docs/rebuild-archive/`.
   the command it withdraws. "View <file>" from Approval details closes the
   details first, so the viewer no longer opens behind it with one Escape
   closing both.
+- **Windows: no console window beside the app.** The Windows build was a
+  console program, so a black console window came up with bot-hq, and closing
+  it quit the app and every running agent with it. The release build is now a
+  windowed program: only the bot-hq window opens, and every program it starts
+  (claude, git, Git for Windows' shell, gh) runs without a console window of
+  its own. The git hooks and the Tool Gate, which run bot-hq's own `.exe`,
+  still read and print through the pipes they are given, and print to your
+  terminal when you run them there; every release build now checks that on
+  Windows before it is published. A debug build stays a console program, so
+  `cargo run` keeps its log in the terminal.
 - **Switching away from unsaved edits asks first.** Picking another role in
   Settings → Roles, opening another file in a session's Context tab, or
   closing the session settings drawer threw away what you had typed without a

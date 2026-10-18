@@ -32,16 +32,14 @@ pub(crate) fn parse_toast_enabled(reg_stdout: &str) -> Option<bool> {
 
 #[cfg(windows)]
 fn read_toast_enabled() -> Option<bool> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000; // a bare reg.exe flashes a console
-    let out = std::process::Command::new("reg")
+    // `process::command` carries CREATE_NO_WINDOW: a bare reg.exe flashes a console.
+    let out = crate::process::command("reg")
         .args([
             "query",
             r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\PushNotifications",
             "/v",
             "ToastEnabled",
         ])
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     if !out.status.success() {

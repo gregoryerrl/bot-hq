@@ -1,10 +1,15 @@
-# bot-hq on Windows — Tester Guide (v1.0.0)
+# bot-hq on Windows — Tester Guide (v1.0.9)
 
-Thanks for helping test bot-hq on Windows! Windows support in `v1.0.0` is
-newly hatched — it compiles, bundles and carries the platform plumbing
-(per-user install, process reaping, Git-for-Windows hooks), but it has seen
-far less live runtime than macOS, so expect a rough edge or two.
-Your feedback is exactly what we need.
+Thanks for helping test bot-hq on Windows! Windows support compiles, bundles
+and carries the platform plumbing (per-user install, process reaping,
+Git-for-Windows hooks), and every release runs the full test suite on Windows
+— but it has seen far less live runtime than macOS, so expect a rough edge or
+two. Your feedback is exactly what we need.
+
+**New in v1.0.9:** bot-hq no longer opens a console window beside the app.
+Until 1.0.8 a black console window came up with it, and closing that window
+quit bot-hq and every running agent. The app, and every program it starts
+(claude, git, gh), now runs without one — §3 lists what to check.
 
 bot-hq drives AI-assisted coding sessions through role-playing participants
 you configure — the seeded pair are **HANDS** (executes) and **EYES**
@@ -58,7 +63,7 @@ window on launch, install the Evergreen runtime from Microsoft:
 
 ## 2. Install bot-hq
 
-1. Download `bot-hq_1.0.0_x64-setup.exe` from the
+1. Download `bot-hq_1.0.9_x64-setup.exe` from the
    [GitHub release](https://github.com/gregoryerrl/bot-hq/releases).
 2. Run it. The installer is **unsigned**, so Windows SmartScreen will warn
    *"Windows protected your PC."* Click **More info → Run anyway**. (This is
@@ -72,6 +77,9 @@ window on launch, install the Evergreen runtime from Microsoft:
 Tick these off and tell us where it breaks:
 
 - [ ] **App launches** — you see the dashboard (not a blank window). *(WebView2 OK)*
+- [ ] **No console window** — only the bot-hq window opens: no black console
+      beside it at launch, and none flashing up while agents work (they run
+      claude, git and gh constantly). *(New in 1.0.9.)*
 - [ ] **Add a model** — Settings → Models → add your model + token, click **Test**.
       It should say reachable. *(If claude-code isn't installed right, the Test
       button surfaces a clear message — that's the check working.)*
@@ -82,6 +90,17 @@ Tick these off and tell us where it breaks:
 - [ ] **Make a commit** inside a session (have HANDS commit something, or commit
       in the session's working folder) and confirm it goes through. *(This
       exercises the policy git-hooks on Windows.)*
+- [ ] **A hook prints in your terminal** — in that folder, from PowerShell or
+      Git Bash, try `git commit --allow-empty -m "<a word from Settings → Policy →
+      Forbidden words>"`. The commit must be refused with bot-hq's banner
+      printed in the terminal. *(The hooks run the app's own `.exe`; this is the
+      check that its messages still reach a terminal now that it has no
+      console of its own.)*
+- [ ] **The Tool Gate still stops a command** — ask HANDS to run a command
+      matching one of Settings → Tool Gate's `gate` keywords; an approval card
+      must appear instead of the command running.
+- [ ] **Terminal tab** — open a session's Terminal tab and run `dir`; the
+      output appears.
 - [ ] **Second instance is blocked** — launch bot-hq again while it's running;
       it should refuse to start a second copy ("already running").
 - [ ] **OS notification fires** — Settings → Notifications → **Send test
@@ -97,9 +116,15 @@ Tick these off and tell us where it breaks:
 - **Unsigned installer** → the SmartScreen warning above. Normal for now.
 - **claude-code must be the native `.exe`** (see §1a). The npm `claude.cmd` is
   not supported on Windows yet.
-- Git hooks and the secret-token file permissions are new on Windows this
-  build — if commits behave oddly or you see a startup warning, that's useful to
-  report.
+- Git hooks are less travelled on Windows — if commits behave oddly or you see
+  a startup warning, that's useful to report.
+- **Terminal tab:** a shell that has exited can still look alive (ConPTY
+  delivers no end-of-file), and an agent's `terminal_exec` may not get the
+  screen-size reply some programs wait for unless the Terminal tab has been
+  opened once.
+- **Child processes:** if bot-hq itself crashes, an agent it started can keep
+  running until you end it in Task Manager (process trees are not yet tied to
+  a Windows Job Object).
 
 ---
 

@@ -36,7 +36,6 @@ use crate::policy::violations::{ViolationKind, ViolationOutcome, ViolationsLog};
 use crate::policy::Policy;
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Marker block written into each hook so we can recognize + safely
 /// re-install / detect manual edits.
@@ -813,7 +812,7 @@ fn push_target_label(names: &[String], head: impl FnOnce() -> Option<String>) ->
 fn pushing_non_fast_forward(updates: &[PushUpdate]) -> bool {
     updates.iter().any(|u| {
         update_is_force(u, |remote, local| {
-            std::process::Command::new("git")
+            crate::process::command("git")
                 .args(["merge-base", "--is-ancestor", remote, local])
                 .status()
                 .map(|s| s.success())
@@ -1722,7 +1721,7 @@ fn resolve_hooks_dir(working_repo: &Path) -> Option<PathBuf> {
     // Plain git on purpose: this asks WHERE the hooks live, and the hardened
     // form's `core.hooksPath` override would answer with its own decoy.
     // `rev-parse` runs no config-named program, so nothing is lost.
-    let out = Command::new("git")
+    let out = crate::process::command("git")
         .arg("-C")
         .arg(working_repo)
         .args(["rev-parse", "--git-path", "hooks"])
@@ -2102,7 +2101,7 @@ fn decode_git_stdout(bytes: Vec<u8>) -> String {
 /// test on the decode alone leaves the line the audit actually found (the
 /// strict `from_utf8` here) revertible with the suite green.
 fn git_output_in(repo: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::process::command("git")
         .current_dir(repo)
         .args(args)
         .output()
@@ -2120,6 +2119,7 @@ fn git_output(args: &[&str]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::tempdir;
 
     fn init_repo(dir: &Path) {

@@ -1,3 +1,11 @@
+// A Windows RELEASE build is a GUI-subsystem program: no console window opens
+// beside the app, and closing one can no longer quit bot-hq and every agent
+// with it. Every child it starts carries CREATE_NO_WINDOW (`bot_hq::process`),
+// and a CLI subcommand started bare from a terminal attaches to the parent's
+// console (`attach_parent_console_if_bare`). A debug build stays a console
+// program, so `cargo run` keeps its log in the terminal.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use anyhow::Result;
 use bot_hq::core::AppState as CoreAppState;
 use bot_hq::paths::{LockGuard, Paths};
@@ -40,6 +48,12 @@ fn main() -> Result<()> {
     // pay the GUI startup cost. Hooks invoke us hundreds of milliseconds
     // per commit; the GUI takes seconds.
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if args.len() >= 2
+        && matches!(args[1].as_str(), "policy-check" | "install-hooks" | "export-bindings")
+    {
+        attach_parent_console_if_bare();
+    }
     if args.len() >= 2 && args[1] == "policy-check" {
         return run_policy_check_cli(&args[2..]);
     }
@@ -911,8 +925,8 @@ fn show_startup_fatal_dialog(title: &str, body: &str) {
 /// this arm on macos-latest but nothing there executes the dialog.
 #[cfg(target_os = "macos")]
 fn show_startup_fatal_dialog(title: &str, body: &str) {
-    use std::process::{Command, Stdio};
-    let _ = Command::new("osascript")
+    use std::process::Stdio;
+    let _ = bot_hq::process::command("osascript")
         .arg("-e")
         .arg("on run argv")
         .arg("-e")
@@ -937,8 +951,8 @@ fn show_startup_fatal_dialog(title: &str, body: &str) {
 /// on ubuntu-22.04 but nothing there executes the dialog.
 #[cfg(all(unix, not(target_os = "macos")))]
 fn show_startup_fatal_dialog(title: &str, body: &str) {
-    use std::process::{Command, Stdio};
-    let zenity = Command::new("zenity")
+    use std::process::Stdio;
+    let zenity = bot_hq::process::command("zenity")
         .arg("--error")
         .arg("--no-markup")
         .arg(format!("--title={title}"))
@@ -950,7 +964,7 @@ fn show_startup_fatal_dialog(title: &str, body: &str) {
     if zenity.is_ok_and(|s| matches!(s.code(), Some(0) | Some(1))) {
         return;
     }
-    let _ = Command::new("kdialog")
+    let _ = bot_hq::process::command("kdialog")
         .arg("--title")
         .arg(title)
         .arg("--error")
@@ -1028,6 +1042,34 @@ fn init_logging(paths: &Paths) -> tracing_appender::non_blocking::WorkerGuard {
         )
         .init();
     guard
+}
+
+/// The release exe has no console of its own (`windows_subsystem` above), so a
+/// CLI subcommand started bare from a terminal would print nowhere: attach to
+/// the parent's console. Only when BOTH output handles are missing — a hook run
+/// by git or claude-code inherits pipes, and an attach that rebound a pipe to
+/// the console would lose every hook's message while its exit code still
+/// passed (EYES, s-8762e38a plan-eyes round 2). A console handle, a pipe or a
+/// file is left exactly as it is.
+#[cfg(windows)]
+fn attach_parent_console_if_bare() {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_UNKNOWN};
+    use windows_sys::Win32::System::Console::{
+        AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    // SAFETY: plain Win32 queries on this process's own standard handles.
+    let usable = |which| unsafe {
+        let h = GetStdHandle(which);
+        !h.is_null() && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN
+    };
+    if !usable(STD_OUTPUT_HANDLE) && !usable(STD_ERROR_HANDLE) {
+        // SAFETY: attaching to the parent's console; failure (no parent
+        // console, e.g. started from Explorer) leaves the process as it was.
+        unsafe {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
 }
 
 /// `bot-hq policy-check <subcommand>` — used by git hooks installed in

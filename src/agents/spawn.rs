@@ -539,7 +539,7 @@ pub async fn auth_status(claude_bin: &str, account_dir: Option<&str>) -> AuthPro
             return AuthProbe::LoggedOut;
         }
     }
-    let mut cmd = Command::new(claude_bin);
+    let mut cmd = crate::process::tokio_command(claude_bin);
     crate::appimage_env::scrub_tokio(&mut cmd);
     apply_account_env(&mut cmd, account_dir);
     cmd.args(["auth", "status", "--json"])
@@ -1729,7 +1729,7 @@ pub const HANDOFF_DUE_HOOK_TIMEOUT_SECS: u64 = 5;
 
 fn build_command(cfg: &SpawnConfig) -> Command {
     let bin = cfg.claude_bin.as_deref().unwrap_or("claude");
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::tokio_command(bin);
     // Scrub FIRST, before any env of ours: under an AppImage launch a child
     // inherits the payload's LD_LIBRARY_PATH and PYTHONHOME, which kills
     // `git` over HTTPS, `curl` and `python3` in the agent's own shell. A no-op

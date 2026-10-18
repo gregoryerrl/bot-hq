@@ -500,7 +500,7 @@ impl SessionTerminal {
 pub fn group_process_names(pgid: i32) -> Vec<String> {
     #[cfg(unix)]
     {
-        let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pgid=,comm="]).output() else {
+        let Ok(out) = crate::process::command("ps").args(["-A", "-o", "pgid=,comm="]).output() else {
             return Vec::new();
         };
         if !out.status.success() {
@@ -532,7 +532,7 @@ pub fn group_process_names(pgid: i32) -> Vec<String> {
 pub fn process_name(pid: i32) -> Option<String> {
     #[cfg(unix)]
     {
-        let out = std::process::Command::new("ps")
+        let out = crate::process::command("ps")
             .args(["-o", "comm=", "-p", &pid.to_string()])
             .output()
             .ok()?;

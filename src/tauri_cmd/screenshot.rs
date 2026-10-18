@@ -33,7 +33,6 @@
 use anyhow::Context;
 use chrono::Utc;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tauri::Manager;
 
 /// The window rectangle in LOGICAL screen coordinates, which is what every
@@ -131,7 +130,7 @@ fn run_capture(
     path: &Path,
 ) -> anyhow::Result<()> {
     let rect = format!("{},{},{},{}", region.x, region.y, region.w, region.h);
-    let output = Command::new("/usr/sbin/screencapture")
+    let output = crate::process::command("/usr/sbin/screencapture")
         .args(["-R", &rect, "-x", "-t", "png"])
         .arg(path)
         .output()
@@ -291,7 +290,7 @@ fn try_capture(
     // attributing one backend's image to another.
     let _ = std::fs::remove_file(path);
 
-    let mut cmd = Command::new(&capture.program);
+    let mut cmd = crate::process::command(&capture.program);
     cmd.args(&capture.args);
     // Under an AppImage launch the payload's library paths would follow the
     // backend into its own process. Measured on Fedora: Spectacle dies on

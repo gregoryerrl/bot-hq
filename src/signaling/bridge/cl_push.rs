@@ -17,7 +17,6 @@
 
 use crate::policy::secret_scan::{self, SecretHit};
 use std::path::Path;
-use std::process::Command;
 
 /// What a push attempt did. Every arm is a fact the caller can log or show;
 /// none of them is an error the CL write path should propagate.
@@ -53,7 +52,7 @@ impl PushOutcome {
 
 /// Run `git` in the library, returning trimmed stdout on success.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::process::command("git");
     // This git reaches the NETWORK: under an AppImage launch the payload's
     // libcurl chain makes `git-remote-https` abort with a symbol lookup error
     // before the transport opens, so the library push fails for a reason that
@@ -148,7 +147,7 @@ mod tests {
         let remote = dir.path().join("remote.git");
         let root = dir.path().join("library");
         std::fs::create_dir_all(&root).unwrap();
-        Command::new("git")
+        crate::process::command("git")
             .args(["init", "--bare", "-q"])
             .arg(&remote)
             .output()

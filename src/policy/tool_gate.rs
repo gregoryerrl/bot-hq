@@ -73,7 +73,7 @@ fn shell_present(shell: &str) -> bool {
     if let Some(&known) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(shell) {
         return known;
     }
-    let present = std::process::Command::new(shell)
+    let present = crate::process::command(shell)
         .arg("-c")
         .arg("true")
         .stdout(Stdio::null())
@@ -180,7 +180,7 @@ fn posix_shell() -> Result<PathBuf, String> {
         return Ok(found.clone());
     }
     let resolved = (|| {
-        let out = std::process::Command::new("git")
+        let out = crate::process::command("git")
             .arg("--exec-path")
             .output()
             .ok()?;
@@ -540,7 +540,7 @@ async fn run_in_shell(
     timeout: Duration,
     envs: &[(&str, &str)],
 ) -> CommandOutput {
-    let mut cmd = tokio::process::Command::new(shell);
+    let mut cmd = crate::process::tokio_command(shell);
     // A gated command is the user's own approved shell line, so it must
     // behave exactly as it would outside bot-hq — the payload's library paths
     // do not travel into it. A no-op off a payload. See `appimage_env`.

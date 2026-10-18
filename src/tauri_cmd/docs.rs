@@ -422,7 +422,7 @@ pub async fn summarize_session_doc(
 /// exactly as live-agent spawn does — see `agents::spawn::build_command`).
 /// Shared by the doc summarizer and the model pre-flight probe (B5).
 fn headless_claude_cmd(cfg: &AgentConfig, prompt: &str) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = crate::process::tokio_command("claude");
     // The same two scrubs live spawn runs FIRST (`agents::spawn::build_command`):
     // the AppImage payload's library paths, then the account — inherited
     // auth/billing variables out and the model row's config dir in — before
