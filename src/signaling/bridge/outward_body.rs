@@ -35,6 +35,13 @@ struct Word {
     text: String,
     dynamic: bool,
     op: bool,
+    /// Some expansion sat OUTSIDE double quotes, so the shell may word-split
+    /// or glob the result (`$x` can become `-X POST`). False for a word whose
+    /// every expansion was inside `"…"`, which stays one argument.
+    unquoted_dynamic: bool,
+    /// The literal text before the first expansion (`repos/o/r/pulls/` for
+    /// `"repos/o/r/pulls/$n"`); the whole text when the word is not dynamic.
+    literal_prefix: String,
 }
 
 /// One simple command's words, the heredoc BODIES it declared (in order), and
@@ -59,18 +66,44 @@ fn segments(command: &str) -> Vec<Segment> {
     let mut segs: Vec<Segment> = Vec::new();
     let mut seg = Segment::default();
     let mut cur = String::new();
-    let mut dynamic = false;
+    // The word being built: `dynamic` once any expansion is seen, `unquoted`
+    // once one is seen outside double quotes, `prefix` the text before the
+    // first one (see [`Word`]).
+    let mut word = WordState::default();
     let mut started = false;
     // (delimiter, strip leading tabs, index of the declaring segment)
     let mut pending_heredocs: Vec<(String, bool, usize)> = Vec::new();
     let mut next_piped = false;
     let mut i = 0;
 
-    fn finish(cur: &mut String, dynamic: &mut bool, started: &mut bool, seg: &mut Segment) {
-        if *started {
-            seg.words.push(Word { text: std::mem::take(cur), dynamic: *dynamic, op: false });
+    #[derive(Default)]
+    struct WordState {
+        dynamic: bool,
+        unquoted: bool,
+        prefix: Option<String>,
+    }
+    impl WordState {
+        fn expansion(&mut self, cur: &str, quoted: bool) {
+            self.dynamic = true;
+            self.unquoted |= !quoted;
+            if self.prefix.is_none() {
+                self.prefix = Some(cur.to_string());
+            }
         }
-        *dynamic = false;
+    }
+    fn finish(cur: &mut String, word: &mut WordState, started: &mut bool, seg: &mut Segment) {
+        if *started {
+            let text = std::mem::take(cur);
+            let literal_prefix = word.prefix.take().unwrap_or_else(|| text.clone());
+            seg.words.push(Word {
+                text,
+                dynamic: word.dynamic,
+                op: false,
+                unquoted_dynamic: word.unquoted,
+                literal_prefix,
+            });
+        }
+        *word = WordState::default();
         *started = false;
     }
     // Consume a balanced `open … close` span starting AT `open` into `cur`.
@@ -130,11 +163,11 @@ fn segments(command: &str) -> Vec<Segment> {
         let c = chars[i];
         match c {
             ' ' | '\t' => {
-                finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+                finish(&mut cur, &mut word, &mut started, &mut seg);
                 i += 1;
             }
             '\n' => {
-                finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+                finish(&mut cur, &mut word, &mut started, &mut seg);
                 end_segment(&mut seg, &mut segs, false, &mut next_piped);
                 i += 1;
                 // Heredoc bodies start on the line after their operator; each
@@ -167,7 +200,7 @@ fn segments(command: &str) -> Vec<Segment> {
                 }
             }
             ';' | '&' | '|' | '(' | ')' => {
-                finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+                finish(&mut cur, &mut word, &mut started, &mut seg);
                 // A single `|` (or `|&`) pipes into the next segment; `||`,
                 // `&&`, `;`, `&` and parens do not.
                 let pipe = c == '|' && chars.get(i + 1) != Some(&'|');
@@ -182,16 +215,16 @@ fn segments(command: &str) -> Vec<Segment> {
             '<' | '>' if chars.get(i + 1) == Some(&'(') => {
                 // Process substitution `<(…)` / `>(…)`: a command whose output
                 // becomes a path — dynamic, and recursed into by the caller.
-                finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+                finish(&mut cur, &mut word, &mut started, &mut seg);
                 started = true;
-                dynamic = true;
+                word.expansion(&cur, false);
                 cur.push(c);
                 i = consume_balanced(&chars, i + 1, &mut cur, '(', ')');
             }
             '<' | '>' => {
                 // A leading fd number (`2>`) was a separate word already; the
                 // operator itself becomes an `op` word.
-                finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+                finish(&mut cur, &mut word, &mut started, &mut seg);
                 let mut op = String::new();
                 op.push(c);
                 i += 1;
@@ -214,7 +247,7 @@ fn segments(command: &str) -> Vec<Segment> {
                     op.push('-');
                     i += 1;
                 }
-                seg.words.push(Word { text: op, dynamic: false, op: true });
+                seg.words.push(Word { text: op.clone(), dynamic: false, op: true, unquoted_dynamic: false, literal_prefix: op });
                 if heredoc {
                     // The delimiter word follows (quotes around it are removed).
                     while i < chars.len() && matches!(chars[i], ' ' | '\t') {
@@ -227,7 +260,7 @@ fn segments(command: &str) -> Vec<Segment> {
                         }
                         i += 1;
                     }
-                    seg.words.push(Word { text: delim.clone(), dynamic: false, op: false });
+                    seg.words.push(Word { text: delim.clone(), dynamic: false, op: false, unquoted_dynamic: false, literal_prefix: delim.clone() });
                     pending_heredocs.push((delim, strip_tabs, segs.len()));
                 }
             }
@@ -268,7 +301,7 @@ fn segments(command: &str) -> Vec<Segment> {
                             i += 2;
                         }
                         '$' | '`' => {
-                            dynamic = true;
+                            word.expansion(&cur, true);
                             i = consume_expansion(&chars, i, &mut cur);
                         }
                         other => {
@@ -281,7 +314,7 @@ fn segments(command: &str) -> Vec<Segment> {
             }
             '$' | '`' => {
                 started = true;
-                dynamic = true;
+                word.expansion(&cur, false);
                 i = consume_expansion(&chars, i, &mut cur);
             }
             other => {
@@ -291,7 +324,7 @@ fn segments(command: &str) -> Vec<Segment> {
             }
         }
     }
-    finish(&mut cur, &mut dynamic, &mut started, &mut seg);
+    finish(&mut cur, &mut word, &mut started, &mut seg);
     end_segment(&mut seg, &mut segs, false, &mut next_piped);
     segs
 }
@@ -609,6 +642,15 @@ pub(crate) fn is_outward(command: &str) -> bool {
 /// shrug once classed as a pure read. And a field read from a FILE (`-F
 /// k=@path`, `--input path`) sends that file's contents to GitHub, so it is
 /// never a read whatever the method.
+///
+/// One value the shell computes IS allowed: the ENDPOINT, when it is a
+/// double-quoted word whose literal start is not a flag and cannot become
+/// `graphql` — `gh api "repos/o/r/pulls/$n"` (s-8762e38a: such a read was
+/// queued as a publish and summoned the reviewer). Double quotes keep it one
+/// argument, so whatever `$n` holds, gh sees one endpoint under the same
+/// method. An unquoted `$x` can word-split into `-X POST`, so it stays out;
+/// so does any expansion in a flag's value. The endpoint is a URL path, never
+/// a body: nothing the variable holds leaves the machine as content.
 fn is_gh_api_get(c: &Cmd) -> bool {
     if c.tool != "gh" || c.opaque {
         return false;
@@ -618,12 +660,15 @@ fn is_gh_api_get(c: &Cmd) -> bool {
         return false;
     }
     let args = &args[1..];
-    if args.iter().any(|w| w.dynamic) {
-        return false;
-    }
+    let dynamic: Vec<usize> = (0..args.len()).filter(|&i| args[i].dynamic).collect();
+    let dynamic_index = match dynamic.as_slice() {
+        [] => None,
+        [i] if quoted_endpoint_shape(args[*i]) => Some(*i),
+        _ => return false,
+    };
     let mut method: Option<String> = None;
     let mut has_body = false;
-    let mut endpoint: Option<&str> = None;
+    let mut endpoint: Option<(usize, &str)> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].text.as_str();
@@ -686,11 +731,16 @@ fn is_gh_api_get(c: &Cmd) -> bool {
         } else if a.starts_with('-') {
             return false;
         } else if endpoint.is_none() {
-            endpoint = Some(a);
+            endpoint = Some((i, a));
         }
         i += 1;
     }
-    let Some(endpoint) = endpoint else { return false };
+    let Some((endpoint_index, endpoint)) = endpoint else { return false };
+    // The one computed word, if any, must be the endpoint itself — not a
+    // flag's value the loop consumed, not a second positional.
+    if dynamic_index.is_some_and(|d| d != endpoint_index) {
+        return false;
+    }
     if endpoint.trim_start_matches('/').eq_ignore_ascii_case("graphql") {
         return false;
     }
@@ -699,6 +749,20 @@ fn is_gh_api_get(c: &Cmd) -> bool {
         Some(_) => false,
         None => !has_body,
     }
+}
+
+/// May this computed word stand as a `gh api` endpoint (see
+/// [`is_gh_api_get`])? Every expansion inside double quotes, a literal start
+/// that is not empty and not a flag, and a start that `graphql` does not
+/// begin with — `"gra$x"` could become `graphql`, `"repos/$o"` cannot.
+fn quoted_endpoint_shape(w: &Word) -> bool {
+    if w.unquoted_dynamic {
+        return false;
+    }
+    let prefix = w.literal_prefix.trim_start_matches('/');
+    !prefix.is_empty()
+        && !w.literal_prefix.starts_with('-')
+        && !"graphql".starts_with(&prefix.to_ascii_lowercase())
 }
 
 /// Interpreters whose first positional argument is a script FILE to run.
@@ -1861,6 +1925,61 @@ mod tests {
         assert!(is_outward("gh api repos/o/r && gh issue comment 5 -b x"));
         assert!(is_outward("gh api repos/o/r | sh"), "a shell fed from the read is opaque");
         assert!(!is_outward("gh api repos/o/r | jq .name"));
+    }
+
+    /// s-8762e38a: a GET whose endpoint is a double-quoted word holding a
+    /// variable publishes nothing and no longer summons the reviewer — and
+    /// nothing else computed by the shell got in with it. The no-approval
+    /// read path keeps refusing every expansion: such a read still parks for
+    /// the user.
+    #[test]
+    fn a_quoted_variable_in_the_endpoint_is_still_a_get_and_nothing_else_is() {
+        for get in [
+            r#"gh api "repos/o/r/pulls/$n""#,
+            r#"gh api "repos/o/r/pulls/${n}/files" --jq '.[].filename'"#,
+            r#"gh api "/repos/$OWNER/$REPO" -H 'Accept: application/vnd.github+json'"#,
+            r#"gh api -X GET "search/issues?q=$Q""#,
+            r#"gh api "repos/o/r/issues/$(cat n.txt)""#,
+            "for n in 7 8 9; do gh api \"repos/o/r/pulls/$n\" | jq -r .title; done",
+        ] {
+            assert!(!is_outward(get), "a GET publishes nothing: {get}");
+            assert!(!is_gh_api_read(get), "but it is not a no-approval read: {get}");
+        }
+        for outward in [
+            "gh api repos/o/r/pulls/$n",                       // unquoted: may word-split
+            r#"gh api "$EP""#,                                 // no literal start at all
+            r#"gh api "/$EP""#,                                // a slash is not a start
+            r#"gh api "-$x""#,                                 // could become a flag
+            r#"gh api "gra$x""#,                               // could become graphql
+            r#"gh api "Graph$x""#,                             // case does not help
+            r#"gh api "repos/o/r/issues" -H "X-$h: y""#,       // computed flag value
+            r#"gh api "repos/o/r/issues/$n" -f title="$t""#,   // a computed body
+            r#"gh api "repos/$o" "repos/$r""#,                 // two computed words
+            r#"gh api repos/o/r "extra/$x""#,                  // computed second positional
+            r#"gh api "repos/$(gh pr comment 5 -b x)""#,       // the substitution publishes
+        ] {
+            assert!(is_outward(outward), "still outward: {outward}");
+            assert!(!is_gh_api_read(outward), "not a pure read: {outward}");
+        }
+    }
+
+    #[test]
+    fn words_record_where_their_expansions_sat() {
+        let w = |cmd: &str| segments(cmd)[0].words.last().unwrap().clone();
+        let q = w(r#"gh api "repos/o/r/pulls/$n""#);
+        assert!(q.dynamic && !q.unquoted_dynamic);
+        assert_eq!(q.literal_prefix, "repos/o/r/pulls/");
+        let u = w("gh api repos/$n");
+        assert!(u.dynamic && u.unquoted_dynamic);
+        assert_eq!(u.literal_prefix, "repos/");
+        let mixed = w(r#"gh api "repos/$o"/$r"#);
+        assert!(mixed.unquoted_dynamic, "one unquoted expansion taints the word");
+        let escaped = w(r#"gh api "repos/\$literal""#);
+        assert!(!escaped.dynamic, "an escaped dollar is text");
+        assert_eq!(escaped.literal_prefix, "repos/$literal");
+        let plain = w("gh api repos/o/r");
+        assert!(!plain.dynamic);
+        assert_eq!(plain.literal_prefix, "repos/o/r");
     }
 
     /// Feedback #55: the scripts a command RUNS — a shell or interpreter given a
