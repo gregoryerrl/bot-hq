@@ -33,7 +33,7 @@ import {
 } from "../lib/effort";
 import { cn } from "../lib/cn";
 import { PARTICIPANT_COLORS } from "../components/authorColor";
-import { RescanIcon, WarnIcon } from "../components/icons";
+import { CloseIcon, RescanIcon, WarnIcon } from "../components/icons";
 import { PresetOfferBanner } from "./PresetOfferCard";
 import { ActionItemsPanel } from "../components/ActionItemsPanel";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -683,9 +683,9 @@ export function Dashboard() {
                 type="button"
                 onClick={() => setCreating(false)}
                 aria-label="Close"
-                className="text-on-surface-variant hover:text-on-surface"
+                className="inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
               >
-                ×
+                <CloseIcon />
               </button>
             </div>
             {/* Two columns (ideas.md 2026-08-24): the session's SCOPE — title,
@@ -747,9 +747,9 @@ export function Dashboard() {
                     type="button"
                     onClick={() => setAdHocRepo("")}
                     aria-label="Clear picked folder"
-                    className="shrink-0 text-on-surface-variant transition-colors hover:text-on-surface"
+                    className="inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
                   >
-                    ×
+                    <CloseIcon />
                   </button>
                 </div>
               ) : (
@@ -926,9 +926,9 @@ export function Dashboard() {
                                   rows.filter((_, i) => i !== index),
                                 )
                               }
-                              className="ml-1 text-on-surface-variant transition-colors hover:text-on-surface"
+                              className="ml-1 inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
                             >
-                              ×
+                              <CloseIcon />
                             </button>
                           )}
                         </span>
@@ -1192,7 +1192,7 @@ export function Dashboard() {
               title="Clear filter"
               className="absolute inset-y-0 right-0 flex w-8 items-center justify-center text-on-surface-variant hover:text-on-surface"
             >
-              ×
+              <CloseIcon />
             </button>
           )}
         </div>

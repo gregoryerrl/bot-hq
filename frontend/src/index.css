@@ -80,3 +80,31 @@ body,
      widen the page itself, whatever a descendant does. */
   overflow-x: hidden;
 }
+
+/* Keyboard focus is visible everywhere, not only on <Button> and the
+   segmented toggle: a session tile (`role="link"`), a bare ✕, a tab, a chat
+   "View file" button all take focus and gave no sign of it. `:focus-visible`
+   only — a mouse click leaves no ring. Components that draw their own ring
+   (Button, SegToggle, the inputs) opt out with `focus-visible:outline-none`,
+   which wins by specificity on the element; the full-bleed text surfaces
+   (the Context Library editor's textarea, the terminal's hidden text box)
+   are excluded here so a ring never frames a whole pane. */
+@layer base {
+  :where(a, button, [role="button"], [role="link"], [role="tab"], input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 1px solid theme("colors.primary");
+    outline-offset: 1px;
+  }
+  :where(.xterm-helper-textarea, [data-no-focus-ring]):focus-visible {
+    outline: none;
+  }
+}
+
+/* A reduced-motion setting stops the pulses and spinners the app uses as
+   "working" cues; the information is in the text beside them. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-pulse,
+  .animate-spin,
+  .animate-bounce {
+    animation: none;
+  }
+}

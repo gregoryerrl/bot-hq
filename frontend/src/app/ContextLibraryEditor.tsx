@@ -634,6 +634,7 @@ function CodeView({
         readOnly={readOnly}
         spellCheck={false}
         aria-label="File content editor"
+        data-no-focus-ring
         className="h-full flex-1 resize-none overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-words border-0 bg-transparent px-4 py-3 leading-relaxed text-on-surface caret-primary outline-none focus:ring-0"
       />
     </div>

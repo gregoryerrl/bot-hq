@@ -9,7 +9,7 @@ import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { accountLabelOf, formatLimitMark, markIsLive, marksFor } from "../lib/accounts";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
-import { SaveIcon } from "../components/icons";
+import { CloseIcon, SaveIcon } from "../components/icons";
 import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 import { selectClass } from "../components/ui/Select";
@@ -407,9 +407,9 @@ function ModelDialog({
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="text-on-surface-variant hover:text-on-surface"
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
           >
-            ×
+            <CloseIcon />
           </button>
         </div>
 

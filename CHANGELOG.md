@@ -283,6 +283,14 @@ and in `docs/rebuild-archive/`.
   the command it withdraws. "View <file>" from Approval details closes the
   details first, so the viewer no longer opens behind it with one Escape
   closing both.
+- **Keyboard focus is visible everywhere, and motion respects the system
+  setting.** Only the main button style showed a focus ring; a session tile,
+  a tab, a close button or a "View file" button took focus with no sign of
+  it. Every focusable control now shows a one-pixel ring when reached from
+  the keyboard (a mouse click leaves none); the full-bleed editor and the
+  terminal are left alone. The bare "×" buttons in the New Session and Model
+  dialogs are proper 28 px icon buttons. A reduced-motion setting stops the
+  pulses and spinners.
 - **A usage limit reads as a warning and says since when.** The limit line
   under a model row and beside a New Session participant was muted grey like
   a hint; it is in the warning colour while the limit stands. A mark with no
