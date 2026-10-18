@@ -34,8 +34,11 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The text before the file's first test module: a `#[cfg(test)]` line whose
-/// next non-attribute line opens a `mod`.
+/// The text before the file's first INLINE test module: a `#[cfg(test)]` line
+/// whose next non-attribute line opens a `mod` with its body here (`mod tests
+/// {`). A `#[cfg(test)] mod parity;` declaration is not one — its body is
+/// another file, scanned on its own — so the scan goes on past it (EYES
+/// 81b05b40: it used to end `src/signaling/mod.rs` at line 32 of 56).
 fn production_part(src: &str) -> &str {
     let lines: Vec<&str> = src.split_inclusive('\n').collect();
     let mut offset = 0;
@@ -45,7 +48,9 @@ fn production_part(src: &str) -> &str {
                 .iter()
                 .map(|l| l.trim())
                 .find(|l| !l.starts_with("#["));
-            if next.is_some_and(|l| l.starts_with("mod ") || l.starts_with("pub mod ")) {
+            if next.is_some_and(|l| {
+                (l.starts_with("mod ") || l.starts_with("pub mod ")) && l.ends_with('{')
+            }) {
                 return &src[..offset];
             }
         }
@@ -115,7 +120,10 @@ fn the_scan_sees_production_spawns_and_skips_tests_and_comments() {
                }\n";
     let hits = raw_spawns(src);
     assert_eq!(hits.iter().map(|(n, _)| *n).collect::<Vec<_>>(), vec![3, 4], "{hits:?}");
-    // A `#[cfg(test)]` on an item that is not a module does not end the scan.
+    // A `#[cfg(test)]` on an item that is not a module does not end the scan,
+    // and neither does a test module declared in another file.
     let item = "#[cfg(test)]\nfn helper() {}\nfn d() { tokio::process::Command::new(\"x\"); }\n";
     assert_eq!(raw_spawns(item).len(), 1);
+    let declared = "#[cfg(test)]\nmod parity;\nfn e() { std::process::Command::new(\"git\"); }\n";
+    assert_eq!(raw_spawns(declared).len(), 1, "a `mod parity;` declaration is not a test body");
 }
