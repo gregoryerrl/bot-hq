@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { keepPreviousData } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
@@ -57,8 +57,10 @@ export function ModelsPanel() {
   // Inline delete error so a rejected delete_model surfaces in the confirm
   // dialog instead of silently failing (the dialog stays open to show it).
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  // A failed Clear used to reject silently (a bare `await mutateAsync`).
-  const [clearError, setClearError] = useState<string | null>(null);
+  // A failed Clear used to reject silently (a bare `await mutateAsync`). The
+  // error belongs under the row whose Clear failed, keyed by the model row and
+  // the mark — one list-wide string showed it under every marked row.
+  const [clearError, setClearError] = useState<{ key: string; message: string } | null>(null);
   // B5: per-model pre-flight "Test connection" state + last result.
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, ValidateResult>>({});
@@ -189,9 +191,12 @@ export function ModelsPanel() {
                     </Button>
                   </div>
                 </div>
-                {marksFor(m, marks).map((mark) => (
+                {marksFor(m, marks).map((mark) => {
+                  const markKey = `${mark.config_dir}|${mark.org_id}|${mark.model_name}`;
+                  const errorKey = `${m.id}|${markKey}`;
+                  return (
+                  <Fragment key={markKey}>
                   <div
-                    key={`${mark.config_dir}|${mark.org_id}|${mark.model_name}`}
                     data-testid="model-limit"
                     className="flex flex-wrap items-center gap-2 px-4 pb-2 font-code-sm text-code-sm"
                   >
@@ -217,19 +222,21 @@ export function ModelsPanel() {
                           });
                           await refetchMarks();
                         } catch (e) {
-                          setClearError(errorMessage(e));
+                          setClearError({ key: errorKey, message: errorMessage(e) });
                         }
                       }}
                     >
                       Clear
                     </Button>
                   </div>
-                ))}
-                {clearError && marksFor(m, marks).length > 0 && (
-                  <p role="alert" className="px-4 pb-2 font-code-sm text-code-sm text-error">
-                    Couldn't clear the limit: {clearError}
-                  </p>
-                )}
+                  {clearError?.key === errorKey && (
+                    <p role="alert" className="px-4 pb-2 font-code-sm text-code-sm text-error">
+                      Couldn't clear the limit: {clearError.message}
+                    </p>
+                  )}
+                  </Fragment>
+                  );
+                })}
                 {testResult[m.id] && (
                   <div
                     className={cn(

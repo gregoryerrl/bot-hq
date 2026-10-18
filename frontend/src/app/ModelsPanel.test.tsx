@@ -251,6 +251,39 @@ describe("Settings → Models — usage-limit marks (0091)", () => {
     );
   });
 
+  it("a failed Clear shows its error under its own row only", async () => {
+    const until = new Date(Date.now() + 3600 * 1000).toISOString();
+    const markOn = (model_name: string): AccountMark => ({
+      config_dir: "/Users/me/.claude-acct-2",
+      org_id: "org-2",
+      model_name,
+      email: "two@example.com",
+      limited_until: until,
+      limited_text: "You've hit your session limit · resets 8pm (Asia/Manila)",
+      marked_at: new Date().toISOString(),
+    });
+    mockBackend(
+      [
+        { ...OPUS, id: "m-opus-b", display_name: "Opus · acct 2", claude_config_dir: "/Users/me/.claude-acct-2" },
+        { ...OPUS, id: "m-fable-b", display_name: "Fable · acct 2", model_name: "claude-fable-5-1", claude_config_dir: "/Users/me/.claude-acct-2" },
+      ],
+      [markOn("claude-opus-5-5"), markOn("claude-fable-5-1")],
+    );
+    const backend = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation(async (cmd, args, options) => {
+      if (cmd === "clear_account_mark") throw { kind: "storage", message: "database is locked" };
+      return backend(cmd, args, options);
+    });
+    renderPanel();
+    const limits = await screen.findAllByTestId("model-limit");
+    expect(limits).toHaveLength(2);
+    fireEvent.click(within(limits[1]).getByRole("button", { name: /clear/i }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Couldn't clear the limit: database is locked");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(limits[1].nextElementSibling).toBe(alert);
+  });
+
   it("marksFor and limitLine", () => {
     const mark: AccountMark = {
       config_dir: "",
