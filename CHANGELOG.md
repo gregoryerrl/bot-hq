@@ -268,6 +268,21 @@ and in `docs/rebuild-archive/`.
   "back-to-back errored turns". They are now read as limits with no reset
   time — the participant pauses on you at the first sighting, the account
   and model are marked, and the peers are told not to take over its work.
+- **The close card reads as a close, and the strips above the input box
+  stay in bounds.** The card an agent parks when it thinks the work is done
+  was dressed as a generic "APPROVAL · is blocked until you answer" with
+  Approve/Reject buttons, although Approve closes and archives the session
+  and the typed text becomes the agent's next instruction. It now says
+  "CLOSE SESSION?", its buttons are "Close session" and "Keep open", and the
+  text box says what the words are for. A gate's request — a close recap can
+  run to a thousand characters — is clamped to four lines with a "show the
+  full request" toggle (expanded, it scrolls in its own box), so it no longer
+  squeezed the chat to nothing; the header row and the scheduled-run rows
+  wrap on a narrow pane instead of pushing their buttons out of the box. A
+  scheduled run's Cancel asks first ("Cancel this scheduled run?") and shows
+  the command it withdraws. "View <file>" from Approval details closes the
+  details first, so the viewer no longer opens behind it with one Escape
+  closing both.
 - **Screens say "loading" while they load, and an error reads as text.** A
   cold open of a session flashed "Session not found." until the row arrived;
   the Feedback panel, the document tabs, the tray tab, the Roles pane and the

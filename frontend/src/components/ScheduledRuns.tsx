@@ -5,6 +5,7 @@ import { authorColorClass } from "./authorColor";
 import { parseUtcMs } from "../lib/time";
 import type { TrayRow } from "./HaltBanner";
 import { errorMessage } from "../hooks/useInvoke";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 /**
  * The approved gates still waiting for their run window to open (feedback
@@ -34,7 +35,23 @@ export function ScheduledRuns({
   }, [scheduled.length]);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The row whose Cancel is awaiting the confirm — taking an approval back is
+  // one click away from a running command's output, so it asks first.
+  const [confirming, setConfirming] = useState<TrayRow | null>(null);
   if (scheduled.length === 0) return null;
+
+  const cancel = async (row: TrayRow) => {
+    setConfirming(null);
+    setBusy(row.choice_id);
+    setError(null);
+    try {
+      await onCancel(row.choice_id);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <div
@@ -47,12 +64,17 @@ export function ScheduledRuns({
         const who = label?.(row.agent) ?? row.agent;
         const command = firstLine(row.command_text ?? "");
         return (
-          <div key={row.choice_id} className="flex items-center gap-2 py-0.5 text-xs">
+          <div
+            key={row.choice_id}
+            className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5 text-xs"
+          >
             <span className="font-label-caps text-label-caps text-tertiary">⏱ SCHEDULED</span>
             <span className={cn("font-semibold", authorColorClass(who, hues))}>{who}</span>
             <span className="text-on-surface-variant">{runsLabel(row.run_not_before ?? null, now)}</span>
+            {/* The first line, clipped at the pane's width; the whole command
+                is in the title and in the gate ledger. */}
             <code
-              className="min-w-0 flex-1 truncate font-mono text-on-surface"
+              className="min-w-[8rem] flex-1 basis-40 truncate font-mono text-on-surface"
               title={row.command_text ?? ""}
             >
               {command}
@@ -60,25 +82,40 @@ export function ScheduledRuns({
             <Button
               size="sm"
               variant="ghost"
+              className="ml-auto"
               disabled={busy === row.choice_id}
-              onClick={async () => {
-                setBusy(row.choice_id);
-                setError(null);
-                try {
-                  await onCancel(row.choice_id);
-                } catch (e) {
-                  setError(errorMessage(e));
-                } finally {
-                  setBusy(null);
-                }
-              }}
+              onClick={() => setConfirming(row)}
             >
-              Cancel
+              {busy === row.choice_id ? "Cancelling…" : "Cancel run"}
             </Button>
           </div>
         );
       })}
       {error && <p className="mt-1 text-xs text-error">{error}</p>}
+      <ConfirmDialog
+        open={confirming !== null}
+        title="Cancel this scheduled run?"
+        message={
+          confirming ? (
+            <>
+              <p>
+                The approval is taken back and the command will not run. The agent is told the
+                run was cancelled.
+              </p>
+              <pre className="mt-2 max-h-40 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5">
+                {confirming.command_text ?? ""}
+              </pre>
+            </>
+          ) : null
+        }
+        confirmLabel="Cancel run"
+        cancelLabel="Keep it scheduled"
+        confirmVariant="danger"
+        onConfirm={() => {
+          if (confirming) void cancel(confirming);
+        }}
+        onCancel={() => setConfirming(null)}
+      />
     </div>
   );
 }

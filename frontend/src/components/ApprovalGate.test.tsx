@@ -70,7 +70,7 @@ describe("ApprovalGate", () => {
     expect(screen.getByTestId("close-still-acting")).toHaveTextContent(
       "HANDS · Opus is still acting on the recap's detail",
     );
-    expect(screen.getByRole("button", { name: /^approve$/i })).not.toBeDisabled();
+    expect(screen.getByRole("button", { name: "Close session" })).not.toBeDisabled();
     // Its turn ended: the marker goes.
     rerender(<ApprovalGate rows={[close]} onResolve={resolved()} isActing={() => false} />);
     expect(screen.queryByTestId("close-still-acting")).not.toBeInTheDocument();
@@ -126,6 +126,48 @@ describe("ApprovalGate", () => {
     fireEvent.click(buttons[1]);
     expect(onViewFile).toHaveBeenLastCalledWith("/tmp/merge-524.md");
     expect(onViewFile).toHaveBeenCalledTimes(2);
+    // The dialog hands over to the viewer instead of staying up behind it
+    // (both overlays were `z-50`, and one Escape closed both).
+    expect(screen.queryByRole("dialog", { name: "Approval details" })).not.toBeInTheDocument();
+  });
+
+  // The close card is not a gated command: Approve closes and archives the
+  // session and the typed text becomes the agent's next instruction, so it
+  // reads that way. The wire strings stay "Approve"/"Reject".
+  it("a close card says what its buttons do, and still sends the wire strings", async () => {
+    const onResolve = resolved();
+    render(
+      <ApprovalGate
+        rows={[approval({ kind: "close", command_text: null, prompt: "Close session?\nAll done." })]}
+        onResolve={onResolve}
+      />,
+    );
+    expect(screen.getByRole("group", { name: "Close session?" })).toBeInTheDocument();
+    expect(screen.getByText("CLOSE SESSION?")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "Next instruction" }), {
+      target: { value: "also bump the cask" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Keep open" }));
+    await waitFor(() =>
+      expect(onResolve).toHaveBeenCalledWith("c-1", "Reject — also bump the cask", false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+    await waitFor(() => expect(onResolve).toHaveBeenCalledWith("c-1", "Approve", false));
+  });
+
+  // A close card's prompt is the recap (up to ~1,200 chars): clamped with a
+  // toggle, never truncated — the full text stays in the DOM.
+  it("clamps a long request behind a toggle and keeps the whole text", () => {
+    const long = Array.from({ length: 12 }, (_, i) => `- item ${i}: done and verified`).join("\n");
+    render(<ApprovalGate rows={[approval({ kind: "close", command_text: null, prompt: long })]} onResolve={resolved()} />);
+    const toggle = screen.getByRole("button", { name: "show the full request" });
+    expect(screen.getByText(/item 11: done/)).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "show less" })).toBeInTheDocument();
+    // A short request has no toggle.
+    render(<ApprovalGate rows={[approval({ choice_id: "c-2", prompt: "Run it?" })]} onResolve={resolved()} />);
+    expect(screen.getAllByRole("button", { name: /show the full request|show less/ })).toHaveLength(1);
   });
 
   it("names the requester as ROLE · Model in Details too — never the stored slug (rc3 D10, round 8)", () => {

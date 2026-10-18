@@ -8,6 +8,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { TrayRow } from "./HaltBanner";
 import { fileArgsInCommand } from "./FileViewerDialog";
+import { clampOverflows, useMeasuredClampOverflow } from "../hooks/useClampOverflow";
 
 /** How many View-file buttons a card renders before summarising the rest. */
 const VIEW_FILE_BUTTON_CAP = 3;
@@ -131,25 +132,33 @@ export function ApprovalGate({
   };
 
   const urgent = row.urgent_reason ?? null;
+  // A close card is not a gated command: Approve closes and archives the
+  // session, and the typed text goes to the agent as its next instruction.
+  // The wire strings stay "Approve"/"Reject" (the backend keys on them); only
+  // what the user reads changes.
+  const isClose = row.kind === "close";
 
   return (
     <div
       role="group"
-      aria-label="Approval required"
+      aria-label={isClose ? "Close session?" : "Approval required"}
       className={cn(
         "border-t bg-surface-container-low p-3",
         urgent ? "border-error/70" : "border-primary/40",
       )}
     >
-      <div className="flex items-baseline gap-2">
+      {/* Wraps: the label, the name, the status, Details and the queue count
+          share one line on a wide pane and stack on a narrow one instead of
+          pushing Details out of the box. */}
+      <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className={cn("font-label-caps text-label-caps", urgent ? "text-error" : "text-primary")}>
-          {urgent ? "🚨 URGENT APPROVAL" : "⛔ APPROVAL"}
+          {urgent ? "🚨 URGENT APPROVAL" : isClose ? "CLOSE SESSION?" : "⛔ APPROVAL"}
         </span>
         <span className={cn("text-sm font-semibold", authorColorClass(who, hues))}>
           {who}
         </span>
         <span className="text-xs text-on-surface-variant">
-          is blocked until you answer
+          {isClose ? "says the work is done — the session waits for your answer" : "is blocked until you answer"}
         </span>
         <button
           type="button"
@@ -176,9 +185,7 @@ export function ApprovalGate({
           🚨 {urgent}
         </p>
       )}
-      <p className="mt-1.5 whitespace-pre-wrap break-words text-sm text-on-surface">
-        {gatePrompt(row)}
-      </p>
+      <ClampedPrompt key={row.choice_id} text={gatePrompt(row)} />
       {row.kind === "close" && isActing?.(row.agent) && (
         <p
           data-testid="close-still-acting"
@@ -244,7 +251,9 @@ export function ApprovalGate({
                 disabled={!!busy}
                 onClick={() => void resolve("Approve")}
               >
-                {busy === "Approve" ? "Approving…" : "Approve"}
+                {isClose
+                  ? busy === "Approve" ? "Closing…" : "Close session"
+                  : busy === "Approve" ? "Approving…" : "Approve"}
               </Button>
               <Button
                 type="button"
@@ -264,14 +273,18 @@ export function ApprovalGate({
                   )
                 }
               >
-                {busy?.startsWith("Reject") ? "Rejecting…" : "Reject"}
+                {isClose
+                  ? busy?.startsWith("Reject") ? "Keeping open…" : "Keep open"
+                  : busy?.startsWith("Reject") ? "Rejecting…" : "Reject"}
               </Button>
               <input
                 type="text"
                 value={rejectReason}
                 onChange={(e) => setRejectReason(e.target.value)}
-                placeholder="why? (optional — sent with Reject)"
-                aria-label="Rejection reason"
+                placeholder={
+                  isClose ? "next instruction (optional — sent with Keep open)" : "why? (optional — sent with Reject)"
+                }
+                aria-label={isClose ? "Next instruction" : "Rejection reason"}
                 disabled={!!busy}
                 className="min-w-40 flex-1 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
               />
@@ -320,7 +333,15 @@ export function ApprovalGate({
           who={who}
           hues={hues}
           onClose={() => setShowDetails(false)}
-          onViewFile={onViewFile}
+          // One overlay at a time: the viewer opened BEHIND this dialog (both
+          // `z-50`, the viewer earlier in the DOM) and one Escape closed both.
+          onViewFile={
+            onViewFile &&
+            ((path) => {
+              setShowDetails(false);
+              onViewFile(path);
+            })
+          }
         />
       )}
     </div>
@@ -453,6 +474,42 @@ function gatePrompt(row: TrayRow): string {
   const at = row.prompt.indexOf(fenced);
   const after = at >= 0 ? row.prompt.slice(at + fenced.length).trim() : "";
   return after ? `${question}\n${after}` : question;
+}
+
+/**
+ * The request, clamped like the halt banner's recap: a close card's prompt IS
+ * the recap (up to ~1,200 characters), and rendered whole it squeezed the chat
+ * to nothing above the input box. Clamped, not truncated — the full text is in
+ * the DOM and one click away, and expanded it scrolls inside its own capped
+ * block so the buttons below stay reachable. Keyed by the row in the caller,
+ * so a new card opens collapsed.
+ */
+function ClampedPrompt({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [ref, measuredOverflow] = useMeasuredClampOverflow<HTMLParagraphElement>(text, expanded);
+  return (
+    <>
+      <p
+        ref={ref}
+        className={cn(
+          "mt-1.5 whitespace-pre-wrap break-words text-sm text-on-surface",
+          !expanded && "line-clamp-4",
+          expanded && "max-h-[40vh] overflow-y-auto overflow-x-hidden",
+        )}
+      >
+        {text}
+      </p>
+      {(clampOverflows(text, 4) || measuredOverflow) && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-0.5 text-xs text-primary underline underline-offset-2"
+        >
+          {expanded ? "show less" : "show the full request"}
+        </button>
+      )}
+    </>
+  );
 }
 
 /**

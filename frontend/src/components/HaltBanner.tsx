@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { clampOverflows, useMeasuredClampOverflow } from "../hooks/useClampOverflow";
 import { cn } from "../lib/cn";
 import { parseUtcMs } from "../lib/time";
 import { authorColorClass } from "./authorColor";
@@ -104,71 +105,10 @@ export function isTrayItem(r: {
 }
 
 /**
- * Above this, a halt reason gets a "show the full recap" toggle.
- *
- * **Set from what participants actually write, not from taste.** Across the 28
- * halts on record the reason averages 277 characters and the longest is 1,166 —
- * because the recap the user asked for is a recap: *"PR #514 is open, CI fully
- * green (ci 3m40s, quality 3m35s), mergeStateStatus CLEAN…"*. Rendered whole,
- * that is ~15 lines of banner sitting on top of the input box, and the banner
- * would push away the very box it exists to be adjacent to.
- *
- * Note the prompts never had to be changed to get this. The brainstorm assumed
- * the recap would need one — *"its value depends on a prompt change with no
- * gate behind it"* — and participants were already writing them.
+ * The clamp and its toggle live in `hooks/useClampOverflow` (the gate's close
+ * card shows the same recap and clamps it the same way).
  */
-const RECAP_CLAMP_CHARS = 200;
-
-/**
- * Would the collapsed clamp visually cut this reason?
- *
- * Char count alone lied (issues.md 2026-08-24): the clamp is
- * `line-clamp-3`, so a SUB-200-char reason with 4+ newlines — the bulleted
- * shape agents actually write — rendered truncated with NO toggle at all,
- * and the rest of the recap was unreachable by any interaction. Rendered
- * line count and char count are different quantities; this gates the
- * toggle on either. (>= 3 newlines = 4+ lines, one past the clamp.)
- */
-export function recapOverflows(reason: string): boolean {
-  const newlines = (reason.match(/\n/g) ?? []).length;
-  return reason.length > RECAP_CLAMP_CHARS || newlines >= 3;
-}
-
-/**
- * The RENDERED half of the overflow question (EYES B1, advisory 74113c5f).
- *
- * {@link recapOverflows} is a static floor, and any static rule is a proxy:
- * the left panel is user-resizable, so a 190-char single-line recap wraps to
- * 5 lines in a narrow pane, clamps at 3, and the static gate shows no toggle
- * — the user's filed bug back again through a different door. Layout is the
- * only authority on layout: while the recap is COLLAPSED, compare
- * `scrollHeight` to `clientHeight` on the clamped element and re-measure on
- * resize. The measurement can only ADD the toggle, never remove it, and it
- * keeps its last value while expanded so "show less" cannot vanish. In jsdom
- * both heights are 0, so tests exercise the static floor; the measured path
- * is covered by mocking the height getters.
- */
-function useMeasuredClampOverflow(
-  reason: string,
-  expanded: boolean,
-): [React.RefObject<HTMLSpanElement>, boolean] {
-  const ref = useRef<HTMLSpanElement>(null);
-  const [overflows, setOverflows] = useState(false);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    // Measure the CLAMPED rendering only — expanded, scrollHeight measures
-    // the internal scroller instead, which says nothing about the clamp.
-    if (!el || expanded) return;
-    // +1: fractional line-height rounding must not flicker the toggle.
-    const measure = () => setOverflows(el.scrollHeight > el.clientHeight + 1);
-    measure();
-    if (typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [reason, expanded]);
-  return [ref, overflows];
-}
+export const recapOverflows = clampOverflows;
 
 /**
  * **Why the session has stopped, above the box where you answer it.**
@@ -264,7 +204,7 @@ export function HaltBanner({
   const wakeAt = halt && typeof halt.reason === "string" ? (halt.wake_at ?? null) : null;
   const now = useCountdown(wakeAt);
   const reasonText = halt && typeof halt.reason === "string" ? halt.reason : "";
-  const [reasonRef, measuredOverflow] = useMeasuredClampOverflow(reasonText, expanded);
+  const [reasonRef, measuredOverflow] = useMeasuredClampOverflow<HTMLSpanElement>(reasonText, expanded);
   // A NEW recap opens collapsed (EYES B3): nothing else resets `expanded`, so
   // a halt declared after the user expanded the previous one rendered
   // pre-expanded — and, since the measurement pauses while expanded, carried

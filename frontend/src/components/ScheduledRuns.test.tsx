@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { ScheduledRuns, runsLabel } from "./ScheduledRuns";
 import type { TrayRow } from "./HaltBanner";
@@ -38,8 +38,13 @@ describe("ScheduledRuns", () => {
     expect(strip).toHaveTextContent(/runs \d\d:\d\d \(in [34] min\)/);
     expect(strip).toHaveTextContent("gh pr merge 803 --squash");
     expect(strip).not.toHaveTextContent("second line");
-    expect(screen.getAllByRole("button", { name: "Cancel" })).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // Taking an approval back asks first: the row's button opens the confirm,
+    // and only its "Cancel run" withdraws.
+    expect(screen.getAllByRole("button", { name: "Cancel run" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Cancel this scheduled run?" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel run" }));
     await waitFor(() => expect(onCancel).toHaveBeenCalledWith("c-1"));
   });
 
@@ -50,7 +55,8 @@ describe("ScheduledRuns", () => {
 
   it("shows a failed cancel's message", async () => {
     render(<ScheduledRuns rows={[row()]} onCancel={vi.fn().mockRejectedValue(new Error("not scheduled any more"))} />);
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel run" }));
     await waitFor(() => expect(screen.getByText("not scheduled any more")).toBeInTheDocument());
   });
 
@@ -61,5 +67,14 @@ describe("ScheduledRuns", () => {
     expect(runsLabel(new Date(2026, 9, 13, 11, 0).toISOString(), now)).toBe("runs 11:00 (in 1 h 46 min)");
     expect(runsLabel(new Date(2026, 9, 13, 9, 10).toISOString(), now)).toBe("runs now (09:10)");
     expect(runsLabel(null, now)).toBe("runs when its window opens");
+  });
+
+  it("keeps the run when the confirm is declined", () => {
+    const onCancel = vi.fn();
+    render(<ScheduledRuns rows={[row()]} onCancel={onCancel} />);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel run" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep it scheduled" }));
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 });
