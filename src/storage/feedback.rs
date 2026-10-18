@@ -54,7 +54,7 @@ impl Storage {
             Some(s) => {
                 sqlx::query_as::<_, AgentFeedback>(
                     "SELECT id, session_id, project, agent, kind, title, body, status, \
-                            created_at, updated_at \
+                            created_at, updated_at, resolution, resolved_by \
                      FROM agent_feedback WHERE status = ? ORDER BY id DESC",
                 )
                 .bind(s)
@@ -64,7 +64,7 @@ impl Storage {
             None => {
                 sqlx::query_as::<_, AgentFeedback>(
                     "SELECT id, session_id, project, agent, kind, title, body, status, \
-                            created_at, updated_at \
+                            created_at, updated_at, resolution, resolved_by \
                      FROM agent_feedback ORDER BY id DESC",
                 )
                 .fetch_all(&self.pool)
@@ -76,16 +76,51 @@ impl Storage {
     }
 
     /// Move a row through its lifecycle. Returns rows affected (0 = unknown id).
+    /// Reopening a row clears its resolution: a reason for a row that is open
+    /// again would describe a closure that no longer holds.
     pub async fn set_feedback_status(&self, id: i64, status: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE agent_feedback SET status = ?, updated_at = ? WHERE id = ?",
+            "UPDATE agent_feedback SET status = ?, updated_at = ?, \
+                 resolution = CASE WHEN ? = 'open' THEN NULL ELSE resolution END, \
+                 resolved_by = CASE WHEN ? = 'open' THEN NULL ELSE resolved_by END \
+             WHERE id = ?",
         )
         .bind(status)
         .bind(now_utc())
+        .bind(status)
+        .bind(status)
         .bind(id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("setting feedback {id} to {status}"))?;
+        Ok(res.rows_affected())
+    }
+
+    /// Close a row with the reason in words — the commit that fixed it, or the
+    /// decision that declined it — and who closed it (0101). `status` is
+    /// `done` or `dismissed`; the caller validates it. Returns rows affected
+    /// (0 = unknown id). The reason is agent text, so it is redacted like the
+    /// row's own body.
+    pub async fn resolve_feedback(
+        &self,
+        id: i64,
+        status: &str,
+        reason: &str,
+        resolved_by: &str,
+    ) -> Result<u64> {
+        let reason = crate::policy::secret_scan::redact(reason);
+        let res = sqlx::query(
+            "UPDATE agent_feedback SET status = ?, resolution = ?, resolved_by = ?, \
+                 updated_at = ? WHERE id = ?",
+        )
+        .bind(status)
+        .bind(reason.as_ref())
+        .bind(resolved_by)
+        .bind(now_utc())
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("resolving feedback {id} as {status}"))?;
         Ok(res.rows_affected())
     }
 

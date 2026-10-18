@@ -24,6 +24,10 @@ pub struct AgentFeedbackView {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// How it was closed, in words (0101) — `None` while open.
+    pub resolution: Option<String>,
+    /// Who closed it with that reason: `<participant slug> · <session id>`.
+    pub resolved_by: Option<String>,
 }
 
 impl From<AgentFeedback> for AgentFeedbackView {
@@ -39,6 +43,8 @@ impl From<AgentFeedback> for AgentFeedbackView {
             status: f.status,
             created_at: f.created_at,
             updated_at: f.updated_at,
+            resolution: f.resolution,
+            resolved_by: f.resolved_by,
         }
     }
 }

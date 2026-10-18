@@ -7,7 +7,9 @@ use crate::policy::{ViolationKind, ViolationOutcome};
 use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::protocol::*;
 use crate::signaling::response::{internal_err_no_prefix, ok_response, result_json};
-use crate::signaling::tool_args::{arg_opt_str, arg_required_str, arg_required_str_array};
+use crate::signaling::tool_args::{
+    arg_feedback_id, arg_opt_str, arg_required_str, arg_required_str_array,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -971,6 +973,24 @@ async fn call_tool(
             Ok(ToolCallResult::text(format!(
                 "filed as feedback #{id} ({kind}). It's queued for a bot-hq session to work — \
                  nothing further is needed from you, and the user was not interrupted."
+            )))
+        }
+        "resolve_feedback" => {
+            // Not capability-gated, like `file_feedback` — the bridge scopes
+            // it to a session on the bot-hq project instead, and records who
+            // closed the row. A capability here would be a new permission the
+            // parity oracle reads as the user's call.
+            let id = arg_feedback_id(&args)?;
+            let status = arg_required_str(&args, "status")?;
+            let reason = arg_required_str(&args, "reason")?;
+            bridge
+                .resolve_feedback(&caller.session_id, &caller.agent, id, &status, &reason)
+                .await
+                .map_err(internal_err_no_prefix)?;
+            Ok(ToolCallResult::text(format!(
+                "feedback #{id} is {} — the Feedback panel shows your reason under the row, \
+                 with your name and this session. The user can reopen it there.",
+                status.trim().to_ascii_lowercase()
             )))
         }
         "request_approval" => {
@@ -2518,6 +2538,40 @@ mod tests {
             "no open advisories → no line; got: {}",
             clean_card.prompt
         );
+    }
+
+    /// The wire from the tool name to the queue: `resolve_feedback` through
+    /// `dispatch` is refused in a session on another project and closes the
+    /// row in a bot-hq session — the reviewer's call too (not capability-
+    /// gated), with a string id copied from the queue.
+    #[tokio::test]
+    async fn resolve_feedback_closes_a_row_through_dispatch() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let id = storage.insert_feedback("s1", None, "eyes", "issue", "t", "b").await.unwrap();
+        let call = |args: Value, n: i64| {
+            req("tools/call", json!({"name": "resolve_feedback", "arguments": args}), n)
+        };
+        let args = json!({"id": format!("#{id}"), "status": "done", "reason": "shipped in abc1234"});
+
+        bridge.register_session("s1".into(), Some("stryka".into())).await;
+        let refused = dispatch(call(args.clone(), 1), &eyes_caller(), &bridge).await.unwrap_err();
+        assert!(refused.message.contains("only in a session on the bot-hq project"), "{refused:?}");
+        assert_eq!(storage.list_feedback(Some("open")).await.unwrap().len(), 1);
+
+        bridge.register_session("s1".into(), Some("bot-hq".into())).await;
+        let done = dispatch(call(args, 2), &eyes_caller(), &bridge).await.unwrap().unwrap();
+        let text = serde_json::to_value(&done).unwrap()["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains(&format!("feedback #{id} is done")), "{text}");
+        let row = &storage.list_feedback(None).await.unwrap()[0];
+        assert_eq!(row.status, "done");
+        assert_eq!(row.resolution.as_deref(), Some("shipped in abc1234"));
+        assert_eq!(row.resolved_by.as_deref(), Some("eyes \u{b7} s1"));
     }
 
     #[tokio::test]

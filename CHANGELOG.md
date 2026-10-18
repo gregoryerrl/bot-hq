@@ -193,6 +193,15 @@ and in `docs/rebuild-archive/`.
     the test output it cites without re-typing it.
   - A document can be copied to the Context Library exactly as written, which
     is how a reviewer's handoff or an approved draft outlives the session.
+- **A bot-hq session can close the feedback queue's rows, with the reason.**
+  Rows agents filed with `file_feedback` could only be marked from the
+  Feedback panel, so a session that shipped a fix could not close its row and
+  stale rows piled up (27 at the last count, most of them long done). A new
+  tool, `resolve_feedback`, closes a row as done (naming the commit) or
+  dismissed (naming whose decision), from a session on the bot-hq project
+  only; the panel shows the reason under the row and who closed it, named
+  from that session's roster. Reopening a row from the panel clears its
+  reason. Migration 0101 adds the two columns.
 
 ### Changed
 

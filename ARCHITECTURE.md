@@ -836,11 +836,11 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (46)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (47)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
-`web_search`, `request_phase_advance`, `file_feedback`, `request_approval`,
+`web_search`, `request_phase_advance`, `file_feedback`, `resolve_feedback`, `request_approval`,
 `action_gate`, `read_gate` (group K: the reviewer's own path to a listed read), `prod_read` (group K: read-only Postgres SQL on the project's production database, parked with its SQL), `gate_status`, `gate_history`, `check_commit_message`, `flag_finding` (alias `eyes_flag`),
 `disposition_finding`, `check_open_findings`, `get_finding`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,

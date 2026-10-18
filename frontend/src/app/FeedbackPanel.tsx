@@ -24,6 +24,10 @@ interface AgentFeedbackView {
   status: string;
   created_at: string;
   updated_at: string;
+  /** How the row was closed, in words (`resolve_feedback`, 0101). */
+  resolution?: string | null;
+  /** Who closed it with that reason: `<participant slug> · <session id>`. */
+  resolved_by?: string | null;
 }
 
 type Filter = "open" | "done" | "dismissed" | "all";
@@ -167,6 +171,9 @@ export function FeedbackPanel() {
                   {formatRelative(f.created_at) || "earlier"}
                 </span>
               </div>
+              {f.status !== "open" && f.resolution && (
+                <Resolution status={f.status} reason={f.resolution} by={f.resolved_by} />
+              )}
 
               {expanded.has(f.id) && (
                 <div className="mt-2 border-t border-outline-variant pt-2">
@@ -220,6 +227,32 @@ export function FeedbackPanel() {
  * One roster read per distinct session; a session whose roster is gone reads
  * "Unknown participant".
  */
+/** Why a closed row was closed, and who said so — named from that session's
+ *  roster like the filer, never by slug. */
+function Resolution({
+  status,
+  reason,
+  by,
+}: {
+  status: string;
+  reason: string;
+  by?: string | null;
+}) {
+  const [slug, sessionId] = (by ?? "").split(" \u00b7 ");
+  return (
+    <p className="mt-1 whitespace-pre-wrap break-words font-code-sm text-code-sm text-on-surface-variant">
+      <span className="text-on-surface">{status === "dismissed" ? "Dismissed" : "Done"}:</span>{" "}
+      {reason}
+      {slug && sessionId && (
+        <>
+          {" — "}
+          <FiledBy sessionId={sessionId} author={slug} />
+        </>
+      )}
+    </p>
+  );
+}
+
 function FiledBy({ sessionId, author }: { sessionId: string; author: string }) {
   const { labels } = useParticipantLabels(sessionId);
   return <>{authorLabel(author, labels)}</>;

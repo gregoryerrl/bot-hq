@@ -505,6 +505,11 @@ pub struct AgentFeedback {
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+    /// How the row was closed, in words (0101): the commit or the decision.
+    /// `None` while open, and for a row the panel's buttons closed.
+    pub resolution: Option<String>,
+    /// Who closed it with a reason: `<participant slug> · <session id>`.
+    pub resolved_by: Option<String>,
 }
 
 /// A row from the `findings` table — an EYES review finding on a session.

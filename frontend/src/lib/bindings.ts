@@ -1584,7 +1584,15 @@ export type AgentFeedbackView = { id: number; session_id: string;
 /**
  * The project the FILING session was on — provenance, not subject.
  */
-project: string | null; agent: string; kind: string; title: string; body: string; status: string; created_at: string; updated_at: string }
+project: string | null; agent: string; kind: string; title: string; body: string; status: string; created_at: string; updated_at: string; 
+/**
+ * How it was closed, in words (0101) — `None` while open.
+ */
+resolution: string | null; 
+/**
+ * Who closed it with that reason: `<participant slug> · <session id>`.
+ */
+resolved_by: string | null }
 /**
  * One chat message in the chronological stream. Mirrors `storage::Message`
  * with `created_at` left as a string (ISO) so the frontend can parse with

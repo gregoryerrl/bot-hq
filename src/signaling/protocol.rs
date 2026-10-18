@@ -373,6 +373,29 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "resolve_feedback",
+            description: "Close one row of bot-hq's own feedback queue (the rows `file_feedback` writes) with the reason in words: `done` naming the commit that shipped it, or `dismissed` naming whose decision declined it and when. The Feedback panel shows the reason under the row, with your name and this session; the user can reopen it there. Works only in a session on the bot-hq project. Read the row first: when it asks for more than one thing, say which parts shipped and which did not, rather than calling the whole row done.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "description": "The row's number (the N in 'feedback #N')."
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["done", "dismissed"],
+                        "description": "'done' = shipped (or fixed); 'dismissed' = declined, or not a bot-hq problem."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "The commit(s) that shipped it, or the decision that declined it and whose it was. Name any part of the row that did not ship."
+                    }
+                },
+                "required": ["id", "status", "reason"]
+            }),
+        },
+        ToolDescriptor {
             name: "request_approval",
             description: gated_by("request_approval", "Ask the user's yes/no (or a choice between ways) on an action of YOURS — a commit, a merge, a risky edit, a design fork. It PARKS IN THE TRAY like a question and returns IMMEDIATELY with a parked acknowledgment carrying a choice_id: it halts NOTHING — the session keeps working, the card sits in the user's tray with your own labels, and the pick arrives later as a user row you read at your next dealt turn. Do not run the action until that row lands, and do not re-issue on no answer yet (`gate_status` with the choice_id says whether it resolved). The outcome is written to violations.jsonl. NOT the tool for prod access or for a command that must not run unapproved — those are `action_gate(command, require_approval: true)`, a GATE that blocks the session until the user answers and runs the command on their Approve; the host's gates (action_gate, the push gate) are the session blockers, a request is not."),
             input_schema: serde_json::json!({

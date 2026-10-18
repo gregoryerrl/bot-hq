@@ -101,6 +101,23 @@ describe("FeedbackPanel", () => {
     expect(await screen.findByText(/Nothing open/)).toBeInTheDocument();
   });
 
+  it("shows why a closed row was closed, and who closed it", async () => {
+    renderPanel([
+      row({
+        id: 7,
+        status: "dismissed",
+        resolution: "declined by the user in s-079dec53",
+        resolved_by: "hands \u00b7 s-57224745",
+      }),
+      row({ id: 8, title: "Still open", status: "open", resolution: null, resolved_by: null }),
+    ]);
+    fireEvent.click(await screen.findByRole("button", { name: "All" }));
+    expect(await screen.findByText(/declined by the user in s-079dec53/)).toBeInTheDocument();
+    expect(screen.getByText("Dismissed:")).toBeInTheDocument();
+    expect(screen.queryByText(/hands · s-57224745/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Dismissed:|Done:/)).toHaveLength(1);
+  });
+
   it("defaults to the open queue", async () => {
     renderPanel([row()]);
     await waitFor(() =>
