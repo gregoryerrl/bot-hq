@@ -328,9 +328,10 @@ and in `docs/rebuild-archive/`.
   (claude, git, Git for Windows' shell, gh) runs without a console window of
   its own. The git hooks and the Tool Gate, which run bot-hq's own `.exe`,
   still read and print through the pipes they are given, and print to your
-  terminal when you run them there; every release build now checks that on
-  Windows before it is published. A debug build stays a console program, so
-  `cargo run` keeps its log in the terminal.
+  terminal when you run them there. Every release build now checks the pipes
+  on Windows before it is published; the terminal is one of the checks in
+  `docs/WINDOWS-TESTING.md`, made on a Windows machine. A debug build stays a
+  console program, so `cargo run` keeps its log in the terminal.
 - **Switching away from unsaved edits asks first.** Picking another role in
   Settings → Roles, opening another file in a session's Context tab, or
   closing the session settings drawer threw away what you had typed without a
