@@ -124,7 +124,7 @@ mod tests {
 
     /// `resolve_feedback` closes a row with its reason and who closed it — in a
     /// bot-hq session only, for done or dismissed with a reason, on a real id;
-    /// reopening the row from the panel clears the reason.
+    /// any move from the panel clears the reason.
     #[tokio::test]
     async fn a_bot_hq_session_resolves_a_row_with_its_reason() {
         let (bridge, storage) = bridge_with_storage().await;
@@ -157,6 +157,14 @@ mod tests {
         assert_eq!(row.resolution.as_deref(), Some("declined by the user, 2026-10-12"));
         assert_eq!(row.resolved_by.as_deref(), Some("hands \u{b7} s1"));
 
+        // Any move from the panel clears the reason (EYES a226929f): closed by
+        // the tool as done, then dismissed by the user, must not read
+        // "Dismissed: shipped in …".
+        bridge.resolve_feedback("s1", "hands", id, "done", "shipped in abc1234").await.unwrap();
+        storage.set_feedback_status(id, "dismissed").await.unwrap();
+        let row = &storage.list_feedback(None).await.unwrap()[0];
+        assert_eq!((row.status.as_str(), row.resolution.as_deref(), row.resolved_by.as_deref()), ("dismissed", None, None));
+        bridge.resolve_feedback("s1", "hands", id, "done", "shipped in abc1234").await.unwrap();
         storage.set_feedback_status(id, "open").await.unwrap();
         let row = &storage.list_feedback(None).await.unwrap()[0];
         assert_eq!((row.status.as_str(), row.resolution.as_deref(), row.resolved_by.as_deref()), ("open", None, None));

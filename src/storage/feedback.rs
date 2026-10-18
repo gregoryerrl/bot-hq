@@ -75,20 +75,18 @@ impl Storage {
         Ok(rows)
     }
 
-    /// Move a row through its lifecycle. Returns rows affected (0 = unknown id).
-    /// Reopening a row clears its resolution: a reason for a row that is open
-    /// again would describe a closure that no longer holds.
+    /// Move a row through its lifecycle — the Feedback panel's buttons.
+    /// Returns rows affected (0 = unknown id). Any move clears the row's
+    /// resolution: a reason written for one closure would otherwise describe
+    /// another ("Dismissed: shipped in abc1234"), or a row that is open again.
     pub async fn set_feedback_status(&self, id: i64, status: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE agent_feedback SET status = ?, updated_at = ?, \
-                 resolution = CASE WHEN ? = 'open' THEN NULL ELSE resolution END, \
-                 resolved_by = CASE WHEN ? = 'open' THEN NULL ELSE resolved_by END \
+                 resolution = NULL, resolved_by = NULL \
              WHERE id = ?",
         )
         .bind(status)
         .bind(now_utc())
-        .bind(status)
-        .bind(status)
         .bind(id)
         .execute(&self.pool)
         .await

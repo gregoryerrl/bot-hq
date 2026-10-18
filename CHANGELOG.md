@@ -200,8 +200,9 @@ and in `docs/rebuild-archive/`.
   tool, `resolve_feedback`, closes a row as done (naming the commit) or
   dismissed (naming whose decision), from a session on the bot-hq project
   only; the panel shows the reason under the row and who closed it, named
-  from that session's roster. Reopening a row from the panel clears its
-  reason. Migration 0101 adds the two columns.
+  from that session's roster. Moving a row with the panel's buttons clears
+  its reason, so a reason never describes a closure it was not written for.
+  Migration 0101 adds the two columns.
 
 ### Changed
 
