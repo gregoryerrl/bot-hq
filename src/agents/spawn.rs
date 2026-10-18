@@ -2541,13 +2541,18 @@ mod tests {
         use std::process::{Command as StdCommand, Stdio};
 
         // `sleep 600 &` = backgrounded grandchild; `echo $!` prints its pid; the
-        // leader then blocks so the group stays alive until we kill it. `sh -c`
-        // runs without job control, so the bg job shares the leader's PGID.
+        // leader then `exec`s a blocking sleep so the group stays alive until we
+        // kill it. `sh -c` runs without job control, so the bg job shares the
+        // leader's PGID. `exec`, not a second fork: a fork racing the group
+        // SIGKILL can leave its child alive on macOS (seen 2026-10-18, a
+        // `sleep 600` orphaned on init), and stderr is null so a survivor can
+        // never hold the test runner's output pipe open.
         let mut leader = StdCommand::new("sh")
             .arg("-c")
-            .arg("sleep 600 & echo $!; sleep 600")
+            .arg("sleep 600 & echo $!; exec sleep 600")
             .process_group(0) // mirror spawn_agent: leader is its group's leader
             .stdout(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .expect("spawn sh leader");
 
