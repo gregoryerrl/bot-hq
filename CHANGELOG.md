@@ -283,6 +283,18 @@ and in `docs/rebuild-archive/`.
   the command it withdraws. "View <file>" from Approval details closes the
   details first, so the viewer no longer opens behind it with one Escape
   closing both.
+- **A usage limit reads as a warning and says since when.** The limit line
+  under a model row and beside a New Session participant was muted grey like
+  a hint; it is in the warning colour while the limit stands. A mark with no
+  reset time ("You're out of usage credits") said only "no reset time
+  given"; it says since when it has stood ("limited since 12:08 PM"), and a
+  reset is given to the minute without seconds and with the date only when
+  it is not today. The Models list's Clear button reports a failure instead
+  of failing silently. The New Session dialog says why Create is greyed out
+  ("Give the session a title", "Pick a role for every participant") instead
+  of leaving you to find the gap, and the first-run tip names the shortcut
+  your machine uses (Ctrl+N off macOS). One module now holds the
+  account-and-limit rules the list and the dialog had each copied.
 - **Names instead of identifiers, times that keep counting, copy that points
   at real controls.** The notification bell listed "Session s-69ef19"; it
   lists the session's title. A tray card's kind read as its tool's name

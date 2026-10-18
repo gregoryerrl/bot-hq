@@ -265,7 +265,10 @@ describe("Settings → Models — usage-limit marks (0091)", () => {
     expect(marksFor({ ...OPUS, claude_config_dir: "/x" }, [mark])).toEqual([]);
     expect(marksFor({ ...OPUS, model_name: "claude-fable-5-1" }, [mark])).toEqual([]);
     expect(marksFor({ ...OPUS, auth_token: "t" }, [mark])).toEqual([]);
-    expect(limitLine(mark)).toBe('limited (no reset time given) — "You\'re out of usage credits."');
+    // No reset named: the line says since WHEN the mark stands (the local
+    // clock, date included when it is not today), then the CLI's words.
+    expect(limitLine(mark)).toMatch(/^limited since .+ \(no reset time given\) — "You're out of usage credits\."$/);
+    expect(limitLine(mark)).not.toMatch(/:\d\d:\d\d/);
   });
 });
 

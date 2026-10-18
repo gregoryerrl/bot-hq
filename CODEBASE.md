@@ -748,6 +748,7 @@ every other FE area imports.
 | `frontend/src/lib/telemetry.ts` | hand-mirrored `TelemetryStatus` + `shouldShowDiagnosticsAsk` + PRIVACY_URL | S |
 | `frontend/src/lib/osNotifications.ts` | OS-escalation pure policy: `planFlush` dedupe/60s-cooldown/burst-coalesce (≥3 → “N sessions need you”), the urgent gate's `urgentToast` / `nextUrgentDelay` (10 min × 6), + the on/off localStorage pref | S |
 | `frontend/src/lib/attention.ts` | idle-unflagged badge label + tooltip; single source for SessionTile and SessionView, which had it duplicated verbatim | S |
+| `frontend/src/lib/accounts.ts` | the Claude account a model row bills and the limit mark on it (0090/0091): `normalizeConfigDir`, `billsASubscription`, `accountLabelOf`, `marksFor`, `markIsLive`, `formatLimitMark` — one source for the Models list and the New Session dialog, which each carried a drifted copy | S |
 | `frontend/src/lib/docLinks.ts` | the session-doc slugs a tray question names in backticks → the tray card's doc links (feedback #79) | S |
 | `frontend/src/lib/gateChips.ts` | the session's gate states by 8-hex id + the context `Markdown`'s inline code reads to chip a resolving token with the gate's state (feedback #61) | S |
 | `frontend/src/lib/framing.ts` | retired-agent / pair-assumption detection for user-facing strings; `framing.test.ts` sweeps `frontend/src/` with it | S |

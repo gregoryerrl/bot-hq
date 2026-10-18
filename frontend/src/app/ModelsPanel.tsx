@@ -7,6 +7,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
+import { accountLabelOf, formatLimitMark, markIsLive, marksFor } from "../lib/accounts";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "../components/icons";
 import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
@@ -56,6 +57,8 @@ export function ModelsPanel() {
   // Inline delete error so a rejected delete_model surfaces in the confirm
   // dialog instead of silently failing (the dialog stays open to show it).
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // A failed Clear used to reject silently (a bare `await mutateAsync`).
+  const [clearError, setClearError] = useState<string | null>(null);
   // B5: per-model pre-flight "Test connection" state + last result.
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<string, ValidateResult>>({});
@@ -190,10 +193,14 @@ export function ModelsPanel() {
                   <div
                     key={`${mark.config_dir}|${mark.org_id}|${mark.model_name}`}
                     data-testid="model-limit"
-                    className="flex flex-wrap items-center gap-2 px-4 pb-2 font-code-sm text-code-sm text-on-surface-variant"
+                    className="flex flex-wrap items-center gap-2 px-4 pb-2 font-code-sm text-code-sm"
                   >
                     <span className="break-words">
-                      {limitLine(mark)}
+                      <span className={markIsLive(mark) ? "text-warning" : "text-on-surface-variant"}>
+                        {mark.email ? `${mark.email}: ` : ""}
+                        {formatLimitMark(mark).headline}
+                      </span>
+                      <span className="text-on-surface-variant"> — "{mark.limited_text}"</span>
                     </span>
                     <Button
                       size="sm"
@@ -201,18 +208,28 @@ export function ModelsPanel() {
                       disabled={clearMark.isPending}
                       title="Forget this limit — e.g. you enabled extra usage, or the reset passed"
                       onClick={async () => {
-                        await clearMark.mutateAsync({
-                          configDir: mark.config_dir,
-                          orgId: mark.org_id,
-                          modelName: mark.model_name,
-                        });
-                        await refetchMarks();
+                        setClearError(null);
+                        try {
+                          await clearMark.mutateAsync({
+                            configDir: mark.config_dir,
+                            orgId: mark.org_id,
+                            modelName: mark.model_name,
+                          });
+                          await refetchMarks();
+                        } catch (e) {
+                          setClearError(errorMessage(e));
+                        }
                       }}
                     >
                       Clear
                     </Button>
                   </div>
                 ))}
+                {clearError && marksFor(m, marks).length > 0 && (
+                  <p role="alert" className="px-4 pb-2 font-code-sm text-code-sm text-error">
+                    Couldn't clear the limit: {clearError}
+                  </p>
+                )}
                 {testResult[m.id] && (
                   <div
                     className={cn(
@@ -296,46 +313,15 @@ function emptyDraft(): ModelView {
   };
 }
 
-/** The dir key a subscription row's marks are stored under (`""` = default). */
-function dirKeyOf(m: Pick<ModelView, "claude_config_dir">): string {
-  return (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
-}
+// The account and limit-mark rules live in `lib/accounts` (shared with the
+// New Session dialog); these names stay for the tests and callers here.
+export { accountLabelOf, marksFor };
 
-/** The limit marks that apply to a row: a subscription row's dir AND model
- *  (claude.ai limits are per model — a Fable limit says nothing about the
- *  same account's Opus row), whatever organisation was signed in there. A
- *  gateway row has no account. */
-export function marksFor(
-  m: Pick<ModelView, "claude_config_dir" | "auth_token" | "base_url" | "model_name">,
-  marks: AccountMark[],
-): AccountMark[] {
-  if ((m.auth_token && m.auth_token.length > 0) || (m.base_url && m.base_url.length > 0)) {
-    return [];
-  }
-  const key = dirKeyOf(m);
-  return marks.filter((mark) => mark.config_dir === key && mark.model_name === m.model_name);
-}
-
-/** "limited until <local time> — <the CLI's line>", and only that. */
+/** "<email>: limited until <local time> — <the CLI's line>", and only that. */
 export function limitLine(mark: AccountMark): string {
+  const { headline, detail } = formatLimitMark(mark);
   const who = mark.email ? `${mark.email}: ` : "";
-  const until = mark.limited_until
-    ? `limited until about ${new Date(mark.limited_until).toLocaleString()}`
-    : "limited (no reset time given)";
-  return `${who}${until} — "${mark.limited_text}"`;
-}
-
-/** How the dialog and the list name the account a row bills: blank dir =
- *  the default `~/.claude`; a gateway row (its own token or base URL) bills
- *  its provider, not a Claude account. */
-export function accountLabelOf(m: Pick<ModelView, "claude_config_dir" | "auth_token" | "base_url" | "provider">): string {
-  if ((m.auth_token && m.auth_token.length > 0) || (m.base_url && m.base_url.length > 0)) {
-    return m.provider;
-  }
-  const dir = (m.claude_config_dir ?? "").trim();
-  if (!dir) return "default";
-  const parts = dir.replace(/[\\/]+$/, "").split(/[\\/]/);
-  return parts[parts.length - 1] || dir;
+  return `${who}${headline} — ${detail.slice(who.length)}`;
 }
 
 // ============================================================================

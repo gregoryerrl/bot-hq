@@ -1,4 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  accountLabelOf,
+  billsASubscription,
+  formatLimitMark,
+  markIsLive,
+  marksFor,
+  normalizeConfigDir,
+} from "../lib/accounts";
 import { useSearchParams } from "react-router-dom";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { SessionTile } from "../components/SessionTile";
@@ -105,11 +113,14 @@ function effectiveModel(
   return id ? models.find((m) => m.id === id) : undefined;
 }
 
-/** A subscription-billed row: no gateway token, no gateway URL — the account
- *  it bills is the Claude config dir (blank = the default `~/.claude`). */
-function billsASubscription(m: Pick<ModelView, "auth_token" | "base_url">): boolean {
-  return !(m.auth_token && m.auth_token.length > 0) && !(m.base_url && m.base_url.length > 0);
-}
+/** The New-session shortcut as this machine spells it: the handler accepts
+ *  ⌘ and Ctrl alike (`Shell.tsx`), and the tip used to say ⌘N on every
+ *  platform. */
+export const NEW_SESSION_SHORTCUT = /Mac|iPhone|iPad/.test(
+  typeof navigator === "undefined" ? "" : navigator.platform,
+)
+  ? "⌘N"
+  : "Ctrl+N";
 
 /** The account label the dialog shows beside a row's model (0090): the
  *  config dir's last path segment, `default` for the default dir, the
@@ -120,12 +131,7 @@ export function accountLabelFor(
   models: ModelView[],
 ): string {
   const m = effectiveModel(row, roles, models);
-  if (!m) return "—";
-  if (!billsASubscription(m)) return m.provider;
-  const dir = (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
-  if (!dir) return "default";
-  const parts = dir.split(/[\\/]/);
-  return parts[parts.length - 1] || dir;
+  return m ? accountLabelOf(m) : "—";
 }
 
 /** The row's limit line (0091): the account its model bills carries a mark
@@ -139,19 +145,9 @@ export function rowLimit(
   marks: AccountMark[],
 ): string | null {
   const m = effectiveModel(row, roles, models);
-  if (!m || !billsASubscription(m)) return null;
-  const key = (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
-  const live = marks.filter(
-    (mark) =>
-      mark.config_dir === key &&
-      mark.model_name === m.model_name &&
-      (!mark.limited_until || new Date(mark.limited_until).getTime() > Date.now()),
-  );
-  if (live.length === 0) return null;
-  const mark = live[0];
-  return mark.limited_until
-    ? `limited until about ${new Date(mark.limited_until).toLocaleString()}`
-    : "limited (no reset time given)";
+  if (!m) return null;
+  const live = marksFor(m, marks).filter((mark) => markIsLive(mark));
+  return live.length === 0 ? null : formatLimitMark(live[0]).headline;
 }
 
 /** The distinct Claude accounts the saved subscription rows can bill, for
@@ -160,10 +156,9 @@ export function accountChoices(models: ModelView[]): { dir: string; label: strin
   const seen = new Map<string, string>();
   for (const m of models) {
     if (!billsASubscription(m)) continue;
-    const dir = (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
+    const dir = normalizeConfigDir(m.claude_config_dir);
     if (!seen.has(dir)) {
-      const parts = dir.split(/[\\/]/);
-      seen.set(dir, dir ? parts[parts.length - 1] || dir : "default (~/.claude)");
+      seen.set(dir, dir ? accountLabelOf(m) : "default (~/.claude)");
     }
   }
   return [...seen.entries()].map(([dir, label]) => ({ dir, label }));
@@ -179,19 +174,18 @@ export function remapRowsToAccount(
   roles: RoleView[],
   models: ModelView[],
 ): { rows: ParticipantRow[]; missing: number[] } {
-  const want = dir.trim().replace(/[\\/]+$/, "");
+  const want = normalizeConfigDir(dir);
   const missing: number[] = [];
   const next = rows.map((row, index) => {
     const current = effectiveModel(row, roles, models);
     if (!current || !billsASubscription(current)) return row;
-    const currentDir = (current.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "");
-    if (currentDir === want) return row;
+    if (normalizeConfigDir(current.claude_config_dir) === want) return row;
     const twin = models.find(
       (m) =>
         billsASubscription(m) &&
         m.provider === current.provider &&
         m.model_name === current.model_name &&
-        (m.claude_config_dir ?? "").trim().replace(/[\\/]+$/, "") === want,
+        normalizeConfigDir(m.claude_config_dir) === want,
     );
     if (!twin) {
       missing.push(index);
@@ -492,6 +486,15 @@ export function Dashboard() {
   // is how a session silently gets an agent they did not choose.
   const rosterReady =
     participants.length > 0 && participants.every((p) => p.roleId !== null);
+  // Why Create is greyed out, said beside it — a disabled button with no
+  // reason sends the user hunting through the form.
+  const createBlockedBy = !title.trim()
+    ? "Give the session a title to create it."
+    : participants.length === 0
+      ? "Add at least one participant."
+      : !rosterReady
+        ? "Pick a role for every participant."
+        : null;
 
   // The quick-select's answer: rows it could not move (no saved twin of
   // their model on that account), by 1-based position. Cleared by any row
@@ -1009,7 +1012,7 @@ export function Dashboard() {
                           {rowLimit(row, roles, models, accountMarks) && (
                             <span
                               data-testid={`participant-${index + 1}-limit`}
-                              className="mt-0.5 block break-words font-code-sm text-code-sm text-on-surface-variant"
+                              className="mt-0.5 block break-words font-code-sm text-code-sm text-warning"
                             >
                               {rowLimit(row, roles, models, accountMarks)}
                             </span>
@@ -1150,14 +1153,22 @@ export function Dashboard() {
                 Create failed: {createError}
               </p>
             )}
-            <div className="mt-5 flex shrink-0 justify-end gap-2">
+            <div className="mt-5 flex shrink-0 flex-wrap items-center justify-end gap-2">
+              {createBlockedBy && !createSession.isPending && (
+                <span
+                  data-testid="create-blocked-by"
+                  className="mr-auto font-code-sm text-code-sm text-on-surface-variant"
+                >
+                  {createBlockedBy}
+                </span>
+              )}
               <Button variant="ghost" onClick={() => setCreating(false)}>
                 Cancel
               </Button>
               <Button
                 variant="primary"
                 onClick={handleCreate}
-                disabled={!title.trim() || !rosterReady || createSession.isPending}
+                disabled={createBlockedBy !== null || createSession.isPending}
               >
                 {createSession.isPending ? "Creating…" : "Create session"}
               </Button>
@@ -1240,7 +1251,7 @@ export function Dashboard() {
                   <>
                     Create a session with <b>+ New session</b> (or{" "}
                     <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-mono text-[0.65rem]">
-                      ⌘N
+                      {NEW_SESSION_SHORTCUT}
                     </kbd>
                     ) and choose its participants.
                   </>
