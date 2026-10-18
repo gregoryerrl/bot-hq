@@ -7,6 +7,15 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.9] — 2026-10-18
+
+A second Claude account beside the first, gates that run inside a time window
+or take their command from a file, a handoff that survives a context compaction,
+production reads behind your approval, the feedback queue closed from inside
+a session, a UI pass, and Windows without a console window. Migrations
+0087–0101 apply on first launch (1.0.8 shipped through 0086). Windows users:
+`docs/WINDOWS-TESTING.md` lists what to check on your machine.
+
 ### Added
 
 - **A second Claude subscription can run beside the first.** A saved model
@@ -708,6 +717,33 @@ and in `docs/rebuild-archive/`.
   app's editors is committed as yours straight away. The reply to a write says
   which lines it changed. Two writes to the same file can no longer interleave
   between reading it and writing it.
+
+### Security
+
+- **Two development dependencies of the telemetry worker were updated**
+  (Dependabot #7 `source-map-js` 1.2.1 → 1.2.2, #9 `undici` and `wrangler`).
+  The worker under `packaging/telemetry-worker` is deployed on its own and is
+  not part of the app; nothing bot-hq ships was affected.
+
+### Deferred
+
+- **Tailwind CSS 4** (Dependabot #8): a migration to its CSS-first
+  configuration, not a version bump — its CI is red on all three platforms.
+- **The design-system consolidation** the 1.0.9 UI survey found: one button
+  face, one input and switch, one dialog shell, the participant palette and
+  greys, the type scale, spacing and radius tokens, icons for glyphs, a
+  Settings page wrapper and the chat's typography — a visual pass of its own.
+- **Collapsing the "review notes written" notice** (one chat row per reviewer
+  note, up to 30 a session): kept, because it is how the executor learns to
+  read the notes.
+- **Windows:** a Terminal-tab shell that has exited can still look alive
+  (ConPTY delivers no end-of-file); `terminal_exec`'s screen-size reply with
+  no Terminal tab mounted; child-process reaping through a Job Object. The
+  console-window change is checked by CI over pipes only — the launch, the
+  absence of console flashes and a hook printing in a terminal are the
+  Windows-machine checks in `docs/WINDOWS-TESTING.md`.
+- **glib 0.18** (RUSTSEC-2024-0429), pinned by Tauri's GTK3 stack on Linux —
+  unchanged from 1.0.8.
 
 ## [1.0.8] — 2026-09-27
 
