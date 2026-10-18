@@ -284,13 +284,7 @@ fn run_pre_commit(
     match policy.first_forbidden_word_in_content(&added_only) {
         None => Ok(0),
         Some(word) => {
-            let narrowing = if policy.forbidden_in_content.is_empty() {
-                "\n(The commit-message list applies to file content too; a \
-                 `forbidden_in_content` list in the policy narrows what is \
-                 refused in content.)\n"
-            } else {
-                ""
-            };
+            let narrowing = content_refusal_note(&policy);
             eprintln!(
                 "{}",
                 blocked_banner(
@@ -530,6 +524,21 @@ fn check_immutable_artifacts(repo: &Path) -> i32 {
         )
     );
     1
+}
+
+/// The line the pre-commit content refusal ends with when the message list is
+/// what screened the content. Its reader is usually an agent, and a policy
+/// edit is logged, never blocked (`audit.rs`) — so it names narrowing the list
+/// as the USER's call and tells the agent not to touch the policy (EYES
+/// a375989c: the bcc projects' disguise lists refuse content on purpose).
+fn content_refusal_note(policy: &Policy) -> &'static str {
+    if policy.forbidden_in_content.is_empty() {
+        "\n(The commit-message list screens file content too. Whether content \
+         may carry a word a message may not is the user's call, in Settings \
+         \u{2192} Policy — do not edit the policy to get a commit through.)\n"
+    } else {
+        ""
+    }
 }
 
 /// post-commit verifier. Writes a violation if a forbidden word made it
@@ -2586,6 +2595,21 @@ mod tests {
             1,
             "the forbidden-word gate went blind on a diff it could not decode"
         );
+    }
+
+    /// The content refusal leaves narrowing to the user and tells the agent
+    /// not to edit the policy; with a content list set, it adds nothing.
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn the_content_refusal_leaves_narrowing_to_the_user() {
+        let mut p = Policy::default();
+        p.forbidden_in_commits = vec!["Vendor".into()];
+        let note = content_refusal_note(&p);
+        assert!(note.contains("the user's call"), "{note}");
+        assert!(note.contains("do not edit the policy"), "{note}");
+        assert!(!note.contains("forbidden_in_content"), "no key to reach for: {note}");
+        p.forbidden_in_content = vec!["Acme-Trailer".into()];
+        assert_eq!(content_refusal_note(&p), "");
     }
 
     /// Feedback #103: the pre-commit CONTENT scan reads `forbidden_in_content`
