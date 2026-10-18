@@ -281,9 +281,11 @@ export function ApprovalGate({
                 type="text"
                 value={rejectReason}
                 onChange={(e) => setRejectReason(e.target.value)}
-                placeholder={
-                  isClose ? "next instruction (optional — sent with Keep open)" : "why? (optional — sent with Reject)"
-                }
+                // Short enough for the half-width chat pane at the 1024 px
+                // minimum (the longer form was cut off in B3v's shots 04/07);
+                // what the text is sent with stays on hover.
+                placeholder={isClose ? "next instruction (optional)" : "why? (optional — sent with Reject)"}
+                title={isClose ? "Sent to the session with Keep open" : "Sent with Reject"}
                 aria-label={isClose ? "Next instruction" : "Rejection reason"}
                 disabled={!!busy}
                 className="min-w-40 flex-1 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
