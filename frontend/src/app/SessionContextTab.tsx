@@ -11,6 +11,8 @@ import type {
 } from "../lib/bindings";
 import { buildTree, type TreeNode } from "./contextLibraryShared";
 import { FileIcon, FolderIcon } from "../components/icons";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 
 // ============================================================================
 // SessionContextTab — the session container's "Context" subtab: the Context
@@ -75,6 +77,14 @@ function ProjectFiles({ project }: { project: string }) {
     [entries, folders],
   );
   const [selected, setSelected] = useState<string | null>(null);
+  // The open file's unsaved text: picking another file remounts the editor,
+  // which used to drop the edit without a word.
+  const [editorDirty, setEditorDirty] = useState(false);
+  const discard = useDiscardGuard(editorDirty);
+  const select = (path: string) => {
+    if (path === selected) return;
+    discard.guard(() => setSelected(path));
+  };
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -92,7 +102,7 @@ function ProjectFiles({ project }: { project: string }) {
             node={tree}
             depth={0}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={select}
           />
         )}
       </aside>
@@ -104,9 +114,23 @@ function ProjectFiles({ project }: { project: string }) {
             </p>
           </div>
         ) : (
-          <LeanFileEditor key={selected} project={project} filePath={selected} />
+          <LeanFileEditor
+            key={selected}
+            project={project}
+            filePath={selected}
+            onDirtyChange={setEditorDirty}
+          />
         )}
       </div>
+      <ConfirmDialog
+        open={discard.asking}
+        title="Discard changes?"
+        message="This file has unsaved changes. Opening another file discards them."
+        confirmLabel="Discard changes"
+        confirmVariant="danger"
+        onConfirm={discard.confirm}
+        onCancel={discard.cancel}
+      />
     </div>
   );
 }
@@ -185,9 +209,12 @@ function FolderNode({
 function LeanFileEditor({
   project,
   filePath,
+  onDirtyChange,
 }: {
   project: string;
   filePath: string;
+  /** Unsaved text, for the file list's "Discard changes?" guard. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const queryClient = useQueryClient();
   const { data: file, error: readError } = useTauriQuery<ClFileContentView>(
@@ -201,6 +228,7 @@ function LeanFileEditor({
   const readOnly = !!file && (file.truncated || file.binary);
   const text = draft ?? file?.content ?? "";
   const dirty = !!file && draft !== null && draft !== file.content;
+  useReportDirty(dirty, onDirtyChange);
 
   const onSave = async () => {
     if (!file || readOnly || !dirty || saving) return;

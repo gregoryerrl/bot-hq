@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
@@ -112,5 +112,71 @@ describe("SessionPolicyPanel roster (rc3 D10)", () => {
     await screen.findByRole("dialog", { name: /session settings/i });
 
     expect(screen.queryByText(/participants \(turn order\)/i)).toBeNull();
+  });
+});
+
+describe("SessionPolicyPanel — every way out asks before dropping unsaved edits (B3f)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  function renderWith(onClose: () => void, keywords: unknown[] = []) {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case "list_session_participants":
+          return [];
+        case "get_session_policy":
+          return {};
+        case "get_session_tool_gate":
+          return keywords;
+        default:
+          return null;
+      }
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <SessionPolicyPanel sessionId="s1" open onClose={onClose} />
+      </QueryClientProvider>,
+    );
+  }
+
+  const ask = () => screen.findByRole("dialog", { name: "Discard changes?" });
+
+  it("closes at once when nothing is unsaved", async () => {
+    const onClose = vi.fn();
+    renderWith(onClose);
+    fireEvent.click(await screen.findByRole("button", { name: "Close session settings" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "Discard changes?" })).toBeNull();
+  });
+
+  it("asks on the close button, on Escape and on the scrim, and closes only on Discard", async () => {
+    const onClose = vi.fn();
+    renderWith(onClose);
+    fireEvent.change(await screen.findByPlaceholderText("(no constraint)"), {
+      target: { value: "feature/.*" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close session settings" }));
+    fireEvent.click(within(await ask()).getByRole("button", { name: "Cancel" }));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await ask();
+    // Escape answers the question with Cancel, and does not close the drawer.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Discard changes?" })).toBeNull();
+
+    fireEvent.click(screen.getByTestId("session-settings-scrim"));
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.click(within(await ask()).getByRole("button", { name: "Discard changes" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts the session's keyword edits as unsaved too", async () => {
+    const onClose = vi.fn();
+    renderWith(onClose, [{ keyword: "gh pr merge", mode: "gate" }]);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove keyword" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close session settings" }));
+    await ask();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

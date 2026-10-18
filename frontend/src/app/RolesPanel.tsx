@@ -3,6 +3,7 @@ import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { lineDiff, normalizeLineEndings } from "../lib/lineDiff";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 import { cn } from "../lib/cn";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "../components/icons";
@@ -131,6 +132,12 @@ export function RolesPanel() {
 
   const selected = roles.find((r) => r.id === selectedId) ?? null;
 
+  // The open form's unsaved edits: switching to another role or to "+ New
+  // role" remounts the form, which used to drop a half-written instruction
+  // without a word. Now the switch asks first.
+  const [formDirty, setFormDirty] = useState(false);
+  const discard = useDiscardGuard(formDirty);
+
   // Land on something as soon as the list arrives, so the pane is never a
   // blank panel the user has to discover a click for. It also catches the row
   // going away — archiving clears the selection, and this picks the next one.
@@ -191,10 +198,12 @@ export function RolesPanel() {
         </div>
         <Button
           variant="primary"
-          onClick={() => {
-            setCreating(true);
-            setSelectedId(null);
-          }}
+          onClick={() =>
+            discard.guard(() => {
+              setCreating(true);
+              setSelectedId(null);
+            })
+          }
         >
           + New role
         </Button>
@@ -253,8 +262,11 @@ export function RolesPanel() {
                   <button
                     type="button"
                     onClick={() => {
-                      setCreating(false);
-                      setSelectedId(r.id);
+                      if (r.id === selectedId && !creating) return;
+                      discard.guard(() => {
+                        setCreating(false);
+                        setSelectedId(r.id);
+                      });
                     }}
                     className={cn(
                       "flex w-full items-center gap-2 border-l-2 px-3 py-2 text-left transition-colors",
@@ -304,6 +316,7 @@ export function RolesPanel() {
               }}
               onArchived={() => {}}
               onCancelCreate={() => setCreating(false)}
+              onDirtyChange={setFormDirty}
             />
           ) : selected ? (
             <RoleForm
@@ -319,6 +332,7 @@ export function RolesPanel() {
                 refetch();
               }}
               onCancelCreate={() => {}}
+              onDirtyChange={setFormDirty}
             />
           ) : isLoading ? null : (
             <p className="px-5 py-6 font-code-sm text-code-sm text-on-surface-variant">
@@ -327,6 +341,15 @@ export function RolesPanel() {
           )}
         </div>
       </div>
+      <ConfirmDialog
+        open={discard.asking}
+        title="Discard changes?"
+        message="This role has unsaved changes. Switching away discards them."
+        confirmLabel="Discard changes"
+        confirmVariant="danger"
+        onConfirm={discard.confirm}
+        onCancel={discard.cancel}
+      />
     </div>
   );
 }
@@ -342,6 +365,7 @@ function RoleForm({
   onSaved,
   onArchived,
   onCancelCreate,
+  onDirtyChange,
 }: {
   role: RoleView | null;
   models: ModelView[];
@@ -349,6 +373,8 @@ function RoleForm({
   onSaved: (saved: RoleView) => void | Promise<void>;
   onArchived: () => void;
   onCancelCreate: () => void;
+  /** Unsaved edits, for the rail's "Discard changes?" guard. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   // Seeded ONCE, from the row this form was mounted for — the parent keys the
   // form by role id, so switching roles remounts it.
@@ -417,6 +443,7 @@ function RoleForm({
   );
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(baseline);
+  useReportDirty(dirty, onDirtyChange);
   const pending = create.isPending || update.isPending;
   // The same `.trim() === ""` reading `submit` uses to decide `null`, so what
   // the notice below promises and what the save actually sends are one test.

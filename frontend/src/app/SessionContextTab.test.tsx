@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionContextTab } from "./SessionContextTab";
@@ -101,6 +101,40 @@ describe("SessionContextTab", () => {
     // Editing enables Save.
     fireEvent.change(editor, { target: { value: "# Conventions\nmore\n" } });
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+
+  it("asks before opening another file over unsaved text", async () => {
+    // B3f: the editor remounts per file, so picking another one used to drop
+    // the edit without a word.
+    state.project = "acme-app";
+    state.fileContent = {
+      project: "acme-app",
+      file_path: "conventions.md",
+      content: "# Conventions\n",
+      size_bytes: 14,
+      truncated: false,
+      binary: false,
+    };
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /conventions\.md/ }));
+    const editor = await screen.findByDisplayValue("# Conventions");
+    fireEvent.change(editor, { target: { value: "# Conventions\nmore\n" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /handoff\.md/ }));
+    const ask = await screen.findByRole("dialog", { name: "Discard changes?" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("textbox", { name: "Edit conventions.md" })).toHaveValue(
+      "# Conventions\nmore\n",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /handoff\.md/ }));
+    fireEvent.click(
+      within(await screen.findByRole("dialog", { name: "Discard changes?" })).getByRole(
+        "button",
+        { name: "Discard changes" },
+      ),
+    );
+    expect(await screen.findByRole("textbox", { name: "Edit plans/handoff.md" })).toBeInTheDocument();
   });
 
   it("refuses edits on truncated or binary files", async () => {

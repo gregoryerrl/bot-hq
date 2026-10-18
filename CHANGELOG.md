@@ -320,6 +320,13 @@ and in `docs/rebuild-archive/`.
   the command it withdraws. "View <file>" from Approval details closes the
   details first, so the viewer no longer opens behind it with one Escape
   closing both.
+- **Switching away from unsaved edits asks first.** Picking another role in
+  Settings → Roles, opening another file in a session's Context tab, or
+  closing the session settings drawer threw away what you had typed without a
+  word — the editor simply remounted. Each now asks "Discard changes?", with
+  Cancel keeping your edits. The drawer closes three ways — its close button,
+  Escape and a click outside it — and all three ask; a click outside it now
+  closes it at all, because the page behind is dimmed as the dialog it is.
 - **Keyboard focus is visible everywhere, and motion respects the system
   setting.** Only the main button style showed a focus ring; a session tile,
   a tab, a close button or a "View file" button took focus with no sign of

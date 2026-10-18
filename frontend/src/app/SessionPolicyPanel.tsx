@@ -14,6 +14,8 @@ import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { participantLabel, useSessionParticipants } from "../lib/participants";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 
 /**
  * Right-side drawer for editing a session's canonical policy snapshot
@@ -56,11 +58,24 @@ export function SessionPolicyPanel({
     return () => clearTimeout(id);
   }, [saved]);
 
+  // Unsaved edits in either section (the policy form or the session's gated
+  // keywords): every way out of the drawer — the close button, Escape, a
+  // click on the scrim — asks before it drops them. The keyword section
+  // unmounts with the drawer, so its edits used to vanish without a word.
+  const [gateDirty, setGateDirty] = useState(false);
+  const discard = useDiscardGuard(dirty || gateDirty);
+  const requestClose = () =>
+    discard.guard(() => {
+      setDraft(server ?? {});
+      onClose();
+    });
+
   // Trap focus in the drawer while open (Tab can't escape to the page behind).
   const trapRef = useFocusTrap<HTMLElement>(open);
 
-  // Escape-to-close, scoped to open so it doesn't fight other handlers.
-  useEscapeKey(onClose, open);
+  // Escape-to-close, scoped to open so it doesn't fight other handlers — and
+  // off while the discard question is up, whose own Escape answers "Cancel".
+  useEscapeKey(requestClose, open && !discard.asking);
 
   if (!open) return null;
 
@@ -75,6 +90,15 @@ export function SessionPolicyPanel({
   };
 
   return (
+    <>
+    {/* The scrim: the drawer is modal (aria-modal), so the page behind it is
+        dimmed and a click on it closes the drawer — through the same guard. */}
+    <div
+      className="fixed inset-0 z-30 bg-black/40"
+      onClick={requestClose}
+      aria-hidden
+      data-testid="session-settings-scrim"
+    />
     <aside
       ref={trapRef}
       tabIndex={-1}
@@ -114,7 +138,7 @@ export function SessionPolicyPanel({
           </Button>
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             aria-label="Close session settings"
             className="rounded p-1 text-on-surface-variant transition-colors hover:text-on-surface"
           >
@@ -163,9 +187,19 @@ export function SessionPolicyPanel({
           </p>
         )}
 
-        <SessionToolGateSection sessionId={sessionId} />
+        <SessionToolGateSection sessionId={sessionId} onDirtyChange={setGateDirty} />
       </div>
     </aside>
+    <ConfirmDialog
+      open={discard.asking}
+      title="Discard changes?"
+      message="Session settings have unsaved changes. Closing discards them."
+      confirmLabel="Discard changes"
+      confirmVariant="danger"
+      onConfirm={discard.confirm}
+      onCancel={discard.cancel}
+    />
+    </>
   );
 }
 
@@ -235,7 +269,14 @@ function PolicyOriginBadge({
 // are live on the next Bash call.
 // ----------------------------------------------------------------------------
 
-function SessionToolGateSection({ sessionId }: { sessionId: string }) {
+function SessionToolGateSection({
+  sessionId,
+  onDirtyChange,
+}: {
+  sessionId: string;
+  /** Unsaved keywords, for the drawer's "Discard changes?" guard. */
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const { data: server = [], refetch, isLoading } = useTauriQuery<
     GatedKeyword[]
   >("get_session_tool_gate", { sessionId }, { enabled: !!sessionId });
@@ -245,6 +286,7 @@ function SessionToolGateSection({ sessionId }: { sessionId: string }) {
   >("set_session_tool_gate");
 
   const { draft, setDraft, dirty } = useServerDraft<GatedKeyword[]>(server);
+  useReportDirty(dirty, onDirtyChange);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
     if (!saved) return;

@@ -443,6 +443,36 @@ describe("RolesPanel", () => {
     expect(prose()).toHaveValue("half-written");
   });
 
+  it("asks before switching away from unsaved edits, and keeps them on Cancel", async () => {
+    // B3f: the form remounts per role, so a rail click used to drop a
+    // half-written instruction without a word.
+    mockBackend();
+    renderPanel();
+    await screen.findByText("EYES");
+    await waitFor(() => expect(prose()).toHaveValue("You are the hands."));
+    fireEvent.change(prose(), { target: { value: "half-written" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /EYES/ }));
+    const ask = await screen.findByRole("dialog", { name: "Discard changes?" });
+    fireEvent.click(within(ask).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "Discard changes?" })).toBeNull();
+    expect(prose()).toHaveValue("half-written");
+
+    fireEvent.click(screen.getByRole("button", { name: /\+ new role/i }));
+    const again = await screen.findByRole("dialog", { name: "Discard changes?" });
+    fireEvent.click(within(again).getByRole("button", { name: "Discard changes" }));
+    await waitFor(() => expect(nameField()).toHaveValue(""));
+  });
+
+  it("switches roles without asking when nothing is unsaved", async () => {
+    mockBackend();
+    renderPanel();
+    await screen.findByText("EYES");
+    fireEvent.click(screen.getByRole("button", { name: /EYES/ }));
+    await waitFor(() => expect(prose()).toHaveValue("You are the eyes."));
+    expect(screen.queryByRole("dialog", { name: "Discard changes?" })).toBeNull();
+  });
+
   it("selects the role it just created, not the first in the list", async () => {
     // The new role is selected by id BEFORE the refetch that puts it in the
     // list, so a fall-back that fires on "no row for this id" lands the user on
