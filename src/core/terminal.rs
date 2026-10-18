@@ -492,9 +492,6 @@ impl SessionTerminal {
     }
 }
 
-/// The name of process `pid` (`ps -o comm=`, the last path segment), for the
-/// note that says which command holds a terminal. `None` where it cannot be
-/// read.
 /// The basenames of every process in process group `pgid` — the whole
 /// foreground pipeline, not only its leader (`cat x | sudo tee f` is led by
 /// `cat` while `sudo` waits for a password; EYES, s-3158eb35). One `ps -A`
@@ -529,6 +526,9 @@ pub fn group_process_names(pgid: i32) -> Vec<String> {
     }
 }
 
+/// The name of process `pid` (`ps -o comm=`, the last path segment), for the
+/// note that says which command holds a terminal. `None` where it cannot be
+/// read.
 pub fn process_name(pid: i32) -> Option<String> {
     #[cfg(unix)]
     {

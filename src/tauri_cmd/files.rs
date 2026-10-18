@@ -213,11 +213,6 @@ fn containing_root<'a>(candidate: &Path, roots: &'a [ViewerRoot]) -> Option<&'a 
         .max_by_key(|root| root.path.components().count())
 }
 
-/// True when `candidate` (already canonical) sits inside one of `roots`.
-fn is_contained(candidate: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| candidate.starts_with(root))
-}
-
 /// The viewer's size gate, split out so a test can reach it.
 ///
 /// It lived inline in [`read_workspace_file`], which takes a `tauri::State` and
@@ -471,6 +466,16 @@ pub async fn save_pasted_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The containment tests below over the production check: `candidate`
+    /// (already canonical) sits inside one of `roots`.
+    fn is_contained(candidate: &Path, roots: &[PathBuf]) -> bool {
+        let roots: Vec<ViewerRoot> = roots
+            .iter()
+            .map(|path| ViewerRoot { path: path.clone(), hidden: Hidden::AllDotted })
+            .collect();
+        containing_root(candidate, &roots).is_some()
+    }
 
     #[test]
     fn a_pasted_file_lands_under_the_temp_root_the_viewer_allows() {

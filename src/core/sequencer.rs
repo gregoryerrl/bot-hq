@@ -1912,6 +1912,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         }
         let cmd = match state.deferred.pop_front() {
             Some(cmd) => cmd,
+            #[allow(clippy::blocks_in_conditions)]
             None => match {
                 if bounded {
                     // Armed HERE, on a bounded read only (EYES, e4daf94f):
@@ -3523,6 +3524,33 @@ async fn halted_on_consensus(
     }
 }
 
+/// The boundary a staged message was waiting for has arrived: hand its
+/// delivery to the app layer (it comes back as an ordinary `UserMessage`
+/// milliseconds later and deals to the front). `false` when nothing is staged
+/// — nothing fires.
+///
+/// **Every STOP the ring takes routes through here** (round 12): the consensus
+/// arrival, the staged boundary itself, the spin halt, the all-pass yield, the
+/// round cap, and the user-message reset. Until round 12 the spin halt did
+/// not — it is the `if` and the staged boundary the `else if` of one chain —
+/// so a participant that tripped the detector while the user had a message
+/// staged left the flag set and the message stranded until the user typed
+/// again, with the composer reading "Staged". The all-pass and cap arms are
+/// reached from `advance_turn`, which the completion handler enters only
+/// after its own staged check; they carry the call anyway, because a stop
+/// that strands a staged send is the same defect whichever arm takes it.
+/// `a_spin_halt_with_a_stage_pending_delivers_the_stage` pins the spin arm.
+async fn deliver_staged_if_pending(deps: &SequencerDeps, staged_pending: &mut bool) -> bool {
+    if !*staged_pending {
+        return false;
+    }
+    *staged_pending = false;
+    if let Some(bridge) = deps.bridge.as_ref() {
+        bridge.notify_staged_delivery_due(&deps.session_id);
+    }
+    true
+}
+
 /// Take the turn out of flight. **This is the whole of a halt** — no event, no
 /// marker, no vote touched.
 ///
@@ -3552,33 +3580,6 @@ async fn halted_on_consensus(
 ///   the test's last completion names a turn that was never handed out. A real
 ///   failure, but an arithmetic one; do not read it as the guard being pinned
 ///   from both sides.
-/// The boundary a staged message was waiting for has arrived: hand its
-/// delivery to the app layer (it comes back as an ordinary `UserMessage`
-/// milliseconds later and deals to the front). `false` when nothing is staged
-/// — nothing fires.
-///
-/// **Every STOP the ring takes routes through here** (round 12): the consensus
-/// arrival, the staged boundary itself, the spin halt, the all-pass yield, the
-/// round cap, and the user-message reset. Until round 12 the spin halt did
-/// not — it is the `if` and the staged boundary the `else if` of one chain —
-/// so a participant that tripped the detector while the user had a message
-/// staged left the flag set and the message stranded until the user typed
-/// again, with the composer reading "Staged". The all-pass and cap arms are
-/// reached from `advance_turn`, which the completion handler enters only
-/// after its own staged check; they carry the call anyway, because a stop
-/// that strands a staged send is the same defect whichever arm takes it.
-/// `a_spin_halt_with_a_stage_pending_delivers_the_stage` pins the spin arm.
-async fn deliver_staged_if_pending(deps: &SequencerDeps, staged_pending: &mut bool) -> bool {
-    if !*staged_pending {
-        return false;
-    }
-    *staged_pending = false;
-    if let Some(bridge) = deps.bridge.as_ref() {
-        bridge.notify_staged_delivery_due(&deps.session_id);
-    }
-    true
-}
-
 async fn halt(deps: &SequencerDeps, holder: &mut Option<Participant>, epoch: &mut u64) {
     *holder = None;
     *epoch += 1;

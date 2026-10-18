@@ -191,6 +191,7 @@ impl Storage {
     /// everywhere; it must simply never be invoked off Windows.
     ///
     /// Idempotent: a second run matches no rows.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) async fn normalize_backslash_cl_keys(&self) -> Result<usize> {
         // `char(92)` is a backslash — spelled this way so the predicate needs
         // no LIKE-escape dance.

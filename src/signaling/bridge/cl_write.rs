@@ -520,13 +520,13 @@ impl SignalingBridge {
         // full-file replace, and that commit was a generation stale because a
         // write had never been snapshotted at all. The sha here is the baseline
         // to record; "no snapshot" is a fact to act on, not a silent gap.
-        match &pre {
-            Some(Snapshot::Committed(sha)) => msg.push_str(&format!(
+        // (A failed pre-snapshot refused the write above.)
+        if let Some(Snapshot::Committed(sha)) = &pre {
+            msg.push_str(&format!(
                 " — the file held content that was never versioned (written outside \
                  cl_write_file); committed it first as {sha}, which holds what was there before \
                  this write"
-            )),
-            _ => {} // a failed pre-snapshot refused the write above
+            ));
         }
         match &outside {
             Some(Snapshot::Committed(sha)) => msg.push_str(&format!(

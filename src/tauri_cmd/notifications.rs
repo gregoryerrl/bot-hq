@@ -20,6 +20,9 @@ use crate::tauri_cmd::error::AppError;
 /// `Some(false)` = explicitly 0 (the OS master switch is off — no app can
 /// toast); `Some(true)` = any other value; `None` = the value line is absent
 /// (callers treat that as enabled: Windows' default state stores no value).
+// Called only by the Windows `reg.exe` read below; kept un-gated so its
+// tests run on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn parse_toast_enabled(reg_stdout: &str) -> Option<bool> {
     let line = reg_stdout.lines().find(|l| l.contains("ToastEnabled"))?;
     let raw = line.split_whitespace().last()?;

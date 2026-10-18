@@ -477,7 +477,7 @@ pub(crate) async fn reapprove_linked_plugin_inner(
     plugin_id: &str,
 ) -> Result<InstalledPluginView, AppError> {
     let row = storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
@@ -528,7 +528,7 @@ pub(crate) async fn reapprove_linked_plugin_inner(
     );
 
     let row = storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::Internal("plugin row vanished after reapprove".into()))?;
@@ -548,7 +548,7 @@ pub(crate) async fn reinstall_plugin_inner(
     linked: bool,
 ) -> Result<InstalledPluginView, AppError> {
     storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
@@ -630,7 +630,7 @@ pub(crate) async fn reinstall_plugin_inner(
     );
 
     let row = storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::Internal("plugin row vanished after reinstall".into()))?;
@@ -648,7 +648,7 @@ pub(crate) async fn update_plugin_from_source_inner(
     plugin_id: &str,
 ) -> Result<InstalledPluginView, AppError> {
     let row = storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;
@@ -697,7 +697,7 @@ pub(crate) async fn update_plugin_from_source_inner(
         .map_err(io_to_app)?;
 
     let row = storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::Internal("plugin row vanished after update".into()))?;
@@ -748,7 +748,7 @@ async fn uninstall_plugin_inner(
     plugin_id: &str,
 ) -> Result<(), AppError> {
     let row = storage
-        .get_plugin(&plugin_id)
+        .get_plugin(plugin_id)
         .await
         .map_err(anyhow_to_app)?
         .ok_or_else(|| AppError::NotFound(format!("plugin {plugin_id}")))?;

@@ -3652,8 +3652,8 @@ mod tests {
             assert!(command.contains("policy-check pre-compact"), "{who}: {command}");
             assert!(command.contains(&format!("--session \"{}\"", c.session_id)), "{who}: {command}");
             assert_eq!(hook["timeout"], serde_json::json!(PRE_COMPACT_HOOK_TIMEOUT_SECS), "{who}: {s}");
-            assert!(PRE_COMPACT_HOOK_TIMEOUT_SECS <= 30, "a compaction waits on this hook");
         }
+        const _: () = assert!(PRE_COMPACT_HOOK_TIMEOUT_SECS <= 30, "a compaction waits on this hook");
     }
 
     /// The wire for the post-compaction handoff (`agents::handoff`): BOTH

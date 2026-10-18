@@ -330,7 +330,7 @@ pub const DUE_MARKER: &str = "[bot-hq] Your context is";
 /// `at` (RFC3339-Z): one paragraph, the figures, the doc's name, what to do.
 pub fn due_text(participant: &str, used: u64, window: u64, at: &str) -> String {
     let slug = doc_slug(participant);
-    let pct = if window == 0 { 0 } else { used.saturating_mul(100) / window };
+    let pct = used.saturating_mul(100).checked_div(window).unwrap_or(0);
     let point = crate::core::pump::compaction_point(window);
     let left = match point.saturating_sub(used) {
         0 => "at the point where claude-code compacts it".to_string(),

@@ -155,7 +155,7 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
             .extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| matches!(e, "rs" | "ts" | "tsx"))
-            && !path.file_name().is_some_and(|n| n == "bindings.ts")
+            && path.file_name().is_none_or(|n| n != "bindings.ts")
         {
             out.push(path);
         }

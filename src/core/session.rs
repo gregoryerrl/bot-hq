@@ -1860,7 +1860,7 @@ async fn participant_spawn_config(
     // `resolve_participant_account`. A refusal (a logged-out custom dir on a
     // first spawn) is posted to the channel so the user reads the login
     // command where the session stopped, then fails the spawn.
-    let account = match resolve_participant_account(storage, p, &config, |dir| auth_probe(dir)).await
+    let account = match resolve_participant_account(storage, p, &config, auth_probe).await
     {
         Ok(account) => account,
         Err(e) => {
@@ -3032,6 +3032,64 @@ pub(crate) async fn resolve_spawn_config(
         };
     }
     default_agent_config(agent_name)
+}
+
+/// A `SessionHandle` no spawn produced — one stub agent, a readable stdin, the
+/// shared awaiting flag registered nowhere. `pub(crate)` + `cfg(test)` so WIRE
+/// tests outside this module (the bridge's gate/halt joins — round 13's
+/// dc99564c) can put a session into `AppState.sessions` without subprocesses.
+#[cfg(test)]
+pub(crate) async fn stub_session_for_tests(
+    id: &str,
+    bridge: &Arc<crate::signaling::SignalingBridge>,
+) -> (
+    SessionHandle,
+    tokio::sync::mpsc::Receiver<crate::agents::OutgoingUserMessage>,
+) {
+    use tempfile::TempDir;
+    let (itx, irx) = tokio::sync::mpsc::channel(4);
+    let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handle = SessionHandle {
+        id: id.to_string(),
+        title: "t".into(),
+        working_repo_path: None,
+        session_start_sha: None,
+        ipav: Arc::new(Mutex::new(IpavState::default())),
+        participants: vec![SessionAgent {
+            participant_id: None,
+            slug: "hands".into(),
+            turn_position: 0,
+            capabilities: crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::from_slugs(&["edit_files"]),
+            ),
+            // No spawn ran, so no prompt file was written. A path that does
+            // not exist is exactly what the session view's "the file is
+            // gone" branch reports on.
+            system_prompt_path: PathBuf::from("/nonexistent/hands-system-prompt.txt"),
+            handle: {
+                let (_etx, erx) = tokio::sync::mpsc::channel(1);
+                let (ctx, _crx) = tokio::sync::mpsc::channel(1);
+                let (ktx, _krx) = tokio::sync::oneshot::channel();
+                AgentHandle::from_parts("hands".to_string(), id, erx, itx, ctx, ktx)
+            },
+            turn_epoch: None,
+        }],
+        awaiting: Arc::clone(&awaiting),
+        user_broadcasts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        activity: crate::core::ActivityTracker::new(
+            id,
+            awaiting,
+            Arc::clone(bridge),
+            vec!["hands".to_string()],
+        ),
+        in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        booting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        orienting: crate::core::sequencer::seed_orienting(false, []),
+        liveness: Vec::new(),
+        _mcp_temp: TempDir::new().unwrap(),
+    };
+    (handle, irx)
 }
 
 #[cfg(test)]
@@ -6793,63 +6851,4 @@ mod tests {
             "custom rules should append after hardcoded core"
         );
     }
-}
-
-
-/// A `SessionHandle` no spawn produced — one stub agent, a readable stdin, the
-/// shared awaiting flag registered nowhere. `pub(crate)` + `cfg(test)` so WIRE
-/// tests outside this module (the bridge's gate/halt joins — round 13's
-/// dc99564c) can put a session into `AppState.sessions` without subprocesses.
-#[cfg(test)]
-pub(crate) async fn stub_session_for_tests(
-    id: &str,
-    bridge: &Arc<crate::signaling::SignalingBridge>,
-) -> (
-    SessionHandle,
-    tokio::sync::mpsc::Receiver<crate::agents::OutgoingUserMessage>,
-) {
-    use tempfile::TempDir;
-    let (itx, irx) = tokio::sync::mpsc::channel(4);
-    let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handle = SessionHandle {
-        id: id.to_string(),
-        title: "t".into(),
-        working_repo_path: None,
-        session_start_sha: None,
-        ipav: Arc::new(Mutex::new(IpavState::default())),
-        participants: vec![SessionAgent {
-            participant_id: None,
-            slug: "hands".into(),
-            turn_position: 0,
-            capabilities: crate::agents::ResolvedCapabilities::Known(
-                crate::agents::CapabilitySet::from_slugs(&["edit_files"]),
-            ),
-            // No spawn ran, so no prompt file was written. A path that does
-            // not exist is exactly what the session view's "the file is
-            // gone" branch reports on.
-            system_prompt_path: PathBuf::from("/nonexistent/hands-system-prompt.txt"),
-            handle: {
-                let (_etx, erx) = tokio::sync::mpsc::channel(1);
-                let (ctx, _crx) = tokio::sync::mpsc::channel(1);
-                let (ktx, _krx) = tokio::sync::oneshot::channel();
-                AgentHandle::from_parts("hands".to_string(), id, erx, itx, ctx, ktx)
-            },
-            turn_epoch: None,
-        }],
-        awaiting: Arc::clone(&awaiting),
-        user_broadcasts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        activity: crate::core::ActivityTracker::new(
-            id,
-            awaiting,
-            Arc::clone(bridge),
-            vec!["hands".to_string()],
-        ),
-        in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        cancel_superseded: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        booting: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        orienting: crate::core::sequencer::seed_orienting(false, []),
-        liveness: Vec::new(),
-        _mcp_temp: TempDir::new().unwrap(),
-    };
-    (handle, irx)
 }

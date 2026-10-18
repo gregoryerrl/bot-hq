@@ -644,7 +644,7 @@ pub(crate) fn group_thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -2042,8 +2042,8 @@ pub async fn pump_agent(
                         // chat. The old wording said it "did not reach the
                         // channel" beside the very line it called lost
                         // (s-b175d9c0, row 121360 vs 121379).
-                        if consecutive_errored_turns < 2 {
-                            if crate::core::post_system_notice(
+                        if consecutive_errored_turns < 2
+                            && crate::core::post_system_notice(
                                 &storage,
                                 cfg.bridge.as_deref(),
                                 &cfg.session_id,
@@ -2075,7 +2075,6 @@ pub async fn pump_agent(
                             {
                                 warn!(agent = %cfg.slug, "the errored-turn notice was not posted");
                             }
-                        }
                     }
                     if !retried && consecutive_errored_turns >= 2 {
                         // `last_line` was read above, before the buffer is
@@ -3614,7 +3613,7 @@ mod tests {
         let three = error_halt_history("eyes", &[now, now, now], Some(now));
         assert!(three.contains("3rd error halt") && three.contains("(the first 0s ago)"), "{three}");
         assert!(three.contains("last clean turn ended 0s ago"), "{three}");
-        assert!(error_halt_history("e", &vec![now; 11], None).contains("11th"));
+        assert!(error_halt_history("e", &[now; 11], None).contains("11th"));
         assert_eq!(human_span(std::time::Duration::from_secs(8 * 3600 + 35 * 60)), "8h 35m");
     }
 

@@ -1105,14 +1105,14 @@ mod tests {
             Some("git push origin 1111aaaa:refs/heads/a 2222bbbb:refs/heads/b")
         );
         assert_eq!(
-            push_refspecs(&[a.clone()]),
+            push_refspecs(std::slice::from_ref(&a)),
             Some(vec!["1111aaaa:refs/heads/a".to_string()])
         );
         // Nothing to push, a delete, or a remote/ref that is not a plain token.
         assert_eq!(push_rerun_command("origin", &[]), None);
         let del = up("(delete)", "0000000000000000000000000000000000000000", "refs/heads/x", "4444");
         assert_eq!(push_rerun_command("origin", &[a.clone(), del]), None);
-        assert_eq!(push_rerun_command("origin; rm -rf /", &[a.clone()]), None);
+        assert_eq!(push_rerun_command("origin; rm -rf /", std::slice::from_ref(&a)), None);
         let bad = up("refs/heads/a", "1111aaaa", "refs/heads/a b", "0000");
         assert_eq!(push_rerun_command("origin", &[bad]), None);
         // The refspecs read back off the command round-trip.

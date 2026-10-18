@@ -623,9 +623,7 @@ impl AppState {
         // `broadcast_as` and `restart_session` inherit the refusal — a plugin
         // broadcast into a closed session must not revive it either.
         if let Ok(Some(row)) = self.storage.get_session(session_id).await {
-            if let Err(refusal) = refuse_closed(session_id, row.closed_at.as_deref()) {
-                return Err(refusal);
-            }
+            refuse_closed(session_id, row.closed_at.as_deref())?
         }
         // The roster seed moved into `spawn_session_handle` (B4b.2) — it is the
         // choke point every creation path shares, and this one was not: the

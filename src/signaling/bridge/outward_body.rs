@@ -777,14 +777,11 @@ const SCRIPT_RUNNERS: &[&str] = &["python", "python3", "node", "ruby", "perl", "
 /// skipped (`bash -x X`, `bash -o pipefail X`). Each is hashed when the gate
 /// parks and re-hashed at approval, like a publish's body files, so the user
 /// approves the script as it was, not whatever the path holds later.
-pub(crate) fn executed_scripts(command: &str) -> Vec<String> {
-    executed_scripts_split(command).0
-}
-
-/// [`executed_scripts`] split into the scripts whose path bot-hq can resolve
-/// (before any `cd` on the line) and those it cannot: a script named AFTER a
-/// literal `cd` resolves against a directory only the command knows, so it is
-/// never pinned (EYES, s-42bf34b3: `cd sub && ./run.sh` could otherwise pin a
+///
+/// Split into the scripts whose path bot-hq can resolve (before any `cd` on
+/// the line) and those it cannot: a script named AFTER a literal `cd`
+/// resolves against a directory only the command knows, so it is never
+/// pinned (EYES, s-42bf34b3: `cd sub && ./run.sh` could otherwise pin a
 /// root-level `run.sh` and miss an edit to `sub/run.sh`).
 pub(crate) fn executed_scripts_split(command: &str) -> (Vec<String>, Vec<String>) {
     let looks_like_file = |w: &str| w.contains('/') || w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric()));
@@ -913,7 +910,7 @@ pub(crate) fn text_only_write_target(command: &str) -> Option<String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(_, w)| w.op && !(w.text.starts_with("<<") && !w.text.starts_with("<<<")))
+        .filter(|(_, w)| w.op && (!w.text.starts_with("<<") || w.text.starts_with("<<<")))
         .collect();
     let [(at, op)] = ops.as_slice() else { return None };
     if op.text != ">" && op.text != ">>" {
@@ -1367,6 +1364,9 @@ fn quotes_balance(command: &str) -> bool {
             '\\' => {
                 chars.next();
             }
+            // A guard would read better to clippy, but a guard that consumes
+            // the iterator is a side effect hidden in a condition.
+            #[allow(clippy::collapsible_match)]
             '\'' => {
                 if !chars.by_ref().any(|d| d == '\'') {
                     return false;
@@ -1987,7 +1987,7 @@ mod tests {
     /// file: an inline `-c`, a module, stdin, a bare name.
     #[test]
     fn the_scripts_a_command_runs_are_found_and_nothing_else_is() {
-        let scripts = |c: &str| executed_scripts(c);
+        let scripts = |c: &str| executed_scripts_split(c).0;
         assert_eq!(scripts("bash /tmp/hardcheck.sh"), ["/tmp/hardcheck.sh"]);
         assert_eq!(scripts("bash -x -o pipefail scripts/deploy.sh --dry"), ["scripts/deploy.sh"]);
         assert_eq!(scripts("sh ./check.sh && python3 tools/report.py out.json"), ["./check.sh", "tools/report.py"]);

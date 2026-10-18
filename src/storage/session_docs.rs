@@ -442,6 +442,21 @@ impl Storage {
     }
 }
 
+/// A doc's first non-empty line, markdown heading marks dropped, cut to 160
+/// characters — the Action items list's one-line preview.
+pub(crate) fn preview_line(body: &str) -> String {
+    let line = body
+        .lines()
+        .map(|l| l.trim().trim_start_matches('#').trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if line.chars().count() <= 160 {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(159).collect();
+    format!("{cut}…")
+}
+
 #[cfg(test)]
 mod session_doc_tests {
     use super::*;
@@ -728,19 +743,4 @@ mod session_doc_tests {
         assert_eq!(doc.id, id_a);
         assert_eq!(doc.body, "v2");
     }
-}
-
-/// A doc's first non-empty line, markdown heading marks dropped, cut to 160
-/// characters — the Action items list's one-line preview.
-pub(crate) fn preview_line(body: &str) -> String {
-    let line = body
-        .lines()
-        .map(|l| l.trim().trim_start_matches('#').trim())
-        .find(|l| !l.is_empty())
-        .unwrap_or("");
-    if line.chars().count() <= 160 {
-        return line.to_string();
-    }
-    let cut: String = line.chars().take(159).collect();
-    format!("{cut}…")
 }

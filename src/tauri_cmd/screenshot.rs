@@ -47,6 +47,9 @@ pub(crate) struct Region {
 }
 
 /// A resolved capture invocation: program plus argv.
+// Built only by the Linux capture path; kept un-gated, with the two helpers
+// below, so their tests run on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Capture {
     pub program: String,
@@ -62,6 +65,7 @@ pub(crate) struct Capture {
 }
 
 impl Capture {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn new(program: &str, args: &[String], geometry: bool) -> Self {
         Self {
             program: program.to_string(),
@@ -358,6 +362,7 @@ fn try_capture(
 /// IHDR is mandated to be the FIRST chunk, so width and height always live at
 /// bytes 16..24: 8-byte signature, 4-byte length, 4-byte type, then two
 /// big-endian u32s.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     if bytes.len() < 24 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" || &bytes[12..16] != b"IHDR" {
         return None;
@@ -389,6 +394,7 @@ pub(crate) fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 /// weakest exactly where the app is most often run. What it reliably catches
 /// is a small or dialog-shaped wrong window. Stated here and in
 /// `docs/FEDORA-LINUX-COMPAT.md` rather than pretended away.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn plausible_capture(
     got: (u32, u32),
     region: Region,

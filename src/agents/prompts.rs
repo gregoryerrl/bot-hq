@@ -237,28 +237,29 @@ You do NOT see your peers' tool calls. `Edit` / `Write` / `Bash` / `Read` and th
 Your first tool call on any substantive project task is `cl_index_search(project=<your project>)`. Not `git log`, not `git show`, not `grep`. The CL is where project conventions live (formatter, test commands, commit rules, deploy gates) and where audit notes from past PRs live — both directly feed adversarial review. If HANDS skips it, that's a finding for you to flag in Plan-phase pushback. You can't credibly review a plan against project standards you haven't read. Trivial one-liner tasks are exempt — the discipline tracks IPAV's substantive-work threshold.
 ";
 
-/// The built-in prose a role's participants fall back to when the role's
-/// `roles.description_prompt` is empty — `""` when there is none.
-///
-/// **Keyed on the ROLE's slug, and on nothing else** (rc3 D10). It used to go
-/// through an agent name — `"hands" => "brian" => PRESET_HANDS_ROLE` — which is exactly
-/// the hardcoding the reframe contract names, and which broke the moment a
-/// second participant of a role took the handle `hands-2`. A role slug the
-/// binary carries no constant for gets `""`, and `read_system_prompt` then emits
-/// no layer 3 at all rather than someone else's identity.
-///
-/// **This is also the honest predicate for "clearing this box restores the
-/// default", and the `builtin` column is not.** `read_system_prompt` treats an
-/// empty or all-whitespace row as absent and falls back to this, so whether a
-/// role has a default to restore is a property of whether this file carries a
-/// constant for that role — nothing to do with who seeded the row.
-///
-/// The Roles tab used to ask `builtin` instead, which was defensible until
-/// migration 0048 set `builtin = 0` on every row to state that bot-hq ships no
-/// roles. `create_role` hardcodes 0 and `update_role` never writes it, so the
-/// flag is now permanently false and that branch always took its "role you
-/// added" arm — telling a user clearing HANDS' prompt that HANDS would join
-/// with no instruction, when in fact it restores [`PRESET_HANDS_ROLE`] in full.
+// What `builtin_prose_for_role` documented before it was deleted (below): the
+// built-in prose a role's participants fell back to when the role's
+// `roles.description_prompt` was empty — `""` when there was none.
+//
+// **Keyed on the ROLE's slug, and on nothing else** (rc3 D10). It used to go
+// through an agent name — `"hands" => "brian" => PRESET_HANDS_ROLE` — which is exactly
+// the hardcoding the reframe contract names, and which broke the moment a
+// second participant of a role took the handle `hands-2`. A role slug the
+// binary carries no constant for gets `""`, and `read_system_prompt` then emits
+// no layer 3 at all rather than someone else's identity.
+//
+// **This is also the honest predicate for "clearing this box restores the
+// default", and the `builtin` column is not.** `read_system_prompt` treats an
+// empty or all-whitespace row as absent and falls back to this, so whether a
+// role has a default to restore is a property of whether this file carries a
+// constant for that role — nothing to do with who seeded the row.
+//
+// The Roles tab used to ask `builtin` instead, which was defensible until
+// migration 0048 set `builtin = 0` on every row to state that bot-hq ships no
+// roles. `create_role` hardcodes 0 and `update_role` never writes it, so the
+// flag is now permanently false and that branch always took its "role you
+// added" arm — telling a user clearing HANDS' prompt that HANDS would join
+// with no instruction, when in fact it restores [`PRESET_HANDS_ROLE`] in full.
 // `builtin_prose_for_role` was DELETED here (1.0.0 Batch 4). It resurrected
 // the compiled constant whenever a role's prose row was empty — which made a
 // BLANK role literally unexpressible: clearing the box in the Roles tab

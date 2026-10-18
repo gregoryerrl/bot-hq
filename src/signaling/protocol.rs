@@ -211,7 +211,7 @@ pub fn always_loaded_for(tool: &str, caps: &crate::agents::ResolvedCapabilities)
     if required_for(tool).is_some_and(|cap| !caps.grants(cap)) {
         return false;
     }
-    !(COMMITTER_TOOLS.contains(&tool) && !caps.grants(Capability::EditFiles))
+    !COMMITTER_TOOLS.contains(&tool) || caps.grants(Capability::EditFiles)
 }
 
 /// The `tools/list` answer for one caller: every registered tool (the list is

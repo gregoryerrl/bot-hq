@@ -884,7 +884,7 @@ fn run_pre_push(
     let updates: std::cell::OnceCell<Vec<PushUpdate>> = std::cell::OnceCell::new();
     // What the user is asked about: the pushed refs, else HEAD.
     let label = |updates: &[PushUpdate]| {
-        push_target_label(&pushed_ref_names(updates), || current_branch())
+        push_target_label(&pushed_ref_names(updates), current_branch)
     };
 
     // force_push gate — independent of push_gate and checked FIRST, so a
@@ -2231,8 +2231,10 @@ mod tests {
             .expect("the ask path labels from the (lazily read) updates");
         let decide = body.find("decide_push(").expect("the hook still asks the app");
         assert!(label_def < ask_label && ask_label < decide, "label → ask, in that order");
+        // The fallback is passed as the function itself (`current_branch`),
+        // not called — so the token is counted, not a call.
         assert_eq!(
-            body.matches("current_branch()").count(),
+            body.matches("current_branch").count(),
             1,
             "HEAD is read once, as the fallback inside the label — not as the prompt"
         );
@@ -3153,7 +3155,7 @@ mod tests {
             remote_ref: "refs/heads/x".into(),
             remote_oid: "0000000000000000000000000000000000000000".into(),
         };
-        let body = pre_push_request_body("s1", "hands", Some("x"), Some("origin"), &[u.clone()], None);
+        let body = pre_push_request_body("s1", "hands", Some("x"), Some("origin"), std::slice::from_ref(&u), None);
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["session_id"], "s1");
         assert_eq!(v["agent"], "hands");

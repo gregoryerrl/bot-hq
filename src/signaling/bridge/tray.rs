@@ -1265,7 +1265,7 @@ impl SignalingBridge {
         // parked on 1.0.7 holds its options raw — so it is redacted; an unlisted
         // pick is the user typing, and is not.
         use crate::policy::secret_scan::{redact, redact_string};
-        let listed = options.iter().any(|o| *o == picked);
+        let listed = options.contains(&picked);
         let shown_pick = if listed { redact(&picked) } else { std::borrow::Cow::Borrowed(picked.as_str()) };
         let question = redact(question);
         let options: Vec<String> = options.iter().map(|o| redact(o).into_owned()).collect();

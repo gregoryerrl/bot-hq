@@ -683,7 +683,7 @@ mod tests {
         assert!(bridge.has_running_gate("s1"));
         assert!(!bridge.has_running_gate("s2"), "per session");
         // What the poll computes with the mark up: pending, so no nudge.
-        let pending = false || bridge.has_running_gate("s1");
+        let pending = bridge.has_running_gate("s1");
         assert_eq!(
             idle_unflagged_decision(OVER, 3, pending, None, false, false, GRACE),
             IdleDecision { chip: false, nudge: false }
