@@ -44,6 +44,9 @@ describe("PendingTray — the notification bell", () => {
           },
         ];
       }
+      if (cmd === "list_sessions") {
+        return [{ id: "s-gate0001", title: "oct 15 STRYKA" }];
+      }
       return null;
     });
   });
@@ -64,5 +67,9 @@ describe("PendingTray — the notification bell", () => {
     expect(screen.getByText("halted — your move")).toBeInTheDocument();
     expect(screen.getByText("First launch passed — your move")).toBeInTheDocument();
     expect(screen.queryByText(/S-WAKE/i)).toBeNull();
+    // A row is named by its session's title when the dashboard's list has
+    // it, and by its id otherwise.
+    expect(screen.getByText("oct 15 STRYKA")).toBeInTheDocument();
+    expect(screen.getByText("Session s-ask000")).toBeInTheDocument();
   });
 });

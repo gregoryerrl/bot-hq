@@ -20,21 +20,23 @@ export function DiagnosticsAskCardView({
   onDecline: () => void;
 }) {
   return (
-    <div className="flex items-center gap-3 border-b border-outline-variant bg-surface-container px-grid-margin py-2 font-code-sm text-code-sm text-on-surface">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-outline-variant bg-surface-container px-grid-margin py-2 font-code-sm text-code-sm text-on-surface">
       <span className="shrink-0 font-label-caps text-label-caps text-on-surface-variant">
         DIAGNOSTICS
       </span>
-      <span className="flex-1 truncate">
+      {/* The question wraps rather than truncates: a consent whose "What is
+          sent" link an ellipsis had eaten is not a consent. */}
+      <span className="min-w-0 flex-1 basis-80">
         Share anonymous crash reports and usage counts (never code or prompts)
-        with the bot-hq author?{" "}
-        <button
-          type="button"
-          onClick={() => void openUrl(PRIVACY_URL)}
-          className="underline decoration-outline-variant underline-offset-2 hover:text-primary"
-        >
-          What is sent
-        </button>
+        with the bot-hq author?
       </span>
+      <button
+        type="button"
+        onClick={() => void openUrl(PRIVACY_URL)}
+        className="shrink-0 underline decoration-outline-variant underline-offset-2 hover:text-primary"
+      >
+        What is sent
+      </button>
       <button
         type="button"
         onClick={onEnable}

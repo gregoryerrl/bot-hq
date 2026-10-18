@@ -283,6 +283,24 @@ and in `docs/rebuild-archive/`.
   the command it withdraws. "View <file>" from Approval details closes the
   details first, so the viewer no longer opens behind it with one Escape
   closing both.
+- **Names instead of identifiers, times that keep counting, copy that points
+  at real controls.** The notification bell listed "Session s-69ef19"; it
+  lists the session's title. A tray card's kind read as its tool's name
+  (CHOICE, REQUEST); it reads "Question", "Approval request". Four plugin
+  error banners that started with an internal error kind are the one error
+  banner the rest of the app uses. "x ago" labels on chat rows and session
+  tiles froze at whatever they said when they rendered ("just now" for an
+  hour in an idle session); they tick every 30 seconds on one shared clock
+  and show the exact local time on hover, and a tile no longer prints its age
+  twice. The bare "✕" in the session header, which ends the agents and
+  archives the session, is a labelled "Close session…" button. Two help texts
+  dropped notes about bot-hq's own development history; the Context
+  Library's empty state pointed at a disabled Rescan and the Promote dialog
+  at a button that does not exist — both name the Register button. The
+  diagnostics consent wraps instead of cutting off its "What is sent" link,
+  and a session tile's chip row wraps instead of clipping its age at three
+  columns. The bell no longer pulses whole for hours — only its count does,
+  and not under a reduced-motion setting.
 - **Screens say "loading" while they load, and an error reads as text.** A
   cold open of a session flashed "Session not found." until the row arrived;
   the Feedback panel, the document tabs, the tray tab, the Roles pane and the

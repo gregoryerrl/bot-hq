@@ -570,7 +570,7 @@ const KNOB_EDITORS: Record<
 /** Per-knob explanatory note rendered under the row (optional). */
 const KNOB_NOTES: Record<string, string> = {
   "env.CLAUDE_CODE_EFFORT_LEVEL":
-    "Your own claude only: agents resolve effort from the New-session pick, else the role's default (Settings → Roles), else medium — never from this knob (no-inherit, 2026-08-25).",
+    "Your own claude only: agents resolve effort from the New-session pick, else the role's default (Settings → Roles), else medium — never from this knob.",
 };
 
 function CorePane({

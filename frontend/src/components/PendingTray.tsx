@@ -5,7 +5,7 @@ import { cn } from "../lib/cn";
 import { BellIcon } from "./icons";
 import { needsYou, needsYouBySession, needsYouParts } from "../lib/attention";
 import { useNow } from "../hooks/useNow";
-import type { OpenSessionHalt } from "../lib/bindings";
+import type { OpenSessionHalt, SessionInfo } from "../lib/bindings";
 import { shortSessionId } from "../lib/sessionId";
 
 // `list_pending_tray` returns durable pending session_tray rows for open
@@ -45,6 +45,12 @@ export function PendingTray() {
   const { data: haltRows } = useTauriQuery<OpenSessionHalt[] | null>("list_session_halts", {});
   const halts = haltRows ?? [];
   const now = useNow(30_000);
+  // The sessions' titles: the same query the dashboard holds, so a row names
+  // "oct 15 STRYKA" and not only an id. Only open sessions are listed (and
+  // only open sessions can need input), so the id is a fallback for a row
+  // whose session closed between the two reads.
+  const { data: sessionRows } = useTauriQuery<SessionInfo[]>("list_sessions");
+  const titles = new Map((sessionRows ?? []).map((s) => [s.id, s.title]));
 
   // Grouped by session: one row per session naming what it waits on, by kind
   // ("approval waiting · halted — your move"). The badge counts SESSIONS, not
@@ -90,13 +96,15 @@ export function PendingTray() {
         className={cn(
           "relative inline-flex items-center rounded border p-1.5 transition-colors",
           count > 0
-            ? "border-primary bg-primary/15 text-primary animate-pulse"
+            ? "border-primary bg-primary/15 text-primary"
             : "border-outline/40 text-on-surface hover:border-outline hover:text-on-surface",
         )}
       >
         <BellIcon />
+        {/* Only the count pulses — a session can wait for hours, and the
+            whole bell throbbing that long is noise, not a signal. */}
         {count > 0 && (
-          <span className="absolute -right-1.5 -top-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-primary px-1 text-[0.65rem] font-semibold text-on-primary">
+          <span className="absolute -right-1.5 -top-1.5 inline-flex min-w-[1.25rem] animate-pulse items-center justify-center rounded-full bg-primary px-1 text-[0.65rem] font-semibold text-on-primary motion-reduce:animate-none">
             {count}
           </span>
         )}
@@ -122,9 +130,11 @@ export function PendingTray() {
                 onClick={() => setOpen(false)}
                 className="block border-b border-outline-variant px-3 py-3 last:border-b-0 hover:bg-surface-container-high"
               >
-                <div className="mb-1 flex items-center justify-between font-label-caps text-label-caps text-on-surface-variant">
-                  <span>Session {shortSessionId(sid)}</span>
-                  <span className="text-primary">Open →</span>
+                <div className="mb-1 flex items-center justify-between gap-2 font-label-caps text-label-caps text-on-surface-variant">
+                  <span className="min-w-0 truncate" title={titles.get(sid) ?? sid}>
+                    {titles.get(sid) ?? `Session ${shortSessionId(sid)}`}
+                  </span>
+                  <span className="shrink-0 text-primary">Open →</span>
                 </div>
                 <p className="font-body-md text-body-md text-on-surface">
                   needs you:{" "}

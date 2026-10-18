@@ -269,7 +269,7 @@ export function WorkspaceSidebar({
           />
         ) : projectCount === 0 ? (
           <p className="px-2 py-3 font-code-sm text-code-sm text-on-surface-variant">
-            {query.trim() ? "No matches." : "Empty. Use Rescan to populate."}
+            {query.trim() ? "No matches." : "No projects yet. Register a folder with the + button above."}
           </p>
         ) : (
           <>

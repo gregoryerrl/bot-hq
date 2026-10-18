@@ -111,7 +111,7 @@ export function PolicyForm({
 
       <Field
         label="Forbidden words in commits"
-        hint="Words no commit may carry: the commit-msg and pre-commit hooks block them, the post-commit verifier logs a slip, and check_commit_message pre-checks the agent's message. Whole-word, case-insensitive. A non-empty project list REPLACES the global one. Enforced (round 8: this field had no UI — the only way to set it was editing the yaml)."
+        hint="Words no commit may carry: the commit-msg and pre-commit hooks block them, the post-commit verifier logs a slip, and check_commit_message pre-checks the agent's message. Whole-word, case-insensitive. A non-empty project list replaces the global one."
       >
         <StringList
           items={value.forbidden_in_commits ?? []}

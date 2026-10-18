@@ -830,15 +830,18 @@ export function SessionView() {
           >
             <GearIcon />
           </Button>
+          {/* Labelled, not a bare ✕: the glyph read as "close this view"
+              while the action ends the agents and archives the session;
+              ← Dashboard is the way back. The confirm stays behind it. */}
           <Button
             variant="ghost"
             size="sm"
-            title="Force-close session — ends its agents and archives it"
+            title="Ends the session's agents and archives it (asks first)"
             aria-label="Close session"
             disabled={closing}
             onClick={onCloseClick}
           >
-            {closing ? "…" : "✕"}
+            {closing ? "Closing…" : "Close session…"}
           </Button>
         </div>
       </header>

@@ -1010,6 +1010,15 @@ function TrayList({
 // One pending tray item, answered via the shared ChoicePrompt (preset options
 // + mandatory "Other"). Shows the kind + who asked and, for an action_gate
 // approval, the gated command above the prompt for context.
+/** What a tray card's kind means to the reader (the stored values are the
+ *  MCP tools' names). */
+const TRAY_KIND_LABELS: Record<string, string> = {
+  choice: "Question",
+  request: "Approval request",
+  approval: "Approval",
+  close: "Close",
+};
+
 function TrayChoice({
   entry,
   askedByLabel,
@@ -1049,7 +1058,7 @@ function TrayChoice({
     <div>
       <div className="mb-1 flex items-center gap-2">
         <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant">
-          {entry.kind}
+          {TRAY_KIND_LABELS[entry.kind] ?? entry.kind}
         </span>
         <span className="text-[0.7rem] text-on-surface-variant">
           {askedByLabel}

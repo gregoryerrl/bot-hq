@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { Link } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
@@ -308,68 +309,36 @@ export function PluginManager() {
           edits show on tab reload.
         </label>
         {installError && (
-          <div
-            role="alert"
-            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
-          >
-            <div>
-              <span className="font-semibold">{installError.kind}:</span>{" "}
-              {installError.message}
-            </div>
-            <button
-              type="button"
-              className="underline"
-              onClick={() => setInstallError(null)}
-            >
-              dismiss
-            </button>
-          </div>
+          <ErrorBanner
+            label="Install failed:"
+            message={installError.message}
+            onDismiss={() => setInstallError(null)}
+            className="mt-2"
+          />
         )}
         {toggleError && (
-          <div
-            role="alert"
-            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
-          >
-            <div>
-              <span className="font-semibold">{toggleError.kind}:</span>{" "}
-              Enable/disable failed: {toggleError.message}
-            </div>
-            <button type="button" className="underline" onClick={() => setToggleError(null)}>
-              dismiss
-            </button>
-          </div>
+          <ErrorBanner
+            label="Enable/disable failed:"
+            message={toggleError.message}
+            onDismiss={() => setToggleError(null)}
+            className="mt-2"
+          />
         )}
         {uninstallError && (
-          <div
-            role="alert"
-            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
-          >
-            <div>
-              <span className="font-semibold">{uninstallError.kind}:</span>{" "}
-              Uninstall failed: {uninstallError.message}
-            </div>
-            <button
-              type="button"
-              className="underline"
-              onClick={() => setUninstallError(null)}
-            >
-              dismiss
-            </button>
-          </div>
+          <ErrorBanner
+            label="Uninstall failed:"
+            message={uninstallError.message}
+            onDismiss={() => setUninstallError(null)}
+            className="mt-2"
+          />
         )}
         {updateError && (
-          <div
-            role="alert"
-            className="mt-2 flex items-start justify-between gap-3 rounded border border-outline-variant bg-error-container/30 px-3 py-2 font-code-sm text-code-sm text-on-error-container"
-          >
-            <div>
-              <span className="font-semibold">{updateError.kind}:</span>{" "}
-              Update from source failed: {updateError.message}
-            </div>
-            <button type="button" className="underline" onClick={() => setUpdateError(null)}>
-              dismiss
-            </button>
-          </div>
+          <ErrorBanner
+            label="Update from source failed:"
+            message={updateError.message}
+            onDismiss={() => setUpdateError(null)}
+            className="mt-2"
+          />
         )}
       </section>
 

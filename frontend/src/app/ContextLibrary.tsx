@@ -273,7 +273,7 @@ function LibraryTree() {
       case "registerProject":
         return {
           title: "Promote to project",
-          message: `Moves the existing Global folder "${t.path}" into projects/ and registers it as a Context Library project. (To create a new project, use "+ New project".)`,
+          message: `Moves the existing Global folder "${t.path}" into projects/ and registers it as a Context Library project. (To register a new folder instead, use the sidebar's Register project button.)`,
           inputLabel: "Project name",
           initialValue: baseName(t.path),
           confirmLabel: "Promote",

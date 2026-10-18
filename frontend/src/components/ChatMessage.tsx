@@ -2,7 +2,8 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { Markdown } from "./Markdown";
 import { authorColorClass } from "./authorColor";
 import { cn } from "../lib/cn";
-import { formatRelative, parseUtcMs } from "../lib/time";
+import { parseUtcMs } from "../lib/time";
+import { RelativeTime } from "./RelativeTime";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
 import { fileArgInCommand } from "./FileViewerDialog";
@@ -60,9 +61,7 @@ function MessageHeader({
       >
         {shown}
       </span>
-      <span className="text-[0.65rem] text-on-surface-variant">
-        {formatRelative(createdAt)}
-      </span>
+      <RelativeTime iso={createdAt} className="text-[0.65rem] text-on-surface-variant" />
     </header>
   );
 }

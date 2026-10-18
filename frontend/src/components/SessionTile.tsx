@@ -1,7 +1,7 @@
 import { memo } from "react";
 import { useNavigate } from "react-router-dom";
 import { cn } from "../lib/cn";
-import { formatRelative } from "../lib/time";
+import { RelativeTime } from "./RelativeTime";
 import {
   ATTENTION_IDLE_LABEL,
   ATTENTION_IDLE_TOOLTIP,
@@ -109,7 +109,9 @@ function SessionTileImpl({
       <div className={cn("flex-1 p-4", needsInput && "pb-3")}>
         {/* Slots 2-4: header row */}
         <div className="flex items-start justify-between gap-2">
-          <div className="flex items-center gap-2">
+          {/* Wraps at three columns: id + phase + NEEDS DIRECTION + SOLO run
+              past ~330 px, and the tile is overflow-hidden. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <code className="font-label-caps text-label-caps text-on-surface-variant">
               {formatSessionId(session.id)}
             </code>
@@ -138,9 +140,10 @@ function SessionTileImpl({
               </span>
             )}
           </div>
-          <span className="shrink-0 font-code-sm text-code-sm text-on-surface-variant">
-            {formatRelative(session.created_at)}
-          </span>
+          <RelativeTime
+            iso={session.created_at}
+            className="shrink-0 font-code-sm text-code-sm text-on-surface-variant"
+          />
         </div>
 
         {/* Slot 5: title */}
@@ -224,15 +227,15 @@ function formatSessionId(id: string): string {
   return `S-${cleaned.slice(0, 4).toUpperCase() || "????"}`;
 }
 
+// The age sits in the header row (once); this line is the repo.
 function describe(session: SessionInfo): string {
-  const created = `created ${formatRelative(session.created_at)}`;
   if (session.working_repo_path) {
     const basename =
       session.working_repo_path.split("/").filter(Boolean).pop() ?? "repo";
     const worktree = session.base_repo_path ? " · worktree" : "";
-    return `${basename}${worktree} · ${created}`;
+    return `${basename}${worktree}`;
   }
-  return `no repo · ${created}`;
+  return "no repo";
 }
 
 function quickviewFor(phase: string | null, closed: boolean): string {
