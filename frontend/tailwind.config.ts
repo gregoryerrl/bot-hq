@@ -15,11 +15,16 @@ import type { Config } from "tailwindcss";
  * both lean into the design.
  */
 export default {
-  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  // Test files are never rendered, and a guard's fixtures spell the classes it
+  // bans (`lib/typeScale.test.ts`) — scanned, they would ship as dead CSS.
+  content: ["./index.html", "./src/**/*.{ts,tsx}", "!./src/**/*.test.{ts,tsx}"],
   theme: {
     extend: {
       fontFamily: {
-        // Legacy
+        // Kept for Preflight, not for classes: `sans` is the page font (html)
+        // and `mono` the font of a bare <code>/<kbd>/<samp>/<pre>. Classes use
+        // the semantic families below — `font-mono` duplicated `font-code-sm`,
+        // and `lib/typeScale.test.ts` refuses it.
         sans: [
           "Inter",
           "ui-sans-serif",

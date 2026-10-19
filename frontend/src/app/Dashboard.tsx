@@ -880,7 +880,7 @@ export function Dashboard() {
                             title="Rotate — a distinct hue by turn order"
                             onClick={() => patchParticipant(index, { color: null })}
                             className={cn(
-                              "size-5 rounded-full border text-[0.6rem] leading-none text-on-surface-variant",
+                              "size-5 rounded-full border font-code-sm text-code-sm leading-none text-on-surface-variant",
                               row.color === null
                                 ? "border-primary ring-1 ring-primary"
                                 : "border-outline-variant",
@@ -1250,7 +1250,7 @@ export function Dashboard() {
                 body: (
                   <>
                     Create a session with <b>+ New session</b> (or{" "}
-                    <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-mono text-[0.65rem]">
+                    <kbd className="rounded border border-outline-variant bg-surface-container-lowest px-1 py-0.5 font-code-sm text-code-sm">
                       {NEW_SESSION_SHORTCUT}
                     </kbd>
                     ) and choose its participants.
@@ -1261,7 +1261,7 @@ export function Dashboard() {
               <li key={i} className="flex items-start gap-2.5">
                 <span
                   className={cn(
-                    "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full text-[0.7rem]",
+                    "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full font-code-sm text-code-sm",
                     step.done
                       ? "bg-success/20 text-success"
                       : "border border-outline-variant text-on-surface-variant",

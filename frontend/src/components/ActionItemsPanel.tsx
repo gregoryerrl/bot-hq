@@ -61,7 +61,7 @@ export function ActionItemsPanel() {
             <li key={key} className="flex items-center gap-3 py-1.5 text-sm">
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <code className="font-mono text-xs text-on-surface">{item.slug}</code>
+                  <code className="font-code-sm text-xs text-on-surface">{item.slug}</code>
                   <span className="truncate text-xs text-on-surface-variant" title={item.session_title}>
                     {item.session_title}
                     {item.session_closed_at ? " · closed" : ""}

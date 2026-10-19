@@ -210,7 +210,7 @@ export function ApprovalGate({
           already scrolls. `break-all`, not `break-words`: a command is one
           unbroken token far more often than prose is. */}
       {row.command_text && (
-        <pre className="mt-1.5 max-h-32 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-mono text-xs text-on-surface">
+        <pre className="mt-1.5 max-h-32 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-code-sm text-xs text-on-surface">
           {row.command_text}
         </pre>
       )}
@@ -420,7 +420,7 @@ function GateDetailsDialog({
             <dt className="text-on-surface-variant">Options</dt>
             <dd className="text-on-surface">{row.options.join(" / ")}</dd>
             <dt className="text-on-surface-variant">Gate id</dt>
-            <dd className="font-mono text-on-surface-variant">{row.choice_id}</dd>
+            <dd className="font-code-sm text-on-surface-variant">{row.choice_id}</dd>
           </dl>
 
           <p className="mt-3 text-xs font-medium text-on-surface-variant">
@@ -438,7 +438,7 @@ function GateDetailsDialog({
               {/* Same pair as the box above, and this one matters more: it is
                   the stale-gate confirm, where the user is being asked to
                   re-approve a command against a repo that may have moved. */}
-              <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-mono text-xs text-on-surface">
+              <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-code-sm text-xs text-on-surface">
                 {row.command_text}
               </pre>
               <ViewFileButton command={row.command_text} onViewFile={onViewFile} />

@@ -104,7 +104,7 @@ export function PendingTray() {
         {/* Only the count pulses — a session can wait for hours, and the
             whole bell throbbing that long is noise, not a signal. */}
         {count > 0 && (
-          <span className="absolute -right-1.5 -top-1.5 inline-flex min-w-[1.25rem] animate-pulse items-center justify-center rounded-full bg-primary px-1 text-[0.65rem] font-semibold text-on-primary motion-reduce:animate-none">
+          <span className="absolute -right-1.5 -top-1.5 inline-flex min-w-[1.25rem] animate-pulse items-center justify-center rounded-full bg-primary px-1 font-label-caps text-label-caps text-on-primary motion-reduce:animate-none">
             {count}
           </span>
         )}

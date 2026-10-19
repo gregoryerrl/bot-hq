@@ -74,7 +74,7 @@ export function ScheduledRuns({
             {/* The first line, clipped at the pane's width; the whole command
                 is in the title and in the gate ledger. */}
             <code
-              className="min-w-[8rem] flex-1 basis-40 truncate font-mono text-on-surface"
+              className="min-w-[8rem] flex-1 basis-40 truncate font-code-sm text-on-surface"
               title={row.command_text ?? ""}
             >
               {command}

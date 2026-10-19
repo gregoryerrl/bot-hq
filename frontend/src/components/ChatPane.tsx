@@ -313,7 +313,7 @@ function PassLine({
     .join(" · ");
   return (
     <div
-      className="my-1.5 break-words text-center text-[0.7rem] text-on-surface-variant"
+      className="my-1.5 break-words text-center font-code-sm text-code-sm text-on-surface-variant"
       data-testid="pass-line"
     >
       ⏭ passed — {text}

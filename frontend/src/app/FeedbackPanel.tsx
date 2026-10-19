@@ -178,8 +178,8 @@ export function FeedbackPanel() {
               {expanded.has(f.id) && (
                 <div className="mt-2 border-t border-outline-variant pt-2">
                   <Markdown>{f.body}</Markdown>
-                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[0.7rem] text-on-surface-variant">
-                    <span>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-on-surface-variant">
+                    <span className="font-code-sm text-code-sm">
                       filed from{" "}
                       <Link
                         to={`/sessions/${f.session_id}`}

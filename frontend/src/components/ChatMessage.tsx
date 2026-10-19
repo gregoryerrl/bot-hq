@@ -61,7 +61,7 @@ function MessageHeader({
       >
         {shown}
       </span>
-      <RelativeTime iso={createdAt} className="text-[0.65rem] text-on-surface-variant" />
+      <RelativeTime iso={createdAt} className="font-code-sm text-code-sm text-on-surface-variant" />
     </header>
   );
 }
@@ -86,7 +86,7 @@ export const ChatMessage = memo(function ChatMessage({
 }: ChatMessageProps) {
   if (message.kind === "phase_change") {
     return (
-      <div className="my-4 text-center text-[0.7rem] italic text-on-surface-variant">
+      <div className="my-4 text-center font-code-sm text-code-sm italic text-on-surface-variant">
         — {message.content} —
       </div>
     );
@@ -97,7 +97,7 @@ export const ChatMessage = memo(function ChatMessage({
     // phase change — it is persisted with synthetic author=user, so it must
     // NOT fall through to the prose render and read as the user's words.
     return (
-      <div className="my-4 text-center text-[0.7rem] italic text-warning">
+      <div className="my-4 text-center font-code-sm text-code-sm italic text-warning">
         ⚠ {message.content}
       </div>
     );
@@ -198,7 +198,7 @@ function ToolMessage({
         aria-expanded={expanded}
         className={cn(
           "flex w-full items-start gap-2 rounded border border-outline-variant bg-surface px-2 py-1 text-left",
-          "text-[0.7rem] text-on-surface-variant hover:bg-surface-container-high transition-colors",
+          "font-code-sm text-code-sm text-on-surface-variant hover:bg-surface-container-high transition-colors",
         )}
         title={isUse ? "tool call" : "tool result"}
       >
@@ -207,7 +207,7 @@ function ToolMessage({
         </span>
         <span
           className={cn(
-            "shrink-0 font-mono",
+            "shrink-0 font-code-sm",
             running ? "text-primary" : "text-on-surface",
           )}
         >
@@ -217,7 +217,7 @@ function ToolMessage({
         {/* Wraps to two lines instead of clipping to one: a truncated command
             is exactly the "under the hood" complaint. `break-all` keeps long
             unbroken tokens (paths, URLs) from forcing horizontal scroll. */}
-        <span className="flex-1 line-clamp-2 break-all font-mono text-on-surface-variant">
+        <span className="flex-1 line-clamp-2 break-all font-code-sm text-on-surface-variant">
           {preview}
         </span>
       </button>
@@ -232,7 +232,7 @@ function ToolMessage({
         </button>
       )}
       {expanded && (
-        <pre className="mt-1 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.7rem] leading-relaxed text-on-surface">
+        <pre className="mt-1 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm leading-relaxed text-on-surface">
           {(() => {
             try {
               return JSON.stringify(parsed ?? message.content, null, 2);
@@ -286,7 +286,7 @@ function Elapsed({ since }: { since: string }) {
   const label =
     secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
   return (
-    <span className="shrink-0 font-mono tabular-nums text-primary">
+    <span className="shrink-0 font-code-sm tabular-nums text-primary">
       {label}
     </span>
   );

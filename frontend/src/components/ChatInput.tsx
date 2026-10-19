@@ -781,7 +781,7 @@ export function ChatInput({
                     >
                       {m.label}
                     </span>
-                    <span className="shrink-0 font-mono text-xs opacity-60">
+                    <span className="shrink-0 font-code-sm text-xs opacity-60">
                       {token?.sigil}
                       {m.key}
                     </span>
@@ -916,7 +916,7 @@ export function ChatInput({
             )}
             {stagedAnswers > 0 && (
               <span
-                className="whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 text-[0.7rem] text-primary"
+                className="whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 font-code-sm text-code-sm text-primary"
                 title="Staged tray answers — they travel with this response as one Send"
               >
                 +{stagedAnswers} answer{stagedAnswers > 1 ? "s" : ""}

@@ -99,10 +99,10 @@ export function PromptcodesPanel() {
           Promptcodes
         </h2>
         <p className="mt-1 text-sm text-on-surface-variant">
-          Type <code className="font-mono">/code</code> in a session composer —
+          Type <code className="font-code-sm">/code</code> in a session composer —
           the token stays visible in the box and expands to the full prompt
           when the message sends. Backticks escape it:{" "}
-          <code className="font-mono">`/code`</code> sends literally.
+          <code className="font-code-sm">`/code`</code> sends literally.
         </p>
 
         {error && (
@@ -125,7 +125,7 @@ export function PromptcodesPanel() {
                   className="rounded border border-outline-variant bg-surface-container-low p-3"
                 >
                   <div className="flex items-center gap-2">
-                    <span className="font-mono text-sm text-on-surface-variant">
+                    <span className="font-code-sm text-sm text-on-surface-variant">
                       /
                     </span>
                     <Input
@@ -135,7 +135,7 @@ export function PromptcodesPanel() {
                       }
                       placeholder="code (e.g. n-verify)"
                       aria-label={`Code ${i + 1}`}
-                      className="max-w-xs font-mono"
+                      className="max-w-xs font-code-sm"
                     />
                     <Button
                       type="button"

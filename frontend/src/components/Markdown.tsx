@@ -28,7 +28,7 @@ function InlineCode({ children }: { children: React.ReactNode }) {
   const chip = text && looksLikeGateId(text) ? chips.get(text.trim().toLowerCase()) : undefined;
   return (
     <>
-      <code className="rounded bg-surface-container-high px-1 py-0.5 font-mono text-[0.78rem] text-on-surface">
+      <code className="rounded bg-surface-container-high px-1 py-0.5 font-code-sm text-code-sm text-on-surface">
         {children}
       </code>
       {chip && (
@@ -79,7 +79,7 @@ const markdownComponents: Components = {
       : false;
     if (isBlock) {
       return (
-        <pre className="my-2 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-mono text-[0.75rem] leading-relaxed text-on-surface">
+        <pre className="my-2 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm leading-relaxed text-on-surface">
           <code className={className}>{children}</code>
         </pre>
       );
@@ -101,7 +101,7 @@ const markdownComponents: Components = {
   // the container instead of overflowing (horizontal scrolling is banned
   // app-wide).
   table: ({ children }) => (
-    <table className="my-2 w-full table-fixed border-collapse text-[0.78rem]">
+    <table className="my-2 w-full table-fixed border-collapse font-body-md text-body-md">
       {children}
     </table>
   ),

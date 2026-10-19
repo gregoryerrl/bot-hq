@@ -48,7 +48,7 @@ export function ContextMeter({
       <button
         type="button"
         onClick={onOpenHistory}
-        className="ml-1 align-middle text-[0.6875rem] text-outline underline decoration-dotted underline-offset-2 transition-colors hover:text-on-surface-variant"
+        className="ml-1 align-middle font-code-sm text-code-sm text-outline underline decoration-dotted underline-offset-2 transition-colors hover:text-on-surface-variant"
         title={
           `${name}: no context reading yet — the agent hasn't finished a turn, ` +
           `or its provider reports no context window. Open the recorded ` +
@@ -72,7 +72,7 @@ export function ContextMeter({
     `auto-compacts when it fills up.` +
     (onOpenHistory ? " Click for the recorded readings." : "");
   const className = cn(
-    "ml-1 align-middle text-[0.6875rem] tabular-nums",
+    "ml-1 align-middle font-code-sm text-code-sm tabular-nums",
     TEXT[severity],
   );
 

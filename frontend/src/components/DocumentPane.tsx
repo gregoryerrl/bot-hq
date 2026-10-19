@@ -570,7 +570,7 @@ function DocArticle({
             </button>
           )}
           <span
-            className="text-[0.65rem] text-on-surface-variant"
+            className="font-code-sm text-code-sm text-on-surface-variant"
             title={doc.updated_at}
           >
             {formatTimestamp(doc.updated_at)}
@@ -589,7 +589,7 @@ function DocArticle({
             onChange={(e) => setDraft(e.target.value)}
             aria-label={`Edit ${doc.slug}`}
             rows={Math.min(24, Math.max(6, draft.split("\n").length + 1))}
-            className="w-full resize-y rounded border border-outline-variant bg-surface-container px-2 py-1 font-mono text-xs text-on-surface"
+            className="w-full resize-y rounded border border-outline-variant bg-surface-container px-2 py-1 font-code-sm text-xs text-on-surface"
           />
           <div className="flex items-center gap-2">
             <Button
@@ -669,7 +669,7 @@ function CustomDocPill({
         <span
           data-testid="action-item-badge"
           className={cn(
-            "shrink-0 rounded px-1 font-label-caps text-[10px] leading-4",
+            "shrink-0 rounded px-1 font-label-caps text-label-caps",
             dismissed ? "bg-surface-container-high text-on-surface-variant" : "bg-tertiary/20 text-tertiary",
           )}
         >
@@ -830,7 +830,7 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
             }}
             className="group"
           >
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-1.5 text-[0.7rem] hover:bg-surface-container-low">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3 py-1.5 font-code-sm text-code-sm hover:bg-surface-container-low">
               <span className="flex min-w-0 items-center gap-1.5">
                 <span
                   aria-hidden
@@ -838,11 +838,11 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
                 >
                   ▶
                 </span>
-                <span className="truncate font-mono text-warning">
+                <span className="truncate font-code-sm text-warning">
                   {g.file}
                 </span>
               </span>
-              <span className="shrink-0 font-mono text-[0.65rem]">
+              <span className="shrink-0 font-code-sm text-code-sm">
                 {g.adds > 0 && (
                   <span className="text-success">+{g.adds}</span>
                 )}
@@ -852,7 +852,7 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
                 )}
               </span>
             </summary>
-            <pre className="whitespace-pre-wrap break-words px-3 py-2 text-[0.7rem] leading-relaxed font-mono">
+            <pre className="whitespace-pre-wrap break-words px-3 py-2 font-code-sm text-code-sm leading-relaxed">
               {g.lines.map((line, i) => (
           <div
             key={i}
@@ -902,7 +902,7 @@ function TrayPill({
     >
       Tray
       {hasPending && (
-        <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-primary px-1 text-[0.6rem] font-semibold text-on-primary">
+        <span className="inline-flex min-w-[1.1rem] items-center justify-center rounded-full bg-primary px-1 font-label-caps text-label-caps text-on-primary">
           {count}
         </span>
       )}
@@ -1121,7 +1121,7 @@ function TrayChoice({
         <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant">
           {TRAY_KIND_LABELS[entry.kind] ?? entry.kind}
         </span>
-        <span className="text-[0.7rem] text-on-surface-variant">
+        <span className="font-code-sm text-code-sm text-on-surface-variant">
           {askedByLabel}
         </span>
         <button
@@ -1141,7 +1141,7 @@ function TrayChoice({
               overflowed and got clipped by the pane's overflow-x-hidden.
               `anywhere` breaks at any point, and max-h keeps a giant issue body
               from swallowing the card — Expand shows it in full. */}
-          <pre className="max-h-48 overflow-y-auto overflow-x-hidden whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-surface-container-high px-2 py-1 text-[0.7rem] font-mono text-on-surface-variant">
+          <pre className="max-h-48 overflow-y-auto overflow-x-hidden whitespace-pre-wrap [overflow-wrap:anywhere] rounded bg-surface-container-high px-2 py-1 font-code-sm text-code-sm text-on-surface-variant">
             {entry.command_text}
           </pre>
           {/* A gate that names a file shows only the PATH — the body being
@@ -1164,7 +1164,7 @@ function TrayChoice({
                     </Button>
                   ))}
                   {dropped > 0 && (
-                    <span className="self-center text-[0.7rem] text-on-surface-variant">
+                    <span className="self-center font-code-sm text-code-sm text-on-surface-variant">
                       +{dropped} more file{dropped > 1 ? "s" : ""}
                     </span>
                   )}
@@ -1182,14 +1182,14 @@ function TrayChoice({
         </div>
       )}
       {entry.stale && (
-        <div className="mb-1 rounded border border-error/40 bg-error-container/20 px-2 py-1 text-[0.7rem] text-on-error-container">
+        <div className="mb-1 rounded border border-error/40 bg-error-container/20 px-2 py-1 font-body-md text-body-md text-on-error-container">
           ⚠ Stale — requested {relAgo(entry.asked_at)}; the requesting agent has
           moved on. Review the command before approving (repo state may have
           changed).
         </div>
       )}
       {docLinks.length > 0 && onOpenDoc && (
-        <div className="mb-1 flex flex-wrap items-center gap-1.5 text-[0.7rem] text-on-surface-variant">
+        <div className="mb-1 flex flex-wrap items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant">
           <span>Named here:</span>
           {docLinks.map((slug) => (
             <button
@@ -1197,7 +1197,7 @@ function TrayChoice({
               type="button"
               data-testid="tray-doc-link"
               onClick={() => onOpenDoc(slug)}
-              className="rounded border border-outline-variant px-1.5 py-0.5 font-mono text-on-surface hover:bg-surface-container-high"
+              className="rounded border border-outline-variant px-1.5 py-0.5 font-code-sm text-on-surface hover:bg-surface-container-high"
               title={`Open the session document ${slug}`}
             >
               {slug}
@@ -1217,7 +1217,7 @@ function TrayChoice({
         }}
       />
       {stagedOption !== undefined && (
-        <div className="mt-1 flex items-center gap-2 text-[0.7rem] text-on-surface-variant">
+        <div className="mt-1 flex items-center gap-2 font-code-sm text-code-sm text-on-surface-variant">
           <span className="rounded bg-primary/15 px-1.5 py-0.5 text-primary">
             ✓ staged: {stagedOption}
           </span>

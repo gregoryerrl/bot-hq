@@ -506,7 +506,7 @@ function ModelDialog({
                 placeholder="(unknown — meter shows a gap)"
                 className={terminalInputClass}
               />
-              <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
                 The provider&apos;s published limit for this model, in tokens. For a
                 model id that is not Claude&apos;s own (OpenRouter, DeepSeek, …) this
                 IS the window the claude CLI runs it at — bot-hq hands it over as{" "}
@@ -558,7 +558,7 @@ function ModelDialog({
                 used to make still has a consequence the user has to be able to
                 see, which is what this says. Test lives on the saved row:
                 `validate_model` checks a stored row, never this draft. */}
-            <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body text-code-sm text-on-surface-variant">
+            <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-on-surface-variant">
               Every saved model is spawned through the <strong>claude CLI</strong>,
               so its endpoint has to speak the Anthropic Messages API. A gateway
               that does not will fail at spawn — save it, then press{" "}
@@ -580,7 +580,7 @@ function ModelDialog({
                 spellCheck={false}
                 className={terminalInputClass}
               />
-              <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
                 Which Claude subscription a participant on this model bills. Leave
                 it blank for the account signed in to <code>~/.claude</code>. To run
                 a second subscription beside it, give it its own absolute path (one
@@ -600,7 +600,7 @@ function ModelDialog({
             )}
             {wantsSetup && !setup.isError && setup.data && (
               <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
-                <p className="mb-1 break-words font-body text-code-sm text-on-surface-variant">
+                <p className="mb-1 break-words font-body-md text-body-md text-on-surface-variant">
                   One-time setup, in {powershell ? "PowerShell" : "your own terminal"} —
                   sign the second account in to this dir (bot-hq never runs it), then
                   press <strong>Test</strong> on the saved row to confirm:
@@ -611,7 +611,7 @@ function ModelDialog({
                 >
                   {setup.data.setup}
                 </pre>
-                <p className="mb-1 mt-2 break-words font-body text-code-sm text-on-surface-variant">
+                <p className="mb-1 mt-2 break-words font-body-md text-body-md text-on-surface-variant">
                   Optional: share the default dir&apos;s CLAUDE.md, settings
                   (plugins, model overrides), skills and commands with it. Session
                   history and memory stay per account, and a re-run skips what is
@@ -645,7 +645,7 @@ function ModelDialog({
                 spellCheck={false}
                 className={cn(terminalInputClass, "resize-y whitespace-pre-wrap break-all")}
               />
-              <span className="mt-1 block break-words font-body text-code-sm text-on-surface-variant">
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
                 Merged into every participant&apos;s <code>--settings</code> at
                 spawn, executor and reviewer alike. Use it for a <em>Claude</em> id
                 the installed claude CLI does not know yet: under{" "}
