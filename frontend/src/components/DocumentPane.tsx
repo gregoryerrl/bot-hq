@@ -273,9 +273,12 @@ export const DocumentPane = memo(function DocumentPane({
           }}
         />
         <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
-        {/* The custom documents take what the Tray and the phase pills leave
-            of the line and wrap inside it; the "+" stays last. */}
-        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1" data-testid="custom-doc-strip">
+        {/* The custom documents are tabs OF THE ROW (`contents`: the strip
+            draws no box of its own), so they wrap across the whole pane like
+            the Tray and phase tabs before them; the "+" stays last. A box of
+            its own, flex-1 beside the phase tabs, wrapped them into a narrow
+            column instead (seen in the rig with nine documents). */}
+        <div className="contents" data-testid="custom-doc-strip">
           {customDocs.map((d) => (
             <CustomDocPill
               key={d.id}

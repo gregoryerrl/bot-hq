@@ -568,7 +568,9 @@ describe("custom document tabs", () => {
     renderDocs();
     await screen.findByRole("tab", { name: "tasks.md" });
     const strip = screen.getByTestId("custom-doc-strip");
-    expect(strip).toHaveClass("flex-wrap");
+    // The strip draws no box, so its tabs wrap across the whole tab row.
+    expect(strip).toHaveClass("contents");
+    expect(strip.closest('[role="tablist"]')).toHaveClass("flex-wrap");
     expect(strip.className).not.toContain("overflow-x");
     expect(strip).not.toHaveAttribute("data-overflow-x-ok");
     // The "+" stays at the end of the tabs.
