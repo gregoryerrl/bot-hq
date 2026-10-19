@@ -119,7 +119,7 @@ export function PendingTray() {
             Awaiting your input — {count} session{count === 1 ? "" : "s"}
           </header>
           {count === 0 ? (
-            <p className="px-3 py-4 font-body-md text-body-md text-on-surface-variant">
+            <p className="px-3 py-4 font-body-md text-body-md text-muted">
               All clear.
             </p>
           ) : (
@@ -143,7 +143,7 @@ export function PendingTray() {
                   </span>
                 </p>
                 {n.halt && (
-                  <p className="mt-1 line-clamp-2 font-code-sm text-code-sm text-on-surface-variant">
+                  <p className="mt-1 line-clamp-2 font-code-sm text-code-sm text-muted">
                     {n.halt.reason}
                   </p>
                 )}

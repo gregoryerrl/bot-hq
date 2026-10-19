@@ -63,7 +63,7 @@ export function ContextManager() {
       <aside className="flex w-60 flex-shrink-0 flex-col border-r border-outline-variant bg-surface-container">
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden py-1">
           {ordered.length === 0 ? (
-            <p className="px-3 py-3 font-code-sm text-code-sm text-on-surface-variant">
+            <p className="px-3 py-3 font-code-sm text-code-sm text-muted">
               No registered projects yet. Register one to manage its context.
             </p>
           ) : (
@@ -104,7 +104,7 @@ export function ContextManager() {
       <div className="flex min-w-0 flex-1 flex-col">
         {activeProject == null ? (
           <div className="flex flex-1 items-center justify-center text-center">
-            <p className="font-code-sm text-code-sm text-on-surface-variant">
+            <p className="font-code-sm text-code-sm text-muted">
               Select a project to view its measurement.
             </p>
           </div>
@@ -115,7 +115,7 @@ export function ContextManager() {
                 <p className="truncate font-headline-md text-headline-md text-on-surface">
                   {activeProject.display_name || activeProject.name}
                 </p>
-                <p className="truncate font-code-sm text-code-sm text-on-surface-variant">
+                <p className="truncate font-code-sm text-code-sm text-muted">
                   {activeProject.working_repo_path ?? "no working repo bound"}
                 </p>
               </div>

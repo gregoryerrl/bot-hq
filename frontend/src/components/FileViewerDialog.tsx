@@ -147,13 +147,13 @@ export function FileViewerDialog({
             />
           )}
           {loading && (
-            <p className="font-body-md text-body-md text-on-surface-variant">
+            <p className="font-body-md text-body-md text-muted">
               Reading…
             </p>
           )}
 
           {inlineNote && (
-            <p className="mb-3 border-b border-outline-variant pb-2 font-code-sm text-code-sm text-on-surface-variant">
+            <p className="mb-3 border-b border-outline-variant pb-2 font-code-sm text-code-sm text-muted">
               {inlineNote}
             </p>
           )}

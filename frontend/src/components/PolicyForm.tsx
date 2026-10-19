@@ -220,7 +220,7 @@ function StringList({
   return (
     <div className="flex flex-col gap-2">
       {items.length === 0 && (
-        <p className="font-code-sm text-code-sm text-on-surface-variant/70">
+        <p className="font-code-sm text-code-sm text-subtle">
           {emptyText}
         </p>
       )}

@@ -109,7 +109,7 @@ export function ModelsPanel() {
           rowClassName="h-11 rounded border border-outline-variant bg-surface-container"
         />
       ) : models.length === 0 ? (
-        <p className="font-body-md text-body-md text-on-surface-variant">
+        <p className="font-body-md text-body-md text-muted">
           No saved models yet. Add one to assign it to an agent.
         </p>
       ) : (
@@ -560,7 +560,7 @@ function ModelDialog({
               used to make still has a consequence the user has to be able to
               see, which is what this says. Test lives on the saved row:
               `validate_model` checks a stored row, never this draft. */}
-          <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-on-surface-variant">
+          <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-muted">
             Every saved model is spawned through the <strong>claude CLI</strong>,
             so its endpoint has to speak the Anthropic Messages API. A gateway
             that does not will fail at spawn — save it, then press{" "}
@@ -602,7 +602,7 @@ function ModelDialog({
           )}
           {wantsSetup && !setup.isError && setup.data && (
             <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
-              <p className="mb-1 break-words font-body-md text-body-md text-on-surface-variant">
+              <p className="mb-1 break-words font-body-md text-body-md text-muted">
                 One-time setup, in {powershell ? "PowerShell" : "your own terminal"} —
                 sign the second account in to this dir (bot-hq never runs it), then
                 press <strong>Test</strong> on the saved row to confirm:
@@ -613,7 +613,7 @@ function ModelDialog({
               >
                 {setup.data.setup}
               </pre>
-              <p className="mb-1 mt-2 break-words font-body-md text-body-md text-on-surface-variant">
+              <p className="mb-1 mt-2 break-words font-body-md text-body-md text-muted">
                 Optional: share the default dir&apos;s CLAUDE.md, settings
                 (plugins, model overrides), skills and commands with it. Session
                 history and memory stay per account, and a re-run skips what is

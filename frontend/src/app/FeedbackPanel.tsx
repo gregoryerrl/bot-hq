@@ -89,7 +89,7 @@ export function FeedbackPanel() {
 
   return (
     <SettingsPage>
-      <p className="mb-3 font-body-md text-body-md text-on-surface-variant">
+      <p className="mb-3 font-body-md text-body-md text-muted">
         Issues and ideas the agents raised about bot-hq itself, filed from
         whatever project they were working on. Work them from a bot-hq session.
       </p>
@@ -134,7 +134,7 @@ export function FeedbackPanel() {
           rowClassName="h-10 rounded border border-outline-variant bg-surface-container"
         />
       ) : rows.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-outline-variant p-8 text-center font-code-sm text-code-sm text-on-surface-variant">
+        <p className="rounded-lg border border-dashed border-outline-variant p-8 text-center font-code-sm text-code-sm text-muted">
           {filter === "open"
             ? "Nothing open. Agents raise items here with file_feedback."
             : `No ${filter} items.`}
@@ -242,7 +242,7 @@ function Resolution({
 }) {
   const [slug, sessionId] = (by ?? "").split(" \u00b7 ");
   return (
-    <p className="mt-1 whitespace-pre-wrap break-words font-code-sm text-code-sm text-on-surface-variant">
+    <p className="mt-1 whitespace-pre-wrap break-words font-code-sm text-code-sm text-muted">
       <span className="text-on-surface">{status === "dismissed" ? "Dismissed" : "Done"}:</span>{" "}
       {reason}
       {slug && sessionId && (

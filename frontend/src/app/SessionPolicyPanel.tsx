@@ -152,7 +152,7 @@ export function SessionPolicyPanel({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-5 py-5">
-        <p className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2 font-code-sm text-code-sm text-on-surface-variant">
+        <p className="mb-4 rounded border border-outline-variant/40 bg-surface-container/60 px-3 py-2 font-code-sm text-code-sm text-muted">
           This session's policy. Push / force-push enforcement
           is <span className="text-on-surface">live</span> — the git hooks and
           MCP tools re-read this snapshot on every call. The agents' own
@@ -259,7 +259,7 @@ function PolicyOriginBadge({
           {badgeLabel}
         </span>
       </div>
-      <p className="font-code-sm text-code-sm text-on-surface-variant">
+      <p className="font-code-sm text-code-sm text-muted">
         {explanation}
       </p>
     </div>
@@ -318,7 +318,7 @@ function SessionToolGateSection({
           <h3 className="font-headline-md text-headline-md text-on-surface">
             Gated commands — this session
           </h3>
-          <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+          <p className="mt-1 font-code-sm text-code-sm text-muted">
             Seeded from the global Tool Gate at spawn; edits apply to this
             session only.{" "}
             <span className="text-primary">Gate</span> blocks a matching Bash
@@ -357,7 +357,7 @@ function SessionToolGateSection({
             placeholder="keyword (e.g. gh issue comment, rm -rf)"
             inputClassName="min-w-0 flex-1 border-0 border-b border-outline-variant bg-transparent rounded-none px-0 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant caret-primary focus:border-primary focus:outline-none"
             emptyState={
-              <p className="py-1 font-code-sm text-code-sm text-on-surface-variant">
+              <p className="py-1 font-code-sm text-code-sm text-muted">
                 No keywords — every Bash command runs ungated for this session.
               </p>
             }

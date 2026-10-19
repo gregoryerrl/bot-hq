@@ -421,7 +421,7 @@ function SessionDefaults() {
           Run repo-backed sessions in isolated git worktrees
         </span>
       </label>
-      <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+      <p className="mt-1 font-code-sm text-code-sm text-muted">
         Each session gets its own checkout on branch{" "}
         <code className="text-on-surface">bothq/&lt;session-id&gt;</code>, so
         several sessions can work the same project in parallel. Clean worktrees
@@ -449,7 +449,7 @@ function SessionDefaults() {
           Send adherence nudges to participants
         </span>
       </label>
-      <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+      <p className="mt-1 font-code-sm text-code-sm text-muted">
         The one-time reminders bot-hq posts into a session: open the Context
         Library first, mutations belong in Apply, the Plan→Apply hand-off, and
         the close-out learnings ask. Off = none of them; the tools and gates
@@ -509,7 +509,7 @@ function ArchivePanel() {
           rowClassName="h-14 rounded-lg border border-outline-variant bg-surface-container"
         />
       ) : sessions.length === 0 ? (
-        <p className="rounded-lg border border-outline-variant bg-surface-container px-4 py-6 text-center font-code-sm text-code-sm text-on-surface-variant">
+        <p className="rounded-lg border border-outline-variant bg-surface-container px-4 py-6 text-center font-code-sm text-code-sm text-muted">
           No closed sessions yet.
         </p>
       ) : (
@@ -524,7 +524,7 @@ function ArchivePanel() {
                   <p className="truncate font-code-sm text-code-sm text-on-surface">
                     {s.title || "(untitled session)"}
                   </p>
-                  <p className="font-code-sm text-code-sm text-on-surface-variant">
+                  <p className="font-code-sm text-code-sm text-muted">
                     <code className="text-on-surface-variant">
                       {shortSessionId(s.id)}
                     </code>
@@ -605,7 +605,7 @@ function UpdatesPanel() {
 
         <div className="mt-4 border-t border-outline-variant/30 pt-4">
           {isError ? (
-            <p className="font-code-sm text-code-sm text-on-surface-variant">
+            <p className="font-code-sm text-code-sm text-muted">
               Couldn&rsquo;t check for updates
               {error?.message ? `: ${error.message}` : ""}. You may be offline,
               or no release has been published yet.
@@ -627,11 +627,11 @@ function UpdatesPanel() {
               </Button>
             </div>
           ) : data ? (
-            <p className="font-code-sm text-code-sm text-on-surface-variant">
+            <p className="font-code-sm text-code-sm text-muted">
               You&rsquo;re on the latest version.
             </p>
           ) : (
-            <p className="font-code-sm text-code-sm text-on-surface-variant">
+            <p className="font-code-sm text-code-sm text-muted">
               Checking for updates…
             </p>
           )}
@@ -711,7 +711,7 @@ function ToolGateSection() {
             onChange={setDraft}
             inputClassName={cn(fieldClass, "flex-1")}
             emptyState={
-              <p className="py-2 font-code-sm text-code-sm text-on-surface-variant">
+              <p className="py-2 font-code-sm text-code-sm text-muted">
                 No keywords configured — every Bash command runs ungated. Add
                 one (e.g. <code>gh</code>, <code>git push</code>,{" "}
                 <code>rm -rf</code>) to gate or auto-allow matching commands.

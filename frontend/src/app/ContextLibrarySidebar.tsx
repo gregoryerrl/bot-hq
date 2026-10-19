@@ -248,7 +248,7 @@ export function WorkspaceSidebar({
             rowClassName="h-6 rounded bg-surface-container-high"
           />
         ) : projectCount === 0 ? (
-          <p className="px-2 py-3 font-code-sm text-code-sm text-on-surface-variant">
+          <p className="px-2 py-3 font-code-sm text-code-sm text-muted">
             {query.trim() ? "No matches." : "No projects yet. Register a folder with the + button above."}
           </p>
         ) : (

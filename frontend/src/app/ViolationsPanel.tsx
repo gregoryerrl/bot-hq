@@ -127,7 +127,7 @@ export function ViolationsPanel() {
           rowClassName="h-10 rounded border border-outline-variant bg-surface-container"
         />
       ) : rows.length === 0 ? (
-        <p className="rounded-lg border border-dashed border-outline-variant p-8 text-center font-code-sm text-code-sm text-on-surface-variant">
+        <p className="rounded-lg border border-dashed border-outline-variant p-8 text-center font-code-sm text-code-sm text-muted">
           {data && data.length > 0
             ? "No events match the current filters."
             : "No enforcement events recorded yet."}
@@ -193,7 +193,7 @@ export function ViolationsPanel() {
       )}
 
       {data && data.length > 0 ? (
-        <p className="mt-3 font-code-sm text-code-sm text-on-surface-variant">
+        <p className="mt-3 font-code-sm text-code-sm text-muted">
           {rows.length} of {data.length} event{data.length === 1 ? "" : "s"}
         </p>
       ) : null}

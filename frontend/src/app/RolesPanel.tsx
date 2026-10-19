@@ -337,7 +337,7 @@ export function RolesPanel() {
               onDirtyChange={setFormDirty}
             />
           ) : isLoading ? null : (
-            <p className="px-5 py-6 font-code-sm text-code-sm text-on-surface-variant">
+            <p className="px-5 py-6 font-code-sm text-code-sm text-muted">
               Pick a role from the list, or add one.
             </p>
           )}
@@ -562,7 +562,7 @@ function RoleForm({
           <h3 className="truncate font-headline-md text-headline-md text-on-surface">
             {role ? role.display_name : "New role"}
           </h3>
-          <p className="font-code-sm text-code-sm text-on-surface-variant">
+          <p className="font-code-sm text-code-sm text-muted">
             {role ? (
               <>
                 <code className="text-on-surface-variant">{role.slug}</code>
@@ -801,7 +801,7 @@ function RoleForm({
         <legend className="px-1 font-label-caps text-label-caps text-on-surface-variant">
           Capabilities
         </legend>
-        <p className="mb-3 max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+        <p className="mb-3 max-w-prose font-code-sm text-code-sm text-muted">
           Grants only — there is no separate deny list to contradict, so
           anything unticked is simply not granted. Most boxes are enforced when
           the agent calls the matching tool; <em>Edit files</em> is enforced at

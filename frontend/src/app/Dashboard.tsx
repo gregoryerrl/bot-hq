@@ -638,7 +638,7 @@ export function Dashboard() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">Sessions</h2>
-          <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+          <p className="mt-1 font-code-sm text-code-sm text-muted">
             {filter.trim()
               ? `${filteredSessions.length} of ${sessions.length} match`
               : `${sessions.length} active`}
@@ -777,7 +777,7 @@ export function Dashboard() {
               </Button>
             )}
             {adHocRepo && (
-              <p className="font-code-sm text-code-sm text-on-surface-variant">
+              <p className="font-code-sm text-code-sm text-muted">
                 Ad-hoc repo — not a registered project, so this session uses
                 the general policy tier.
               </p>
@@ -846,7 +846,7 @@ export function Dashboard() {
               {accountMissing.length > 0 && (
                 <p
                   role="status"
-                  className="mb-1 break-words font-code-sm text-code-sm text-on-surface-variant"
+                  className="mb-1 break-words font-code-sm text-code-sm text-muted"
                 >
                   No saved model on that account for participant{" "}
                   {accountMissing.join(", ")} — add one in Settings → Models or
@@ -1109,7 +1109,7 @@ export function Dashboard() {
                   + Add participant
                 </Button>
               )}
-              <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+              <p className="mt-1 font-code-sm text-code-sm text-muted">
                 Row order sets each participant's turn slot. Effort applies to
                 this session only — Default uses the role's configured effort
                 (Settings → Roles).
@@ -1127,13 +1127,13 @@ export function Dashboard() {
                 </p>
               )}
               {invitableRoles.length === 0 && (
-                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                <p className="mt-1 font-code-sm text-code-sm text-muted">
                   No roles yet — add one in <b>Settings → Roles</b> before
                   starting a session.
                 </p>
               )}
               {models.length === 0 && invitableRoles.length > 0 && (
-                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                <p className="mt-1 font-code-sm text-code-sm text-muted">
                   No saved models yet — each participant uses its role's
                   configured default. Add models in <b>Settings → Models</b> to
                   pick per session (and to run a pre-flight connection test).
@@ -1144,7 +1144,7 @@ export function Dashboard() {
                   gateway the CLI cannot talk to. Say so here, where the choice
                   is made, rather than letting it surface as a spawn error. */}
               {models.length > 0 && (
-                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                <p className="mt-1 font-code-sm text-code-sm text-muted">
                   Every model spawns through the claude CLI, so its endpoint
                   must speak the Anthropic Messages API. Use <b>Test</b> in{" "}
                   <b>Settings → Models</b> to check one before a session

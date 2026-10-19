@@ -43,7 +43,7 @@ function StatTile({
         {value}
       </p>
       {hint && (
-        <p className="mt-0.5 font-code-sm text-code-sm text-on-surface-variant/60">
+        <p className="mt-0.5 font-code-sm text-code-sm text-subtle">
           {hint}
         </p>
       )}
@@ -79,7 +79,7 @@ export function MeasurementView({ project }: { project: string }) {
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4">
         {isFetching && !stats ? (
-          <p className="font-code-sm text-code-sm text-on-surface-variant">
+          <p className="font-code-sm text-code-sm text-muted">
             Loading measurement…
           </p>
         ) : error ? (
@@ -92,7 +92,7 @@ export function MeasurementView({ project }: { project: string }) {
               <p className="font-headline-md text-headline-md text-on-surface-variant">
                 No retrievals logged yet
               </p>
-              <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant/60">
+              <p className="mt-1 font-code-sm text-code-sm text-subtle">
                 Every cl_retrieve call an agent makes for {project} is logged
                 here; the numbers appear once retrievals happen.
               </p>
@@ -136,7 +136,7 @@ export function MeasurementView({ project }: { project: string }) {
                 warn={stats.empty_return_rate > 0}
               />
             </div>
-            <p className="font-code-sm text-code-sm text-on-surface-variant/70">
+            <p className="font-code-sm text-code-sm text-subtle">
               Low tokens/session with a low miss rate means retrieval is earning
               its keep. A rising stale-hit rate means atoms cite drifted code —
               time to re-index or prune.

@@ -11,7 +11,7 @@ export function PluginPanel() {
 
   if (list.isLoading) {
     return (
-      <p className="p-6 font-body-md text-body-md text-on-surface-variant">
+      <p className="p-6 font-body-md text-body-md text-muted">
         Loading…
       </p>
     );

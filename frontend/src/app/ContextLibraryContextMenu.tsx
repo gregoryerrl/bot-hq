@@ -133,7 +133,7 @@ export function ActionModal({
       }
     >
       {message && (
-        <p className="font-code-sm text-code-sm text-on-surface-variant">
+        <p className="font-code-sm text-code-sm text-muted">
           {message}
         </p>
       )}

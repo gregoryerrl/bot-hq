@@ -344,7 +344,7 @@ export function PluginManager() {
       </section>
 
       {list.isLoading ? (
-        <p className="font-body-md text-body-md text-on-surface-variant">Loading…</p>
+        <p className="font-body-md text-body-md text-muted">Loading…</p>
       ) : plugins.length === 0 ? (
         <Card className="bg-surface">
           <CardTitle>No plugins installed</CardTitle>
@@ -421,7 +421,7 @@ export function PluginManager() {
                 to:
               </p>
               {pendingInstall.preview.capabilities.length === 0 ? (
-                <p className="text-on-surface-variant">
+                <p className="text-muted">
                   Nothing — it renders its own panel and accesses no bot-hq
                   data.
                 </p>
@@ -445,7 +445,7 @@ export function PluginManager() {
                 />
               )}
               {pendingInstall.linked ? (
-                <p className="mt-3 text-on-surface-variant">
+                <p className="mt-3 text-muted">
                   Install mode: Linked — files are served directly from{" "}
                   <code className="font-code-sm">{pendingInstall.source}</code>.
                   Content changes take effect immediately; capability changes
@@ -453,7 +453,7 @@ export function PluginManager() {
                   control.
                 </p>
               ) : (
-                <p className="mt-3 text-on-surface-variant">
+                <p className="mt-3 text-muted">
                   Install mode: Copy — files are copied into bot-hq's plugin
                   data directory and only change when you reinstall.
                 </p>
@@ -480,7 +480,7 @@ export function PluginManager() {
                     />
                     Linked — serve directly from the source (no copy)
                   </label>
-                  <p className="mt-2 text-on-surface-variant">
+                  <p className="mt-2 text-muted">
                     {pendingInstall.linked
                       ? pendingInstall.wasLinked
                         ? ""

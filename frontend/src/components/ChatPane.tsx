@@ -231,7 +231,7 @@ export function ChatPane({
       {messagesLoading && messages.length === 0 ? (
         <MessagesSkeleton />
       ) : messages.length === 0 ? (
-        <p className="font-body-md text-body-md text-on-surface-variant">
+        <p className="font-body-md text-body-md text-muted">
           No messages yet…
         </p>
       ) : (

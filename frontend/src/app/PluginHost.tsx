@@ -176,7 +176,7 @@ export function PluginHost({ plugin }: { plugin: InstalledPluginView }) {
                   fold, so signpost it — the empty-tail incident was approved
                   because nothing hinted there was more to see. */}
               {pendingSpawn.req.prompt.split("\n").length > 20 && (
-                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                <p className="mt-1 font-code-sm text-code-sm text-muted">
                   {pendingSpawn.req.prompt.split("\n").length}-line prompt —
                   scroll the box to review it fully.
                 </p>

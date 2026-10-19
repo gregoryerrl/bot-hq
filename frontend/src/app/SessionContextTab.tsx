@@ -33,7 +33,7 @@ export function SessionContextTab({ sessionId }: { sessionId: string }) {
   if (!project) {
     return (
       <div className="flex h-full items-center justify-center p-6 text-center">
-        <p className="font-code-sm text-code-sm text-on-surface-variant">
+        <p className="font-code-sm text-code-sm text-muted">
           {isLoading
             ? "Resolving project…"
             : "No project is bound to this session — bind a working repo to browse its Context Library here."}
@@ -91,7 +91,7 @@ function ProjectFiles({ project }: { project: string }) {
     <div className="flex min-h-0 flex-1">
       <aside className="w-64 flex-shrink-0 overflow-y-auto overflow-x-hidden border-r border-outline-variant bg-surface-container py-1">
         {entries.length === 0 && folders.length === 0 ? (
-          <p className="px-3 py-3 font-code-sm text-code-sm text-on-surface-variant">
+          <p className="px-3 py-3 font-code-sm text-code-sm text-muted">
             {entriesError
               ? `Couldn't read the index: ${entriesError.message}`
               : entriesLoading || foldersLoading
@@ -110,7 +110,7 @@ function ProjectFiles({ project }: { project: string }) {
       <div className="min-w-0 flex-1">
         {selected === null ? (
           <div className="flex h-full items-center justify-center p-6">
-            <p className="font-code-sm text-code-sm text-on-surface-variant">
+            <p className="font-code-sm text-code-sm text-muted">
               Select a file to view or edit it.
             </p>
           </div>

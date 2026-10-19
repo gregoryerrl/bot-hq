@@ -196,7 +196,7 @@ function ProjectPolicyEditor({
           <p className="truncate font-code-sm text-code-sm text-on-surface">
             {tab.filePath}
           </p>
-          <p className="font-code-sm text-code-sm text-on-surface-variant">
+          <p className="font-code-sm text-code-sm text-muted">
             {tab.project} · project policy
           </p>
         </div>
@@ -495,7 +495,7 @@ function EditorPane({
           <p className="truncate font-code-sm text-code-sm text-on-surface">
             {tab.filePath}
           </p>
-          <p className="font-code-sm text-code-sm text-on-surface-variant">
+          <p className="font-code-sm text-code-sm text-muted">
             {tab.project}
             {fileContent && (
               <>
@@ -581,7 +581,7 @@ function EditorPane({
 
       <div className="min-h-0 flex-1 overflow-hidden bg-surface-container-low">
         {isFetching && !fileContent ? (
-          <p className="px-4 py-3 font-code-sm text-code-sm text-on-surface-variant">
+          <p className="px-4 py-3 font-code-sm text-code-sm text-muted">
             Loading…
           </p>
         ) : fileError ? (
@@ -651,7 +651,7 @@ function EmptyEditor() {
         <p className="font-headline-md text-headline-md text-on-surface-variant">
           No file open
         </p>
-        <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant/60">
+        <p className="mt-1 font-code-sm text-code-sm text-subtle">
           Pick a file from the sidebar to open it in a tab.
         </p>
       </div>

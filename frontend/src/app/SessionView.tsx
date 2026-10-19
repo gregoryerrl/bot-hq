@@ -616,7 +616,7 @@ export function SessionView() {
             <p className="mb-2 text-on-error-container">
               Failed to load session: {sessionError.message}
             </p>
-            <p className="font-code-sm text-code-sm text-on-surface-variant">id: {sessionId}</p>
+            <p className="font-code-sm text-code-sm text-muted">id: {sessionId}</p>
           </>
         ) : (
           <>Session not found.</>

@@ -147,7 +147,7 @@ function SessionTileImpl({
         </h3>
 
         {/* Slot 6: description (synthesized) */}
-        <p className="mt-1 line-clamp-2 font-code-sm text-code-sm text-on-surface-variant">
+        <p className="mt-1 line-clamp-2 font-code-sm text-code-sm text-muted">
           {describe(session)}
         </p>
 

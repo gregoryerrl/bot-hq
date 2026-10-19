@@ -86,7 +86,7 @@ export function FolderView({
           <p className="truncate font-code-sm text-code-sm text-on-surface">
             {isRoot ? tab.project : tab.folderPath}
           </p>
-          <p className="font-code-sm text-code-sm text-on-surface-variant">
+          <p className="font-code-sm text-code-sm text-muted">
             {isRoot ? "project root" : tab.project}
           </p>
         </div>
@@ -294,7 +294,7 @@ function ProjectSection({
       <p className="mb-2 font-label-caps text-label-caps text-on-surface-variant/70">
         Project · registration
       </p>
-      <p className="mb-3 font-code-sm text-code-sm text-on-surface-variant">
+      <p className="mb-3 font-code-sm text-code-sm text-muted">
         CL path:{" "}
         <span className="text-on-surface">
           {project.cl_path || "(default convention)"}
