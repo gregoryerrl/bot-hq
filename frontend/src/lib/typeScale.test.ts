@@ -20,9 +20,11 @@
  * reason: the tsconfig carries no `@types/node`, so `readdirSync`/`__dirname`
  * fail `tsc --noEmit`. Nothing here needs a DOM, hence the node environment.
  *
+ * Since S5 it also refuses Tailwind's DEFAULT sizes (`text-xs`, `text-sm`,
+ * `text-base`, …): their last uses moved onto the tokens.
+ *
  * Not seen by this sweep (measured 2026-10-19, so "0 violations" is not read as
- * "0 possible"): Tailwind's DEFAULT sizes (`text-xs`, `text-sm`, `text-base` —
- * still in use, not yet folded into the tokens); `.css` files; inline
+ * "0 possible"): `.css` files; inline
  * `style={{ fontSize }}`; a class assembled by string concatenation; xterm's own
  * `fontSize` option (`SessionTerminalTab.tsx`, a renderer setting, not a class).
  */
@@ -54,7 +56,7 @@ const allowed = (file: string, rule: Rule) =>
   ALLOWLIST.some((a) => a.rule === rule && file.endsWith(`/${a.file}`));
 
 describe("one type scale", () => {
-  it("no source file uses an arbitrary text size, font-body or font-mono", () => {
+  it("no source file uses an arbitrary or default text size, font-body or font-mono", () => {
     const offenders = swept().flatMap((file) =>
       findTypeScaleViolations(SOURCES[file])
         .filter((h) => !allowed(file, h.rule))
@@ -82,6 +84,9 @@ describe("one type scale", () => {
     expect(rulesOf(`<span className="block font-body">`)).toEqual(["font-body"]);
     expect(rulesOf(`cn("shrink-0 font-mono", running && "text-primary")`)).toEqual(["font-mono"]);
     expect(rulesOf("`font-mono ${x}`")).toEqual(["font-mono"]);
+    expect(rulesOf(`<p className="mt-1 text-xs text-muted">`)).toEqual(["tailwind-size"]);
+    expect(rulesOf(`cn("px-2", "md:text-sm")`)).toEqual(["tailwind-size"]);
+    expect(rulesOf(`<h1 className="text-2xl font-semibold">`)).toEqual(["tailwind-size"]);
 
     for (const ok of [
       `<h2 className="font-headline-lg text-headline-lg">`,

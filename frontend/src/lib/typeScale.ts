@@ -9,7 +9,7 @@ import { stripComments } from "./framing";
 const BODY = "font-body";
 const MONO = "font-mono";
 
-export type Rule = "arbitrary-text" | "font-body" | "font-mono";
+export type Rule = "arbitrary-text" | "font-body" | "font-mono" | "tailwind-size";
 
 /**
  * Each banned class, matched as a whole class token: not preceded by a word
@@ -29,6 +29,12 @@ export const RULES: Record<Rule, { pattern: RegExp; fix: string }> = {
   "font-mono": {
     pattern: new RegExp(`(?<![\\w-])${MONO}(?![\\w-])`),
     fix: `${MONO} duplicates font-code-sm (the same JetBrains Mono) — use font-code-sm`,
+  },
+  // Tailwind's own size scale (`text-xs` … `text-9xl`) beside the five tokens:
+  // the visual pass's S5 moved its last 68 uses onto the token pairs.
+  "tailwind-size": {
+    pattern: /(?<![\w-])text-(?:xs|sm|base|lg|[2-9]?xl)(?![\w-])/,
+    fix: "a Tailwind default text size — use a type token (font-body-md text-body-md, font-code-sm text-code-sm, …)",
   },
 };
 
