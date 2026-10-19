@@ -1,6 +1,6 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { cn } from "../lib/cn";
 import type { ClIndexEntryView } from "../lib/bindings";
+import { fieldClass } from "../components/ui/field";
 
 // Shared types, constants, helpers, and icons for the Context Library view,
 // split across ContextLibrary (shell), ContextLibrarySidebar, and
@@ -73,12 +73,9 @@ export interface CtxTarget {
   kind: "file" | "folder";
 }
 
-export const terminalInputClass = cn(
-  "w-full border-0 border-b border-outline-variant bg-transparent",
-  "rounded-none px-0 py-1 font-code-sm text-code-sm text-on-surface",
-  "placeholder:text-on-surface-variant caret-primary",
-  "focus:border-primary focus:outline-none",
-);
+/** The one boxed field (`components/ui/field.ts`, the visual pass's S2c). It
+ *  was an underline-only shape; the name stays until its call sites move. */
+export const terminalInputClass = fieldClass;
 
 /** Caps label above a form field. Shared by Settings + ModelsPanel. */
 export function FieldLabel({ children }: { children: React.ReactNode }) {
