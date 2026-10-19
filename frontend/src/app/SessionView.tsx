@@ -647,7 +647,11 @@ export function SessionView() {
           <div className="min-w-0 flex-1">
             {editingTitle === null ? (
               <h2 className="group flex min-w-0 items-center gap-1 font-headline-md text-headline-md tracking-tight">
-                <span className="truncate">{session.title}</span>
+                {/* Row 1 never wraps, so a long title truncates; the whole
+                    title is its tooltip. */}
+                <span className="truncate" title={session.title}>
+                  {session.title}
+                </span>
                 <button
                   type="button"
                   aria-label="Rename session"
