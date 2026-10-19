@@ -213,16 +213,18 @@ export function WorkspaceSidebar({
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">
             {rescanReport && (
               <>
-                <span className="text-success">
-                  +{rescanReport.added.length}
+                {/* Words, not bare counts: "+3 ↻5 ⚠1" said nothing to anyone
+                    who had not read the code (the visual pass, S5). */}
+                <span className="text-success" title="Files new to the index">
+                  +{rescanReport.added.length} added
                 </span>
-                <span className="inline-flex items-center gap-0.5 text-tertiary">
+                <span className="inline-flex items-center gap-0.5 text-tertiary" title="Files whose index row was refreshed">
                   <RescanIcon className="size-3" />
-                  {rescanReport.touched.length}
+                  {rescanReport.touched.length} updated
                 </span>
-                <span className="inline-flex items-center gap-0.5 text-warning">
+                <span className="inline-flex items-center gap-0.5 text-warning" title="Index rows whose file is gone from disk">
                   <WarnIcon className="size-3" />
-                  {rescanReport.orphaned.length}
+                  {rescanReport.orphaned.length} orphaned
                 </span>
               </>
             )}
