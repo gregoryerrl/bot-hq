@@ -11,7 +11,7 @@ import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { FileViewerDialog, fileArgsInCommand } from "./FileViewerDialog";
-import { CheckIcon, ChevronRightIcon, TrashIcon, WarnIcon } from "./icons";
+import { CheckIcon, ChevronRightIcon, PlusIcon, TrashIcon, WarnIcon } from "./icons";
 import { Button } from "./ui/Button";
 import { Dialog } from "./ui/Dialog";
 import { cn } from "../lib/cn";
@@ -242,11 +242,14 @@ export const DocumentPane = memo(function DocumentPane({
 
   return (
     <div className="flex h-full min-w-0 flex-col bg-surface-container-lowest/50">
-      {/* The Tray + phase pills wrap; the CUSTOM segment below is the one
-          container in the app allowed to scroll sideways — the user's call
-          (ideas.md, 2026-08-19: "like horizontal scroll on browser tabs"),
-          carried on the element as `data-overflow-x-ok` so the overflow guard
-          knows it is sanctioned rather than bare. */}
+      {/* The whole tab row WRAPS onto a second line — the Tray, the phase
+          pills and the custom documents alike — and nothing in it scrolls
+          sideways. The custom segment was once the app's one sanctioned
+          sideways scroller (the user's ideas.md, 2026-08-19: "like horizontal
+          scroll on browser tabs"); the user's pick on tray 41aa6ff8 (DESIGN.md
+          amendment 4, 2026-10-19) made it wrap instead, so the
+          no-horizontal-scroll rule has no exceptions. Every tab here is the
+          app's one underline tab (`SubTabButton`'s style). */}
       <div
         role="tablist"
         aria-label="Session documents"
@@ -270,9 +273,9 @@ export const DocumentPane = memo(function DocumentPane({
           }}
         />
         <span className="mx-1 h-4 w-px bg-outline-variant" aria-hidden />
-        {/* The overflow class and its sanction share ONE line: the guard is
-            line-scoped, and the reason belongs beside the thing it permits. */}
-        <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto overflow-y-hidden" data-overflow-x-ok="custom document tabs scroll sideways like browser tabs — the user's decision (ideas.md, 2026-08-19)" data-testid="custom-doc-strip">
+        {/* The custom documents take what the Tray and the phase pills leave
+            of the line and wrap inside it; the "+" stays last. */}
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1" data-testid="custom-doc-strip">
           {customDocs.map((d) => (
             <CustomDocPill
               key={d.id}
@@ -294,9 +297,9 @@ export const DocumentPane = memo(function DocumentPane({
             }}
             title="New custom document"
             aria-label="New custom document"
-            className="inline-flex shrink-0 items-center rounded border border-dashed border-outline-variant px-2 py-0.5 text-xs font-semibold text-on-surface-variant hover:text-on-surface"
+            className="inline-flex shrink-0 items-center rounded border border-dashed border-outline-variant p-1 text-on-surface-variant transition-colors hover:text-on-surface"
           >
-            +
+            <PlusIcon />
           </button>
         </div>
       </div>
@@ -314,7 +317,7 @@ export const DocumentPane = memo(function DocumentPane({
             onChange={(e) => setNewSlug(e.target.value)}
             placeholder="document name"
             aria-label="New document name"
-            className="min-w-0 flex-1 rounded border border-outline-variant bg-surface-container px-2 py-1 text-xs text-on-surface"
+            className="min-w-0 flex-1 rounded border border-outline-variant bg-surface-container px-2 py-1 font-code-sm text-code-sm text-on-surface"
           />
           <Button type="submit" size="sm" disabled={!newSlug.trim()}>
             Create
@@ -380,7 +383,7 @@ export const DocumentPane = memo(function DocumentPane({
           <>
             {activePhase === "apply" &&
               (diffError ? (
-                <p className="mb-3 text-sm text-on-error-container">
+                <p className="mb-3 font-code-sm text-code-sm text-on-error-container">
                   Couldn't compute the diff: {diffError.message}
                 </p>
               ) : (
@@ -388,7 +391,7 @@ export const DocumentPane = memo(function DocumentPane({
               ))}
             {activeDocs.length === 0 ? (
               docsError ? (
-                <p className="text-sm text-on-error-container">
+                <p className="font-code-sm text-code-sm text-on-error-container">
                   Couldn't load {activePhase} documents: {docsError.message}
                 </p>
               ) : docsLoading ? (
@@ -397,7 +400,7 @@ export const DocumentPane = memo(function DocumentPane({
                   rowClassName="h-4 rounded bg-surface-container"
                 />
               ) : activePhase === "apply" && applyDiff?.lines.length ? null : (
-                <p className="text-sm text-on-surface-variant">
+                <p className="font-code-sm text-code-sm text-muted">
                   No {activePhase} documents yet.
                 </p>
               )
@@ -499,7 +502,7 @@ function DocArticle({
   return (
     <article className="mb-6">
       <header className="mb-2 flex items-center justify-between gap-2">
-        <h4 className="min-w-0 truncate text-sm font-semibold text-on-surface">
+        <h4 className="min-w-0 truncate font-label-caps text-label-caps text-on-surface">
           {doc.slug}
         </h4>
         <div className="flex shrink-0 items-center gap-2">
@@ -588,7 +591,7 @@ function DocArticle({
             onChange={(e) => setDraft(e.target.value)}
             aria-label={`Edit ${doc.slug}`}
             rows={Math.min(24, Math.max(6, draft.split("\n").length + 1))}
-            className="w-full resize-y rounded border border-outline-variant bg-surface-container px-2 py-1 font-code-sm text-xs text-on-surface"
+            className="w-full resize-y rounded border border-outline-variant bg-surface-container px-2 py-1 font-code-sm text-code-sm text-on-surface"
           />
           <div className="flex items-center gap-2">
             <Button
@@ -626,10 +629,12 @@ function DocArticle({
   );
 }
 
-/** A custom document's tab (round 11) — the same pill shape as the Tray and
- *  phase pills, labelled by the doc's slug as written (slugs are names, not
- *  keywords, so no uppercase), truncated when long with the full slug in the
- *  title. */
+/** A custom document's tab (round 11) — the same underline tab as the Tray
+ *  and phase pills (`SubTabButton`'s style: a 2px bottom border in the accent
+ *  when selected, no fill), labelled by the doc's slug as written (slugs are
+ *  names, not keywords, so no uppercase), truncated when long with the full
+ *  slug in the title. `min-w-0` lets a tab wider than its wrapping row shrink
+ *  and truncate there: nothing in the row scrolls sideways any more. */
 function CustomDocPill({
   slug,
   selected,
@@ -657,10 +662,10 @@ function CustomDocPill({
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "inline-flex max-w-[12rem] items-center gap-1 rounded border-t-2 px-2 py-1 text-xs font-semibold",
+        "inline-flex min-w-0 max-w-[12rem] items-center gap-1 border-b-2 px-2 py-1 font-label-caps text-label-caps transition-colors",
         selected
-          ? "border-on-surface/70 bg-surface-container-high/80 text-on-surface"
-          : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
+          ? "border-primary text-primary"
+          : "border-transparent text-on-surface-variant hover:text-on-surface",
       )}
       title={title}
     >
@@ -715,7 +720,7 @@ function SummaryDialog({
         </Button>
       }
     >
-      <div className="min-h-[3rem] text-sm text-on-surface-variant">
+      <div className="min-h-[3rem] font-body-md text-body-md text-muted">
         {status === "loading" ? (
           <p className="animate-pulse">Summarizing…</p>
         ) : status === "error" ? (
@@ -759,12 +764,12 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
 
   if (!diff) {
     return (
-      <p className="mb-6 text-xs text-on-surface-variant">Loading diff…</p>
+      <p className="mb-6 font-code-sm text-code-sm text-muted">Loading diff…</p>
     );
   }
   if (diff.lines.length === 0) {
     return (
-      <p className="mb-6 text-xs text-on-surface-variant">
+      <p className="mb-6 font-code-sm text-code-sm text-muted">
         {diff.note ?? "(no changes)"}
       </p>
     );
@@ -869,12 +874,14 @@ function TrayPill({
       aria-selected={selected}
       onClick={onSelect}
       className={cn(
-        "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase border-t-2",
+        "inline-flex items-center gap-1 border-b-2 px-2 py-1 font-label-caps text-label-caps uppercase transition-colors",
+        // The underline marks the SELECTED tab only (`SubTabButton`'s rule):
+        // a pending tray says so with its colour, its pulse and its count.
         selected
-          ? "border-on-surface/70 bg-surface-container-high/80 text-on-surface"
+          ? "border-primary text-primary"
           : hasPending
-            ? "border-primary/70 bg-primary/10 text-primary animate-pulse"
-            : "border-transparent bg-transparent text-on-surface-variant hover:text-on-surface",
+            ? "border-transparent text-primary animate-pulse"
+            : "border-transparent text-on-surface-variant hover:text-on-surface",
       )}
       title="Session tray — questions awaiting your answer (an approval takes the input box; a halt shows above it)"
     >
@@ -966,7 +973,7 @@ function TrayList({
   if (pending.length === 0) {
     if (trayError) {
       return (
-        <p className="text-sm text-on-error-container">
+        <p className="font-code-sm text-code-sm text-on-error-container">
           Couldn't load the tray: {trayError.message}
         </p>
       );
@@ -975,7 +982,7 @@ function TrayList({
       return <Skeleton className="space-y-2" rowClassName="h-4 rounded bg-surface-container" />;
     }
     return (
-      <p className="text-sm text-on-surface-variant">
+      <p className="font-code-sm text-code-sm text-muted">
         No pending input — you're all caught up.
       </p>
     );

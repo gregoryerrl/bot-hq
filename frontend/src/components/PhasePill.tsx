@@ -6,12 +6,19 @@ import { phaseBucket, PHASE_NAMES, type PhaseBucket, type PhaseName } from "../l
 export type Phase = PhaseName;
 const PHASES: readonly Phase[] = PHASE_NAMES;
 
-// Bucket -> pill accent classes. The phase->bucket mapping itself lives in
-// `lib/phase.ts`, shared with SessionPhaseChip so the two widgets can't drift.
+// Bucket -> the SELECTED pill's accent: its 2px underline and its text, in the
+// phase's colour. The phase->bucket mapping itself lives in `lib/phase.ts`,
+// shared with SessionPhaseChip so the two widgets can't drift.
+//
+// The pills are the app's one underline tab (`SubTabButton`'s style, the
+// 2026-10-19 visual pass): a bottom border that is the accent when selected and
+// transparent otherwise, no fill, mono label-caps text. The Tray and custom
+// document tabs beside them in `DocumentPane` take the same style, with the
+// primary accent where a phase pill has its own colour.
 const pillTint: Record<PhaseBucket, string> = {
-  primary: "border-primary/70 text-primary",
-  secondary: "border-secondary/70 text-secondary",
-  tertiary: "border-tertiary/70 text-tertiary",
+  primary: "border-primary text-primary",
+  secondary: "border-secondary text-secondary",
+  tertiary: "border-tertiary text-tertiary",
 };
 
 const label: Record<Phase, string> = {
@@ -35,8 +42,7 @@ export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
       aria-selected={selected}
       onClick={() => onSelect(phase)}
       className={cn(
-        "inline-flex items-center gap-1 rounded px-2 py-1 font-label-caps text-label-caps uppercase",
-        "border-t-2",
+        "inline-flex items-center gap-1 border-b-2 px-2 py-1 font-label-caps text-label-caps uppercase transition-colors",
         // The accent is the SELECTED pill's (round 12). `cn` is clsx, not
         // tailwind-merge: with the tint and `text-on-surface-variant` both on
         // an unselected pill, whichever rule the stylesheet emits later won —
@@ -44,8 +50,8 @@ export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
         // colour. Branching here leaves no pair to resolve.
         // `phase` is always one of the 4 IPAV phases, so the bucket is non-null.
         selected
-          ? cn(pillTint[phaseBucket(phase)!], "bg-surface-container-high/80")
-          : "bg-transparent border-transparent text-on-surface-variant hover:text-on-surface",
+          ? pillTint[phaseBucket(phase)!]
+          : "border-transparent text-on-surface-variant hover:text-on-surface",
       )}
       title={phase}
     >

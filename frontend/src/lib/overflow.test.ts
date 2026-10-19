@@ -18,10 +18,13 @@
  * obvious carve-out — and it is paired anyway. The retired-identifier guard's
  * exemption list only stayed honest because it was forced to shrink; a guard
  * that ships with an exemption ships with somewhere for the next violation to
- * live. The ONE sanctioned sideways scroller (round 12, the user's decision:
- * the custom document tab strip scrolls "like browser tabs") declares itself
- * AT THE SITE with `data-overflow-x-ok="<reason>"` on the same line — and the
- * sweep below counts those declarations and refuses a second.
+ * live. **No sideways scroller is sanctioned either, since 2026-10-19.** Round
+ * 12 sanctioned one on the user's decision — the custom document tab strip,
+ * which scrolled "like browser tabs" — declared AT THE SITE with
+ * `data-overflow-x-ok="<reason>"` on the same line. The user's pick on tray
+ * 41aa6ff8 (DESIGN.md amendment 4) made those tabs wrap instead, so the sweep
+ * below counts the declarations and expects none; the declaration form stays
+ * working, and pinned, for a future decision.
  *
  * `overflow.ts` itself is excluded, and that is a different thing from a
  * container carve-out: it DEFINES the class list, so it necessarily spells the
@@ -149,22 +152,22 @@ describe("no horizontal scrolling, ever", () => {
   });
 
   /**
-   * Round 12: exactly ONE sanctioned sideways scroller in the tree — the custom
-   * document tab strip in `DocumentPane.tsx` — and it carries its reason. A
-   * second site needs a second user decision and a change to this number; an
-   * empty reason is not a reason.
+   * No sanctioned sideways scroller since 2026-10-19: round 12's one (the
+   * custom document tab strip in `DocumentPane.tsx`) wraps instead, the user's
+   * pick on tray 41aa6ff8 (DESIGN.md amendment 4). A new site needs a new user
+   * decision, its reason at the site, and a change here.
    */
-  it("has exactly one sanctioned sideways scroller, with its reason at the site", () => {
+  it("has no sanctioned sideways scroller", () => {
     const sites = Object.entries(SOURCES)
       .filter(([p]) => !isExempt(p))
       .flatMap(([p, body]) => findSanctionedScrollers(body).map((h) => ({ p, ...h })));
-    expect(sites.map((s) => s.p.replace("../", ""))).toEqual([
-      "components/DocumentPane.tsx",
-    ]);
-    const [site] = sites;
-    expect(site!.text).toContain("overflow-x-auto");
-    expect(site!.text).toMatch(new RegExp(`${HORIZONTAL_SCROLL_OK}"[^"]{20,}"`));
-    expect(site!.text).toContain("the user's decision");
+    expect(sites.map((s) => `${s.p.replace("../", "")}:${s.line}`)).toEqual([]);
+  });
+
+  /** The declaration form still works, for that future decision. */
+  it("still recognises a sanctioned scroller's declaration", () => {
+    const src = `<div className="overflow-x-auto" ${HORIZONTAL_SCROLL_OK}"a reason the user gave, written at the site">`;
+    expect(findSanctionedScrollers(src)).toHaveLength(1);
   });
 
   /** The sweep must actually be reading files, not an empty directory. */

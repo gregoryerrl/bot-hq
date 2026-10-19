@@ -3,7 +3,8 @@
 // in `overflow.test.ts`, which is the only caller. Same shape, and for the same
 // reason, as `framing.ts`.
 //
-// House rule, user-mandated and absolute: **no horizontal scrolling, ever.**
+// House rule, user-mandated and absolute: **no horizontal scrolling, ever** —
+// with no exceptions since 2026-10-19 (see `HORIZONTAL_SCROLL_OK`).
 //
 // The mechanism is a CSS rule rather than a typo. When one axis of `overflow` is
 // set to anything other than `visible`, the computed value of the OTHER axis
@@ -55,14 +56,19 @@ export const SCROLL_AXIS_CLASSES = [
 export const HORIZONTAL_CLIP = "overflow-x-hidden";
 
 /**
- * The ONE sanctioned sideways scroller, and how it declares itself (round 12).
- * The user's decision (ideas.md, 2026-08-19): the custom session-document tab
- * strip may scroll horizontally "like horizontal scroll on browser tabs". A
+ * How a sanctioned sideways scroller would declare itself — and there is NONE
+ * since 2026-10-19. Round 12 sanctioned one, on the user's decision (ideas.md,
+ * 2026-08-19): the custom session-document tab strip scrolled "like horizontal
+ * scroll on browser tabs". The user's pick on tray 41aa6ff8 (DESIGN.md
+ * amendment 4) made those tabs wrap onto a second line instead, which retired
+ * that exception, so the rule has none.
+ *
+ * The declaration is kept so a future user decision has somewhere to land: a
  * container that is allowed to scroll carries this attribute ON THE SAME LINE
  * as its overflow class, with the reason as its value — so the exception is
- * attributable at the site, not a name on a list somewhere else, and the
- * test that sweeps the tree can count the sanctioned sites (one) and refuse
- * a second without a second decision.
+ * attributable at the site, not a name on a list somewhere else, and the test
+ * that sweeps the tree counts the sanctioned sites (zero) and refuses one
+ * without a decision.
  */
 export const HORIZONTAL_SCROLL_OK = "data-overflow-x-ok=";
 
@@ -113,7 +119,8 @@ export function findBareScrollContainers(source: string): BareScrollContainer[] 
 }
 
 /** Every line of `source` that declares itself a sanctioned sideways
- *  scroller (see [`HORIZONTAL_SCROLL_OK`]). The sweep counts these. */
+ *  scroller (see [`HORIZONTAL_SCROLL_OK`]). The sweep counts these, and
+ *  expects none since 2026-10-19. */
 export function findSanctionedScrollers(source: string): BareScrollContainer[] {
   const hits: BareScrollContainer[] = [];
   stripComments(source)

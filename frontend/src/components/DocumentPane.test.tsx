@@ -564,11 +564,14 @@ describe("custom document tabs", () => {
     expect(await screen.findByText(/is a phase name/)).toBeInTheDocument();
   });
 
-  it("scrolls the custom tab strip sideways — the user's one sanctioned scroller", async () => {
+  it("wraps the custom tabs instead of scrolling them sideways (DESIGN.md amendment 4)", async () => {
     renderDocs();
     await screen.findByRole("tab", { name: "tasks.md" });
     const strip = screen.getByTestId("custom-doc-strip");
-    expect(strip.className).toContain("overflow-x-auto");
-    expect(strip.getAttribute("data-overflow-x-ok")).toMatch(/user's decision/);
+    expect(strip).toHaveClass("flex-wrap");
+    expect(strip.className).not.toContain("overflow-x");
+    expect(strip).not.toHaveAttribute("data-overflow-x-ok");
+    // The "+" stays at the end of the tabs.
+    expect(strip.lastElementChild).toHaveAccessibleName("New custom document");
   });
 });
