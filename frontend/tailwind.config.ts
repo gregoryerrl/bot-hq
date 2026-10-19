@@ -82,6 +82,9 @@ export default {
       },
       colors: {
         surface: "#0b1326",
+        // The dialog scrim (`ui/Dialog.tsx` `scrimClass`, at /60) — black, as
+        // a token so no component spells a raw palette colour (S2f).
+        scrim: "#000000",
         author: {
           // **The participant palette** (rc3 D20). Eight hues the ring rotates
           // through by turn slot, and the set a user picks from per participant.

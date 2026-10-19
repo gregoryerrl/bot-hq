@@ -1,8 +1,6 @@
 import { type ReactNode } from "react";
-import { useFocusTrap } from "../hooks/useFocusTrap";
-import { useEscapeKey } from "../hooks/useEscapeKey";
 import { Button } from "./ui/Button";
-import { cn } from "../lib/cn";
+import { Dialog } from "./ui/Dialog";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -21,9 +19,11 @@ interface ConfirmDialogProps {
  * Thin reusable confirmation modal. Replaces the native `window.confirm`
  * (which clashes with the Industrial Terminal styling and can't carry a
  * danger affordance). It only asks — the caller owns the action fired in
- * `onConfirm`. Backdrop click and Escape both cancel; focus is trapped while
- * open and restored to the trigger on close. Modeled on
- * `RegisterProjectModal`.
+ * `onConfirm`. Built on the one `Dialog` (the visual pass, S2f): the scrim,
+ * Escape and the close button all cancel; focus is trapped while open and
+ * restored to the trigger on close. The body scrolls on its own (a plugin's
+ * install consent can run long), so the buttons never leave the window. The
+ * message is prose, so it is set in Inter (DESIGN.md amendment 1).
  */
 export function ConfirmDialog({
   open,
@@ -35,46 +35,24 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const trapRef = useFocusTrap<HTMLDivElement>(open);
-  useEscapeKey(onCancel, open);
-
-  if (!open) return null;
-
   return (
-    <>
-      <div
-        className="fixed inset-0 z-40 bg-black/60"
-        onClick={onCancel}
-        aria-hidden
-      />
-      <div
-        ref={trapRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className={cn(
-          "fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[min(440px,90vw)] -translate-x-1/2 -translate-y-1/2 flex-col",
-          "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
-        )}
-      >
-        <h2 className="mb-3 shrink-0 font-headline-md text-headline-md text-on-surface">
-          {title}
-        </h2>
-        {/* The body scrolls on its own (a plugin's install consent can run
-            long), so the buttons below never leave the window. */}
-        <div className="mb-5 min-h-0 overflow-y-auto overflow-x-hidden font-code-sm text-code-sm text-on-surface-variant">
-          {message}
-        </div>
-        <div className="flex shrink-0 justify-end gap-2">
+    <Dialog
+      open={open}
+      onClose={onCancel}
+      title={title}
+      bodyClassName="font-body-md text-body-md text-on-surface"
+      footer={
+        <>
           <Button variant="ghost" onClick={onCancel}>
             {cancelLabel}
           </Button>
           <Button variant={confirmVariant} onClick={onConfirm}>
             {confirmLabel}
           </Button>
-        </div>
-      </div>
-    </>
+        </>
+      }
+    >
+      {message}
+    </Dialog>
   );
 }
