@@ -309,11 +309,14 @@ function TabStrip({
           <div
             key={tabKey(t)}
             className={cn(
-              "group flex shrink-0 items-center gap-2 border-r border-outline-variant/40 px-3 py-2",
+              "group flex shrink-0 items-center gap-2 border-b-2 border-r border-r-outline-variant/40 px-3 py-2",
               "font-code-sm text-code-sm transition-colors",
+              // The open file carries the app's one tab accent, a 2px primary
+              // underline (SubTabButton, the document pane), on top of the
+              // editor's lifted background (the visual pass, S2e).
               active
-                ? "bg-background text-on-surface"
-                : "text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
+                ? "border-b-primary bg-background text-on-surface"
+                : "border-b-transparent text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
             )}
           >
             <button
