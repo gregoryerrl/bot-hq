@@ -159,7 +159,7 @@ export function FileViewerDialog({
           )}
 
           {inlineText !== undefined && (
-            <pre className="whitespace-pre-wrap break-words font-code-sm text-sm leading-relaxed text-on-surface">
+            <pre className="whitespace-pre-wrap break-words font-code-sm text-code-sm leading-relaxed text-on-surface">
               {inlineText}
             </pre>
           )}
@@ -176,7 +176,7 @@ export function FileViewerDialog({
             file.extension === "md" || file.extension === "markdown" ? (
               <Markdown>{file.text}</Markdown>
             ) : (
-              <pre className="whitespace-pre-wrap break-words font-code-sm text-sm leading-relaxed text-on-surface">
+              <pre className="whitespace-pre-wrap break-words font-code-sm text-code-sm leading-relaxed text-on-surface">
                 {file.text}
               </pre>
             )

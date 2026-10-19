@@ -156,8 +156,11 @@ function SessionTileImpl({
             gates and halts showed nowhere on the dashboard). The tile only
             INDICATES; the user answers inside the session. */}
         {needsInput && needs && (
+          // No [brackets] and no truncation (the visual pass, S5): the phrase
+          // is WHAT the session waits on, so a narrow tile wraps it rather
+          // than cutting "approval waiting · halted — your move" short.
           <div
-            className="mt-3 inline-flex max-w-full items-center gap-1.5 rounded border border-error/30 bg-error-container/20 px-2 py-1 font-label-caps text-label-caps text-error"
+            className="mt-3 inline-flex max-w-full items-start gap-1.5 rounded border border-error/30 bg-error-container/20 px-2 py-1 font-label-caps text-label-caps text-error"
             title={
               needs.halt
                 ? `Halted by ${needs.halt.declaredBy}: ${needs.halt.reason}`
@@ -165,8 +168,8 @@ function SessionTileImpl({
             }
             data-testid="needs-you"
           >
-            <WarnIcon className="size-3.5 shrink-0" />
-            <span className="truncate">[Needs you · {needsYouParts(needs).join(" · ")}]</span>
+            <WarnIcon className="mt-px size-3.5 shrink-0" />
+            <span className="min-w-0 break-words">Needs you · {needsYouParts(needs).join(" · ")}</span>
           </div>
         )}
         {/* A temporary halt still ahead of its wake time waits on something

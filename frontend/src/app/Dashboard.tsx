@@ -1179,10 +1179,10 @@ export function Dashboard() {
       )}
       {error && (
         <div className="mb-6 rounded-lg border border-error/40 bg-error-container/30 px-4 py-3">
-          <p className="text-sm text-on-error-container">
+          <p className="font-body-md text-body-md text-on-error-container">
             Failed to load sessions: {error.message}
           </p>
-          <Button variant="link" tone="inherit" onClick={() => refetch()} className="mt-1 text-xs">
+          <Button variant="link" tone="inherit" onClick={() => refetch()} className="mt-1 font-code-sm text-code-sm">
             Retry
           </Button>
         </div>
@@ -1197,7 +1197,7 @@ export function Dashboard() {
           <p className="font-headline-md text-headline-md text-on-surface">
             Welcome to bot-hq
           </p>
-          <p className="mx-auto mt-2 max-w-md text-sm text-on-surface-variant">
+          <p className="mx-auto mt-2 max-w-md font-body-md text-body-md text-muted">
             A session is a scoped piece of work — you pick which of your roles
             take part, what each one runs on, and you stay the conductor.
           </p>
@@ -1247,7 +1247,7 @@ export function Dashboard() {
                 >
                   {step.done ? <CheckIcon className="size-3" /> : i + 1}
                 </span>
-                <span className="text-xs text-on-surface-variant">
+                <span className="font-code-sm text-code-sm text-muted">
                   {step.body}
                 </span>
               </li>
@@ -1256,7 +1256,7 @@ export function Dashboard() {
         </div>
       ) : filteredSessions.length === 0 ? (
         <div className="rounded-lg border border-dashed border-outline-variant p-10 text-center">
-          <p className="text-sm text-on-surface-variant">
+          <p className="font-body-md text-body-md text-muted">
             No sessions match <code className="font-code-sm text-code-sm">{filter.trim()}</code>.
           </p>
         </div>

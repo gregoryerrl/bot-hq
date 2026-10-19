@@ -45,7 +45,7 @@ describe("SessionTile", () => {
 
   it("renders the needs-you indicator when the session waits on the user", () => {
     renderTile({ needs: { ...NONE, questions: 1 } });
-    expect(screen.getByTestId("needs-you")).toHaveTextContent("[Needs you · 1 question]");
+    expect(screen.getByTestId("needs-you")).toHaveTextContent("Needs you · 1 question");
   });
 
   it("hides the indicator when nothing is waiting", () => {
@@ -61,7 +61,7 @@ describe("SessionTile", () => {
       needs: { ...NONE, approvals: 1, halt: { reason: "First launch passed", declaredBy: "hands" } },
     });
     const pill = screen.getByTestId("needs-you");
-    expect(pill).toHaveTextContent("[Needs you · approval waiting · halted — your move]");
+    expect(pill).toHaveTextContent("Needs you · approval waiting · halted — your move");
     expect(pill).toHaveAttribute("title", "Halted by hands: First launch passed");
   });
 
