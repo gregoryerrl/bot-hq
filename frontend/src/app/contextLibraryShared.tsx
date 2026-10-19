@@ -1,6 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import type { ClIndexEntryView } from "../lib/bindings";
-import { fieldClass } from "../components/ui/field";
 
 // Shared types, constants, helpers, and icons for the Context Library view,
 // split across ContextLibrary (shell), ContextLibrarySidebar, and
@@ -73,9 +72,6 @@ export interface CtxTarget {
   kind: "file" | "folder";
 }
 
-/** The one boxed field (`components/ui/field.ts`, the visual pass's S2c). It
- *  was an underline-only shape; the name stays until its call sites move. */
-export const terminalInputClass = fieldClass;
 
 /** Caps label above a form field. Shared by Settings + ModelsPanel. */
 export function FieldLabel({ children }: { children: React.ReactNode }) {

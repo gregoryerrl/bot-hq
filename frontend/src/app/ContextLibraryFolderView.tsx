@@ -2,10 +2,11 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import type { ClFolderView, ProjectView } from "../lib/bindings";
-import { type OpenTab, pickFolder, terminalInputClass } from "./contextLibraryShared";
+import { type OpenTab, pickFolder } from "./contextLibraryShared";
 import { FolderIcon } from "../components/icons";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Button } from "../components/ui/Button";
+import { fieldClass } from "../components/ui/field";
 
 // ============================================================================
 // FolderView — editor-pane content for a folder tab. Edits the folder's CL
@@ -116,7 +117,7 @@ export function FolderView({
             value={tagsStr}
             onChange={(e) => setTagsStr(e.target.value)}
             placeholder="(optional, comma-separated)"
-            className={terminalInputClass}
+            className={fieldClass}
           />
         </label>
         {error && (
@@ -312,7 +313,7 @@ function ProjectSection({
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               autoFocus
-              className={terminalInputClass}
+              className={fieldClass}
             />
             <Button
               variant="primary"
@@ -363,7 +364,7 @@ function ProjectSection({
             value={wr}
             onChange={(e) => setWr(e.target.value)}
             placeholder="(none)"
-            className={terminalInputClass}
+            className={fieldClass}
           />
           <Button variant="secondary" size="sm" onClick={browseRepo} className="shrink-0">
             Browse…

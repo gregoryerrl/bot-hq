@@ -40,7 +40,6 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
 import { Skeleton } from "../components/ui/Skeleton";
-import { selectClass } from "../components/ui/Select";
 import { wideDialogClass } from "../components/ui/Dialog";
 import {
   rosterAdvisory,
@@ -48,6 +47,7 @@ import {
   takenColors,
   useParticipantLabels,
 } from "../lib/participants";
+import { fieldClass } from "../components/ui/field";
 
 /**
  * How many participants this dialog offers to add: **4** (CLAUDE.md: "dialog
@@ -720,7 +720,7 @@ export function Dashboard() {
                     setSelectedProject(e.target.value);
                     if (e.target.value) setAdHocRepo("");
                   }}
-                  className={selectClass}
+                  className={fieldClass}
                 >
                   <option value="">(none — no working repo)</option>
                   {projects.map((p) => (
@@ -823,7 +823,7 @@ export function Dashboard() {
                           setParticipants(rows);
                           setAccountMissing(missing.map((i) => i + 1));
                         }}
-                        className={cn(selectClass, "min-w-0 max-w-[12rem]")}
+                        className={cn(fieldClass, "min-w-0 max-w-[12rem]")}
                       >
                         <option value="">(pick for all rows)</option>
                         {accountChoices(models).map((a) => (
@@ -969,7 +969,7 @@ export function Dashboard() {
                                   : {}),
                               });
                             }}
-                            className={selectClass}
+                            className={fieldClass}
                           >
                             <option value="">(choose a role)</option>
                             {invitableRoles.map((r) => (
@@ -990,7 +990,7 @@ export function Dashboard() {
                               setAccountMissing([]);
                               patchParticipant(index, { modelId: e.target.value });
                             }}
-                            className={selectClass}
+                            className={fieldClass}
                           >
                             <option value="">(role default)</option>
                             {models.map((m) => (
@@ -1040,7 +1040,7 @@ export function Dashboard() {
                             onChange={(e) =>
                               patchParticipant(index, pickToFields(e.target.value))
                             }
-                            className={selectClass}
+                            className={fieldClass}
                           >
                             <option value="">
                               Default ({defaultEffortFor(row.roleId)})

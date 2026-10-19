@@ -8,13 +8,13 @@ import { useEscapeKey } from "../hooks/useEscapeKey";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { accountLabelOf, formatLimitMark, markIsLive, marksFor } from "../lib/accounts";
-import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
+import { FieldLabel } from "./contextLibraryShared";
 import { CheckIcon, CloseIcon, CrossIcon, SaveIcon } from "../components/icons";
 import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
-import { selectClass } from "../components/ui/Select";
 import { wideDialogClass } from "../components/ui/Dialog";
 import { Skeleton } from "../components/ui/Skeleton";
+import { fieldClass } from "../components/ui/field";
 
 const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 
@@ -441,7 +441,7 @@ function ModelDialog({
                 }
                 placeholder="e.g. Opus (Anthropic)"
                 autoFocus
-                className={terminalInputClass}
+                className={fieldClass}
               />
             </label>
 
@@ -455,7 +455,7 @@ function ModelDialog({
                     provider: e.target.value === "other" ? "" : e.target.value,
                   })
                 }
-                className={selectClass}
+                className={fieldClass}
               >
                 <option value="anthropic">Anthropic</option>
                 <option value="openai">OpenAI</option>
@@ -471,7 +471,7 @@ function ModelDialog({
                     setDraft({ ...draft, provider: e.target.value })
                   }
                   placeholder="Custom provider"
-                  className={cn("mt-2", terminalInputClass)}
+                  className={cn("mt-2", fieldClass)}
                 />
               )}
             </label>
@@ -485,7 +485,7 @@ function ModelDialog({
                   setDraft({ ...draft, model_name: e.target.value })
                 }
                 placeholder="claude-opus-5"
-                className={terminalInputClass}
+                className={fieldClass}
               />
             </label>
 
@@ -504,7 +504,7 @@ function ModelDialog({
                   })
                 }
                 placeholder="(unknown — meter shows a gap)"
-                className={terminalInputClass}
+                className={fieldClass}
               />
               <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
                 The provider&apos;s published limit for this model, in tokens. For a
@@ -527,7 +527,7 @@ function ModelDialog({
                   setDraft({ ...draft, base_url: e.target.value || null })
                 }
                 placeholder="(provider default)"
-                className={terminalInputClass}
+                className={fieldClass}
               />
             </label>
 
@@ -541,7 +541,7 @@ function ModelDialog({
                     setDraft({ ...draft, auth_token: e.target.value || null })
                   }
                   placeholder="(unset — uses provider env vars)"
-                  className={cn(terminalInputClass, "pr-12")}
+                  className={cn(fieldClass, "pr-12")}
                 />
                 <button
                   type="button"
@@ -578,7 +578,7 @@ function ModelDialog({
                 }
                 placeholder="(blank = the default ~/.claude)"
                 spellCheck={false}
-                className={terminalInputClass}
+                className={fieldClass}
               />
               <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
                 Which Claude subscription a participant on this model bills. Leave
@@ -643,7 +643,7 @@ function ModelDialog({
                 placeholder='{"modelOverrides":{"claude-fable-5":"claude-fable-5-1"}}'
                 rows={3}
                 spellCheck={false}
-                className={cn(terminalInputClass, "resize-y whitespace-pre-wrap break-all")}
+                className={cn(fieldClass, "resize-y whitespace-pre-wrap break-all")}
               />
               <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
                 Merged into every participant&apos;s <code>--settings</code> at

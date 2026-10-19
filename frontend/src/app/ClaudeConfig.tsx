@@ -3,7 +3,6 @@ import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvok
 import { useServerDraft } from "../hooks/useServerDraft";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
-import { selectClass as houseSelectClass } from "../components/ui/Select";
 import {
   CheckIcon,
   GearIcon,
@@ -29,6 +28,7 @@ import type {
   SkillVisibility,
 } from "../lib/bindings";
 import { EFFORT_LEVELS } from "../lib/effort";
+import { fieldClass } from "../components/ui/field";
 
 // ============================================================================
 // Claude Config — the Settings subtab that surfaces the Claude Code config the
@@ -457,9 +457,9 @@ function PaneHeader({
   );
 }
 
-// The house select shape (`ui/Select`); this pane's selects are inline (not
+// The house field shape (`ui/field.ts`); this pane's selects are inline (not
 // full-width), so the sites below pair it with a width.
-const selectClass = cn(houseSelectClass, "w-auto");
+const selectClass = cn(fieldClass, "w-auto");
 
 // ---------------------------------------------------------------------------
 // Panes

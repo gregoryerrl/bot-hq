@@ -9,7 +9,6 @@ import { Button } from "../components/ui/Button";
 import { SubTabButton } from "../components/SubTabButton";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
-import { terminalInputClass } from "./contextLibraryShared";
 import { SaveIcon, WarnIcon } from "../components/icons";
 import { ClaudeConfigPanel } from "./ClaudeConfig";
 import { ModelsPanel } from "./ModelsPanel";
@@ -37,6 +36,7 @@ import type {
 } from "../lib/bindings";
 import { shortSessionId } from "../lib/sessionId";
 import { Skeleton } from "../components/ui/Skeleton";
+import { fieldClass } from "../components/ui/field";
 
 type SettingsSubTab =
   | "roles"
@@ -710,7 +710,7 @@ function ToolGateSection() {
           <GatedKeywordList
             value={draft}
             onChange={setDraft}
-            inputClassName={cn(terminalInputClass, "flex-1")}
+            inputClassName={cn(fieldClass, "flex-1")}
             emptyState={
               <p className="py-2 font-code-sm text-code-sm text-on-surface-variant">
                 No keywords configured — every Bash command runs ungated. Add

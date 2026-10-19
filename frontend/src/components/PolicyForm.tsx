@@ -1,10 +1,10 @@
 import type { ForcePushMode, Policy, PushGateMode } from "../lib/bindings";
 import { cn } from "../lib/cn";
-import { terminalInputClass } from "../app/contextLibraryShared";
 import { Button } from "./ui/Button";
 import { SegToggle } from "./ui/SegToggle";
 import { useListEditor } from "../hooks/useListEditor";
 import { CloseIcon } from "./icons";
+import { fieldClass } from "./ui/field";
 
 /**
  * Controlled, presentational editor for a {@link Policy}. Shared across all
@@ -106,7 +106,7 @@ export function PolicyForm({
           disabled={disabled}
           onChange={(e) => patch({ branch_pattern: e.target.value })}
           placeholder="(no constraint)"
-          className={terminalInputClass}
+          className={fieldClass}
         />
       </Field>
 
@@ -145,7 +145,7 @@ export function PolicyForm({
           rows={3}
           onChange={(e) => patch({ commit_style: e.target.value })}
           placeholder="e.g. imperative-mood, lowercase, conventional prefixes"
-          className={cn(terminalInputClass, "min-h-[3.5rem] resize-y")}
+          className={cn(fieldClass, "min-h-[3.5rem] resize-y")}
         />
       </Field>
 
@@ -168,7 +168,7 @@ export function PolicyForm({
             })
           }
           placeholder="500 (inherited)"
-          className={terminalInputClass}
+          className={fieldClass}
         />
       </Field>
     </div>
@@ -232,7 +232,7 @@ function StringList({
             disabled={disabled}
             placeholder={placeholder}
             onChange={(e) => replaceAt(i, e.target.value)}
-            className={cn(terminalInputClass, "flex-1")}
+            className={cn(fieldClass, "flex-1")}
           />
           <Button
             variant="secondary"

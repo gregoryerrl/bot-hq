@@ -11,12 +11,13 @@ import type {
   Policy,
   ProjectView,
 } from "../lib/bindings";
-import { type OpenTab, tabKey, tabLabel, terminalInputClass } from "./contextLibraryShared";
+import { type OpenTab, tabKey, tabLabel } from "./contextLibraryShared";
 import { CloseIcon, DotIcon, FileIcon, FolderIcon, SaveIcon } from "../components/icons";
 import { FolderView } from "./ContextLibraryFolderView";
 import { PolicyForm } from "../components/PolicyForm";
 import { SegToggle } from "../components/ui/SegToggle";
 import { Button } from "../components/ui/Button";
+import { fieldClass } from "../components/ui/field";
 
 /** A CL file is a project policy blueprint when its basename is `policy.yaml`. */
 function isPolicyFile(filePath: string): boolean {
@@ -742,7 +743,7 @@ function DescriptionEditor({
           value={tagsStr}
           onChange={(e) => setTagsStr(e.target.value)}
           placeholder="(optional, comma-separated)"
-          className={terminalInputClass}
+          className={fieldClass}
         />
       </label>
       {error && (

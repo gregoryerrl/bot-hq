@@ -8,17 +8,7 @@ import type {
   ClRescanReportView,
   ProjectView,
 } from "../lib/bindings";
-import {
-  baseName,
-  buildTree,
-  collapseKey,
-  type CtxTarget,
-  type OpenTab,
-  splitGlobals,
-  terminalInputClass,
-  treeProjectIds,
-  type TreeNode,
-} from "./contextLibraryShared";
+import { baseName, buildTree, collapseKey, type CtxTarget, type OpenTab, splitGlobals, treeProjectIds, type TreeNode } from "./contextLibraryShared";
 import {
   ChevronRightIcon,
   CollapseAllIcon,
@@ -32,6 +22,7 @@ import {
   RescanIcon,
   WarnIcon,
 } from "../components/icons";
+import { fieldClass } from "../components/ui/field";
 
 const INDENT_PX = 12;
 
@@ -216,7 +207,7 @@ export function WorkspaceSidebar({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search files…"
-          className={terminalInputClass}
+          className={fieldClass}
         />
         {(rescanReport || rescanFailures.length > 0) && (
           <div className="flex flex-wrap gap-2 rounded border border-outline-variant bg-surface-container-lowest px-2 py-1 font-code-sm text-code-sm">

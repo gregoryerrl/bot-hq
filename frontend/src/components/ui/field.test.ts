@@ -1,8 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { terminalInputClass } from "../../app/contextLibraryShared";
 import { fieldClass } from "./field";
-import { selectClass } from "./Select";
 
 const classes = (s: string) => s.split(/\s+/).filter(Boolean);
 
@@ -28,10 +26,5 @@ describe("the one field (DESIGN.md amendment 2: boxed)", () => {
     for (const gone of ["border-b", "border-0", "rounded-none", "bg-transparent", "placeholder:text-on-surface-variant"]) {
       expect(c, gone).not.toContain(gone);
     }
-  });
-
-  it("is the shape behind both old names", () => {
-    expect(selectClass).toBe(fieldClass);
-    expect(terminalInputClass).toBe(fieldClass);
   });
 });

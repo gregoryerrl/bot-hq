@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
-import { baseName, pickFolder, terminalInputClass } from "./contextLibraryShared";
+import { baseName, pickFolder } from "./contextLibraryShared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { ChevronRightIcon } from "../components/icons";
 import { Button } from "../components/ui/Button";
+import { fieldClass } from "../components/ui/field";
 
 // ============================================================================
 // New-project modal — the primary "add a project" flow.
@@ -143,7 +144,7 @@ export function RegisterProjectModal({
             onChange={(e) => setName(e.target.value)}
             placeholder={suggestedName || "project-name"}
             autoFocus
-            className={terminalInputClass}
+            className={fieldClass}
           />
         </label>
 
@@ -157,7 +158,7 @@ export function RegisterProjectModal({
               value={workingRepo}
               onChange={(e) => setWorkingRepo(e.target.value)}
               placeholder="(where sessions run — leave blank for none)"
-              className={terminalInputClass}
+              className={fieldClass}
             />
             <Button
               variant="secondary"
@@ -181,7 +182,7 @@ export function RegisterProjectModal({
             value={description}
             onChange={(e) => setDescription(e.target.value)}
             placeholder="one-line summary"
-            className={terminalInputClass}
+            className={fieldClass}
           />
         </label>
 
@@ -211,7 +212,7 @@ export function RegisterProjectModal({
                   value={clPath}
                   onChange={(e) => setClPath(e.target.value)}
                   placeholder="(advanced — for a docs folder, not a code repo)"
-                  className={terminalInputClass}
+                  className={fieldClass}
                 />
                 <Button
                   variant="secondary"

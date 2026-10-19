@@ -5,7 +5,7 @@ import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 import { cn } from "../lib/cn";
-import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
+import { FieldLabel } from "./contextLibraryShared";
 import { CheckIcon, SaveIcon } from "../components/icons";
 import type {
   AppError,
@@ -15,7 +15,6 @@ import type {
   RoleDraftInput,
   RoleView,
 } from "../lib/bindings";
-import { selectClass } from "../components/ui/Select";
 import {
   DEFAULT_EFFORT,
   EFFORT_LEVELS,
@@ -24,6 +23,7 @@ import {
   roleDefaultEffort,
 } from "../lib/effort";
 import { EDIT_FILES } from "../lib/participants";
+import { fieldClass } from "../components/ui/field";
 
 /**
  * The participation modes the picker OFFERS — **two, and both of them do
@@ -596,7 +596,7 @@ function RoleForm({
           aria-invalid={nameInvalid || undefined}
           onChange={(e) => setDraft({ ...draft, display_name: e.target.value })}
           placeholder="e.g. Code Reviewer"
-          className={cn(terminalInputClass, nameInvalid && "border-error")}
+          className={cn(fieldClass, nameInvalid && "border-error")}
         />
       </label>
 
@@ -608,7 +608,7 @@ function RoleForm({
             onChange={(e) =>
               setDraft({ ...draft, participation_mode: e.target.value })
             }
-            className={selectClass}
+            className={fieldClass}
           >
             {OFFERED_MODES.map((m) => (
               <option key={m.value} value={m.value}>
@@ -640,7 +640,7 @@ function RoleForm({
                   e.target.value === NO_MODEL ? null : e.target.value,
               })
             }
-            className={selectClass}
+            className={fieldClass}
           >
             <option value={NO_MODEL}>
               (none — chosen when the role is invited)
@@ -674,7 +674,7 @@ function RoleForm({
               value={roleEffort}
               disabled={savingEffort}
               onChange={(e) => void saveRoleEffort(e.target.value)}
-              className={selectClass}
+              className={fieldClass}
               aria-label="Default effort"
             >
               {EFFORT_LEVELS.map((v) => (

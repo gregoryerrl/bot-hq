@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { Button } from "../components/ui/Button";
-import { terminalInputClass } from "./contextLibraryShared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
+import { fieldClass } from "../components/ui/field";
 
 // ============================================================================
 // ContextMenu — VSCode-style right-click menu, fixed at the cursor. Closes on
@@ -147,7 +147,7 @@ export function ActionModal({
                 if (e.key === "Enter") submit();
               }}
               autoFocus
-              className={terminalInputClass}
+              className={fieldClass}
             />
           </label>
         )}
