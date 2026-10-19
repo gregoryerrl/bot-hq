@@ -18,6 +18,19 @@ describe("Chip", () => {
     expect(chipTone("tertiary")).toBe("border-tertiary/40 bg-tertiary/15 text-tertiary");
   });
 
+  it("stays one unbroken label unless asked to wrap", () => {
+    render(<Chip tone="warning">Unsaved</Chip>);
+    expect(screen.getByText("Unsaved")).toHaveClass("whitespace-nowrap", "shrink-0");
+    render(
+      <Chip tone="primary" wrap>
+        Needs you · halted — your move
+      </Chip>,
+    );
+    const long = screen.getByText("Needs you · halted — your move");
+    expect(long).toHaveClass("whitespace-normal", "break-words", "max-w-full");
+    expect(long).not.toHaveClass("whitespace-nowrap");
+  });
+
   it("keeps the caller's classes and attributes", () => {
     render(
       <Chip tone="primary" size="sm" className="ml-1" title="2 waiting">

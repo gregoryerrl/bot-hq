@@ -37,16 +37,23 @@ export function chipTone(tone: ChipTone): string {
   return toneClasses[tone];
 }
 
+/**
+ * A chip is one unbroken label by default. `wrap` lets a long status label
+ * ("Needs you · halted — your move") break onto a second line inside a narrow
+ * tile instead of being clipped by an `overflow-hidden` parent (EYES, S2d).
+ */
 export function Chip({
   tone = "neutral",
   size = "md",
+  wrap = false,
   className,
   ...props
-}: HTMLAttributes<HTMLSpanElement> & { tone?: ChipTone; size?: ChipSize }) {
+}: HTMLAttributes<HTMLSpanElement> & { tone?: ChipTone; size?: ChipSize; wrap?: boolean }) {
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded border font-label-caps text-label-caps",
+        "inline-flex items-center gap-1 rounded border font-label-caps text-label-caps",
+        wrap ? "min-w-0 max-w-full whitespace-normal break-words" : "shrink-0 whitespace-nowrap",
         toneClasses[tone],
         sizeClasses[size],
         className,
