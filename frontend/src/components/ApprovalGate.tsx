@@ -8,6 +8,7 @@ import { formatRelative, formatTimestamp } from "../lib/time";
 import type { TrayRow } from "./HaltBanner";
 import { fileArgsInCommand } from "./FileViewerDialog";
 import { clampOverflows, useMeasuredClampOverflow } from "../hooks/useClampOverflow";
+import { ClockIcon, PauseIcon, WarnIcon } from "./icons";
 
 /** How many View-file buttons a card renders before summarising the rest. */
 const VIEW_FILE_BUTTON_CAP = 3;
@@ -150,25 +151,37 @@ export function ApprovalGate({
           share one line on a wide pane and stack on a narrow one instead of
           pushing Details out of the box. */}
       <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className={cn("font-label-caps text-label-caps", urgent ? "text-error" : "text-primary")}>
-          {urgent ? "🚨 URGENT APPROVAL" : isClose ? "CLOSE SESSION?" : "⛔ APPROVAL"}
+        {/* The set's icons, not emoji: 🚨 and ⛔ rendered in the font's colour
+            and clashed with everything around them (the visual pass). */}
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 font-label-caps text-label-caps",
+            urgent ? "text-error" : "text-primary",
+          )}
+        >
+          {urgent ? (
+            <WarnIcon className="size-3" />
+          ) : isClose ? null : (
+            <PauseIcon className="size-3" />
+          )}
+          {urgent ? "URGENT APPROVAL" : isClose ? "CLOSE SESSION?" : "APPROVAL"}
         </span>
-        <span className={cn("text-sm font-semibold", authorColorClass(who, hues))}>
+        <span className={cn("font-body-md text-body-md font-semibold", authorColorClass(who, hues))}>
           {who}
         </span>
-        <span className="text-xs text-on-surface-variant">
+        <span className="font-code-sm text-code-sm text-muted">
           {isClose ? "says the work is done — the session waits for your answer" : "is blocked until you answer"}
         </span>
         <Button
           variant="link"
           onClick={() => setShowDetails(true)}
-          className="ml-auto text-xs"
+          className="ml-auto font-code-sm text-code-sm"
           title="Everything about this gate — the full request, the exact command, who asked and when"
         >
           Details
         </Button>
         {more > 0 && (
-          <span className="text-xs text-on-surface-variant">
+          <span className="font-code-sm text-code-sm text-muted">
             1 of {rows.length} · {more} more after this
           </span>
         )}
@@ -179,18 +192,20 @@ export function ApprovalGate({
       {urgent && (
         <p
           data-testid="gate-urgent-reason"
-          className="mt-1.5 rounded border border-error/50 bg-error-container/30 px-2 py-1 text-sm font-medium text-on-surface"
+          className="mt-1.5 rounded border border-error/50 bg-error-container/30 px-2 py-1 font-body-md text-body-md font-medium text-on-surface"
         >
-          🚨 {urgent}
+          <WarnIcon className="mr-1 inline-block size-3.5 align-middle text-error" />
+          {urgent}
         </p>
       )}
       <ClampedPrompt key={row.choice_id} text={gatePrompt(row)} />
       {row.kind === "close" && isActing?.(row.agent) && (
         <p
           data-testid="close-still-acting"
-          className="mt-1.5 rounded border border-tertiary/50 bg-tertiary-container/30 px-2 py-1 text-xs text-on-surface"
+          className="mt-1.5 rounded border border-tertiary/50 bg-tertiary-container/30 px-2 py-1 font-code-sm text-code-sm text-on-surface"
         >
-          ⏳ {who} is still acting on the recap's detail — approving now may close the
+          <ClockIcon className="mr-1 inline-block size-3 align-middle text-tertiary" />
+          {who} is still acting on the recap's detail — approving now may close the
           session before it finishes.
         </p>
       )}
@@ -209,7 +224,7 @@ export function ApprovalGate({
           already scrolls. `break-all`, not `break-words`: a command is one
           unbroken token far more often than prose is. */}
       {row.command_text && (
-        <pre className="mt-1.5 max-h-32 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-code-sm text-xs text-on-surface">
+        <pre className="mt-1.5 max-h-32 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container px-2 py-1.5 font-code-sm text-code-sm text-on-surface">
           {row.command_text}
         </pre>
       )}
@@ -217,7 +232,7 @@ export function ApprovalGate({
 
       {stale ? (
         <div className="mt-2 rounded border border-error/50 bg-error-container/30 p-2">
-          <p className="text-xs text-on-surface">
+          <p className="font-code-sm text-code-sm text-on-surface">
             Requested {stale.askedAt ? formatRelative(stale.askedAt) : "earlier"}
             . The repo may have moved since — confirm you still want this to run.
           </p>
@@ -324,7 +339,7 @@ export function ApprovalGate({
       )}
 
       {error && (
-        <p role="alert" className="mt-1.5 text-xs text-error">
+        <p role="alert" className="mt-1.5 font-code-sm text-code-sm text-error">
           {error}
         </p>
       )}
@@ -381,7 +396,7 @@ function GateDetailsDialog({
   // one dialog is one too many for a screen reader.
   return (
     <Dialog open onClose={onClose} title="Approval details" size="md">
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-code-sm text-code-sm">
         <dt className="text-on-surface-variant">Requested by</dt>
         <dd className={cn("font-semibold", authorColorClass(who, hues))}>
           {who}
@@ -403,22 +418,22 @@ function GateDetailsDialog({
         <dd className="font-code-sm text-on-surface-variant">{row.choice_id}</dd>
       </dl>
 
-      <p className="mt-3 text-xs font-medium text-on-surface-variant">
+      <p className="mt-3 font-label-caps text-label-caps text-on-surface-variant">
         Full request
       </p>
-      <p className="mt-1 whitespace-pre-wrap rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 text-sm text-on-surface">
+      <p className="mt-1 whitespace-pre-wrap rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-body-md text-body-md text-on-surface">
         {row.prompt}
       </p>
 
       {row.command_text && (
         <>
-          <p className="mt-3 text-xs font-medium text-on-surface-variant">
+          <p className="mt-3 font-label-caps text-label-caps text-on-surface-variant">
             Exact command — runs verbatim on Approve
           </p>
           {/* Same pair as the Dialog's own body, and this one matters more:
               it is the stale-gate confirm, where the user is being asked to
               re-approve a command against a repo that may have moved. */}
-          <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-code-sm text-xs text-on-surface">
+          <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-code-sm text-code-sm text-on-surface">
             {row.command_text}
           </pre>
           <ViewFileButton command={row.command_text} onViewFile={onViewFile} />
@@ -467,7 +482,7 @@ function ClampedPrompt({ text }: { text: string }) {
       <p
         ref={ref}
         className={cn(
-          "mt-1.5 whitespace-pre-wrap break-words text-sm text-on-surface",
+          "mt-1.5 whitespace-pre-wrap break-words font-body-md text-body-md text-on-surface",
           !expanded && "line-clamp-4",
           expanded && "max-h-[40vh] overflow-y-auto overflow-x-hidden",
         )}
@@ -478,7 +493,7 @@ function ClampedPrompt({ text }: { text: string }) {
         <Button
           variant="link"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-0.5 text-xs"
+          className="mt-0.5 font-code-sm text-code-sm"
         >
           {expanded ? "show less" : "show the full request"}
         </Button>
@@ -520,7 +535,7 @@ function ViewFileButton({
         </Button>
       ))}
       {dropped > 0 && (
-        <span className="text-xs text-on-surface-variant">
+        <span className="font-code-sm text-code-sm text-muted">
           +{dropped} more file{dropped > 1 ? "s" : ""} in the command
         </span>
       )}

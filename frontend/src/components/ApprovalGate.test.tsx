@@ -39,13 +39,13 @@ describe("ApprovalGate", () => {
     const { rerender } = render(
       <ApprovalGate rows={[approval({ urgent_reason: "the nightly job is burning the shared budget" })]} onResolve={resolved()} />,
     );
-    expect(screen.getByText("🚨 URGENT APPROVAL")).toBeInTheDocument();
+    expect(screen.getByText("URGENT APPROVAL")).toBeInTheDocument();
     expect(screen.getByTestId("gate-urgent-reason")).toHaveTextContent(
       "the nightly job is burning the shared budget",
     );
     expect(screen.getByRole("group", { name: "Approval required" }).className).toMatch(/border-error/);
     rerender(<ApprovalGate rows={[approval()]} onResolve={resolved()} />);
-    expect(screen.getByText("⛔ APPROVAL")).toBeInTheDocument();
+    expect(screen.getByText("APPROVAL")).toBeInTheDocument();
     expect(screen.queryByTestId("gate-urgent-reason")).not.toBeInTheDocument();
   });
 
