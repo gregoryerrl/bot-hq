@@ -6,7 +6,10 @@
  */
 import { stripComments } from "./framing";
 
-export type ColorRule = "raw-hex";
+export type ColorRule = "raw-hex" | "raw-palette";
+
+const UTILITIES = "text|bg|border|ring|outline|fill|stroke|from|via|to|divide|placeholder|decoration|shadow|accent|caret";
+const HUES = "slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose";
 
 /**
  * A hex colour (`#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`) where a colour VALUE
@@ -18,6 +21,18 @@ export const COLOR_RULES: Record<ColorRule, { pattern: RegExp; fix: string }> = 
   "raw-hex": {
     pattern: /(?<=["'`[(,]\s*)#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})(?![\w-])/,
     fix: "a raw hex colour — use a theme token from tailwind.config.ts (a class, or the config object where a library takes a literal)",
+  },
+  // A Tailwind DEFAULT palette class (`bg-black/60`, `text-gray-400`), not a
+  // theme token: the default palette sits outside the design's colours, so a
+  // stock grey or black cannot be retuned with the theme (the dialog scrims
+  // were bg-black until S2f made them the `scrim` token). The participant
+  // palette's names (`text-author-orange`) are tokens and never match: the
+  // colour must follow the utility directly.
+  "raw-palette": {
+    pattern: new RegExp(
+      `(?<![\\w-])(?:${UTILITIES})-(?:(?:${HUES})-(?:50|[1-9]00|950)|black|white)(?![\\w-])`,
+    ),
+    fix: "a Tailwind default palette colour — use a theme token (bg-scrim, text-on-surface, text-muted, …)",
   },
 };
 

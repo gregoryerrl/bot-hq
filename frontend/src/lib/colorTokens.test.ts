@@ -12,10 +12,12 @@
  * first, with the `stripComments` the other sweeps share; `import.meta.glob`
  * for `typeScale.test.ts`'s reason (no `@types/node` in the tsconfig).
  *
+ * Since S2f it also refuses a Tailwind DEFAULT palette class (`bg-black/60`,
+ * `text-gray-400`): the dialog scrims were the last of them, and they are the
+ * theme's `scrim` token now.
+ *
  * Not seen by this sweep (so "0 violations" is not read as "0 possible"):
- * `.css` files (`index.css` uses `theme()`); a Tailwind palette class
- * (`bg-black/60`, the dialog scrims — they join the guard in S2's Dialog
- * slice, when the nine scrims become one); `rgb()`/`hsl()` literals; a colour
+ * `.css` files (`index.css` uses `theme()`); `rgb()`/`hsl()` literals; a colour
  * assembled by string concatenation.
  */
 import { describe, expect, it } from "vitest";
@@ -45,7 +47,7 @@ const allowed = (file: string, rule: ColorRule) =>
   ALLOWLIST.some((a) => a.rule === rule && file.endsWith(`/${a.file}`));
 
 describe("colours come from the theme", () => {
-  it("no source file spells a raw hex colour", () => {
+  it("no source file spells a raw hex colour or a default palette class", () => {
     const offenders = swept().flatMap((file) =>
       findRawColors(SOURCES[file])
         .filter((h) => !allowed(file, h.rule))
@@ -79,6 +81,27 @@ describe("colours come from the theme", () => {
       `<span className="bg-surface text-on-surface border-outline-variant" />`,
       `const ref = "abc#def";`,
       `"&#39;"`,
+    ]) {
+      expect(rulesOf(ok), ok).toEqual([]);
+    }
+  });
+
+  it("flags a default palette class and passes the theme's tokens", () => {
+    const rulesOf = (src: string) => findRawColors(src).map((h) => h.rule);
+    for (const bad of [
+      `<div className="fixed inset-0 z-40 bg-black/60" />`,
+      `cn("text-gray-400", x)`,
+      `"hover:bg-red-500"`,
+      `<p className="border-slate-800 text-white">`,
+    ]) {
+      expect(rulesOf(bad), bad).toEqual(["raw-palette"]);
+    }
+    for (const ok of [
+      `<div className="fixed inset-0 z-40 bg-scrim/60" />`,
+      `<span className="text-author-orange bg-author-cyan/15" />`,
+      `<p className="text-on-surface text-muted border-outline-variant bg-surface-container-lowest" />`,
+      `<span className="text-warning bg-warning/15 border-primary/40" />`,
+      `"a white paper, a black box"`,
     ]) {
       expect(rulesOf(ok), ok).toEqual([]);
     }
