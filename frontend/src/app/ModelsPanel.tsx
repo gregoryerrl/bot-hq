@@ -200,11 +200,11 @@ export function ModelsPanel() {
                     className="flex flex-wrap items-center gap-2 px-4 pb-2 font-code-sm text-code-sm"
                   >
                     <span className="break-words">
-                      <span className={markIsLive(mark) ? "text-warning" : "text-on-surface-variant"}>
+                      <span className={markIsLive(mark) ? "text-warning" : "text-muted"}>
                         {mark.email ? `${mark.email}: ` : ""}
                         {formatLimitMark(mark).headline}
                       </span>
-                      <span className="text-on-surface-variant"> — "{mark.limited_text}"</span>
+                      <span className="text-muted"> — "{mark.limited_text}"</span>
                     </span>
                     <Button
                       size="sm"

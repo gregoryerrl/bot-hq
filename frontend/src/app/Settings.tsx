@@ -421,7 +421,7 @@ function SessionDefaults() {
           Run repo-backed sessions in isolated git worktrees
         </span>
       </label>
-      <p className="mt-1 font-code-sm text-code-sm text-muted">
+      <p className="mt-1 font-body-md text-body-md text-muted">
         Each session gets its own checkout on branch{" "}
         <code className="text-on-surface">bothq/&lt;session-id&gt;</code>, so
         several sessions can work the same project in parallel. Clean worktrees
@@ -449,7 +449,7 @@ function SessionDefaults() {
           Send adherence nudges to participants
         </span>
       </label>
-      <p className="mt-1 font-code-sm text-code-sm text-muted">
+      <p className="mt-1 font-body-md text-body-md text-muted">
         The one-time reminders bot-hq posts into a session: open the Context
         Library first, mutations belong in Apply, the Plan→Apply hand-off, and
         the close-out learnings ask. Off = none of them; the tools and gates

@@ -801,7 +801,7 @@ function RoleForm({
         <legend className="px-1 font-label-caps text-label-caps text-on-surface-variant">
           Capabilities
         </legend>
-        <p className="mb-3 max-w-prose font-code-sm text-code-sm text-muted">
+        <p className="mb-3 max-w-prose font-body-md text-body-md text-muted">
           Grants only — there is no separate deny list to contradict, so
           anything unticked is simply not granted. Most boxes are enforced when
           the agent calls the matching tool; <em>Edit files</em> is enforced at

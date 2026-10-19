@@ -127,7 +127,7 @@ export function RegisterProjectModal({
         </>
       }
     >
-      <p className="font-code-sm text-code-sm text-muted">
+      <p className="font-body-md text-body-md text-muted">
         Creates a Context Library project at the managed location. The working
         repo is bound for sessions — its files are <strong>not</strong>{" "}
         indexed.
@@ -224,7 +224,7 @@ export function RegisterProjectModal({
                 Browse…
               </Button>
             </div>
-            <p className="mt-1 font-code-sm text-code-sm text-muted">
+            <p className="mt-1 font-body-md text-body-md text-muted">
               Indexes that folder's docs as this project's Context Library.
               Leave empty to use the managed default (recommended).
             </p>

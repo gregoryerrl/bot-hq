@@ -1109,7 +1109,7 @@ export function Dashboard() {
                   + Add participant
                 </Button>
               )}
-              <p className="mt-1 font-code-sm text-code-sm text-muted">
+              <p className="mt-1 font-body-md text-body-md text-muted">
                 Row order sets each participant's turn slot. Effort applies to
                 this session only — Default uses the role's configured effort
                 (Settings → Roles).
@@ -1144,7 +1144,7 @@ export function Dashboard() {
                   gateway the CLI cannot talk to. Say so here, where the choice
                   is made, rather than letting it surface as a spawn error. */}
               {models.length > 0 && (
-                <p className="mt-1 font-code-sm text-code-sm text-muted">
+                <p className="mt-1 font-body-md text-body-md text-muted">
                   Every model spawns through the claude CLI, so its endpoint
                   must speak the Anthropic Messages API. Use <b>Test</b> in{" "}
                   <b>Settings → Models</b> to check one before a session
