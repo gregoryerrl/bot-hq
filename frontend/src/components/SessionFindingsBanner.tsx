@@ -36,7 +36,6 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
     const escalated = openBlocking.filter((f) => f.raise_count >= 2).length;
     return (
       <>
-        <span className="mx-2 text-outline-variant">·</span>
         <span
           className={cn("text-secondary", escalated > 0 && "font-semibold")}
           title={
@@ -65,7 +64,6 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
   if (awaitingConfirm.length > 0) {
     return (
       <>
-        <span className="mx-2 text-outline-variant">·</span>
         <span
           className="text-secondary"
           title="An escalated finding was resolved; awaiting confirmation (approve_finding)"
@@ -87,7 +85,6 @@ export function SessionFindingsBanner({ sessionId }: { sessionId: string }) {
   if (openAdvisories.length > 0) {
     return (
       <>
-        <span className="mx-2 text-outline-variant">·</span>
         <span
           className="text-on-surface-variant"
           title="Open advisory findings — non-blocking; close_session lists them once before the session archives"

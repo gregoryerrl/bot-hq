@@ -353,10 +353,27 @@ describe("SessionView roster — which account a participant bills (0090)", () =
       },
     ];
     renderSessionView();
+    // The two do not bill one known account, so each chip carries a SHORT
+    // tag (the visual pass, S4), the full account in its title.
     const chip = await screen.findByTestId("participant-account-eyes");
-    expect(chip).toHaveTextContent("two@example.com");
+    expect(chip).toHaveTextContent("acct-2");
     expect(chip).toHaveAttribute("title", "Bills two@example.com (/Users/me/.claude-acct-2)");
     expect(screen.queryByTestId("participant-account-eyes-2")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("session-account")).not.toBeInTheDocument();
+  });
+
+  it("names a shared account ONCE for the session, not on every chip", async () => {
+    roster.rows = (roster.default as Record<string, unknown>[]).map((r) => ({
+      ...r,
+      spawn_knobs_recorded: false,
+      account_dir_at_spawn: "/Users/me/.claude-acct-2",
+      account_email_at_spawn: "two@example.com",
+    }));
+    renderSessionView();
+    const shared = await screen.findByTestId("session-account");
+    expect(shared).toHaveTextContent("two@example.com");
+    expect(shared).toHaveAttribute("title", "Bills two@example.com (/Users/me/.claude-acct-2)");
+    expect(screen.queryByTestId("participant-account-eyes")).not.toBeInTheDocument();
   });
 });
 

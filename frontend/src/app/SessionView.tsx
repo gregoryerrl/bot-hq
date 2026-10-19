@@ -52,7 +52,7 @@ import { SpawnBadge } from "../components/SpawnBadge";
 import type { AppError, ResolveResult, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { BranchIcon, EditIcon, GearIcon, WarnIcon } from "../components/icons";
+import { ArrowLeftIcon, BranchIcon, EditIcon, GearIcon, WarnIcon } from "../components/icons";
 import { SubTabButton } from "../components/SubTabButton";
 import { Skeleton } from "../components/ui/Skeleton";
 import { SessionContextTab } from "./SessionContextTab";
@@ -60,6 +60,8 @@ import { SessionTerminalTab } from "./SessionTerminalTab";
 import { invoke } from "@tauri-apps/api/core";
 import { shortSessionId } from "../lib/sessionId";
 import { Chip } from "../components/ui/Chip";
+import { ParticipantChip, accountTagOf } from "../components/ParticipantChip";
+import { authorColorClass } from "../components/authorColor";
 
 
 /** Session-container subtabs. Workspace = chat + IPAV documents (the
@@ -142,6 +144,13 @@ export function SessionView() {
   // the key → `ROLE · Model` index every author-keyed surface below resolves
   // through (the turn-status line, and the roster row itself).
   const { participants, labels, hues, slugs } = useParticipantLabels(sessionId);
+  // The account the session bills, when every participant bills the same
+  // one (see the header's account chip); null when they differ or none says.
+  const sharedAccount = useMemo(() => {
+    const accounts = participants.map((p) => participantAccount(p));
+    const first = accounts[0];
+    return first && accounts.every((a) => a?.text === first.text) ? first : null;
+  }, [participants]);
 
   // WS1c (2026-08-27): per-participant delivery lag — the starvation chip's
   // read. Event-driven, NOT a poll (EYES A7 — the refetchInterval polls were
@@ -621,227 +630,206 @@ export function SessionView() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between border-b border-outline-variant px-4 py-3">
-        <div className="min-w-0">
-          {editingTitle === null ? (
-            <h2 className="group flex items-center gap-1 truncate font-headline-md text-headline-md tracking-tight">
-              <span className="truncate">{session.title}</span>
-              <button
-                type="button"
-                aria-label="Rename session"
-                title="Rename session"
-                onClick={() => {
-                  setRenameError(null);
-                  setEditingTitle(session.title);
-                }}
-                className="shrink-0 px-1 font-code-sm text-code-sm text-on-surface-variant opacity-0 transition-opacity hover:text-on-surface focus:opacity-100 group-hover:opacity-100"
-              >
-                <EditIcon className="size-3.5" />
-              </button>
-            </h2>
-          ) : (
-            <input
-              autoFocus
-              value={editingTitle}
-              onChange={(e) => setEditingTitle(e.target.value)}
-              onBlur={commitRename}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  commitRename();
-                } else if (e.key === "Escape") {
-                  e.preventDefault();
-                  setEditingTitle(null);
-                }
-              }}
-              aria-label="Session title"
-              className="w-full max-w-sm rounded border border-outline-variant bg-surface px-2 py-0.5 font-headline-md text-headline-md tracking-tight text-on-surface focus:border-primary focus:outline-none"
-            />
-          )}
-          <p className="font-code-sm text-code-sm text-on-surface-variant">
-            <Link to="/" className="hover:text-on-surface">
-              ← Dashboard
-            </Link>
-            <span className="mx-2 text-outline-variant">·</span>
-            <code className="font-code-sm text-code-sm text-on-surface-variant">
-              {shortSessionId(sessionId)}
-            </code>
-            {phase && (
-              <>
-                <span className="mx-2 text-outline-variant">·</span>
-                <span className="text-on-surface-variant">
-                  Phase:{" "}
-                  {/* **The user's own hand on the phase**, and until round 4 it
-                      did not exist: no Tauri command wrote the phase and this
-                      was plain text — while `protocol.rs` told every agent "the
-                      ring stops until the user advances the chip". An agent
-                      calling `request_phase_advance` could only ever be
-                      declined.
-
-                      It lives HERE and not on `SessionPhaseChip`, which is the
-                      obvious-looking home: that chip's only render site is the
-                      dashboard tile, whose whole surface is `onClick={open}` →
-                      navigate, so a button inside it would both advance and
-                      navigate away (and nest interactives). It also puts the
-                      control in the list rather than in the session — and the
-                      escape valve for a stalled phase is needed while you are
-                      IN one. */}
-                  <select
-                    aria-label="Session phase"
-                    className="rounded border border-outline-variant bg-surface-container px-1 py-0.5 text-on-surface"
-                    value={phase}
-                    onChange={(e) => {
-                      setPhaseError(null);
-                      void advancePhase
-                        .mutateAsync({
-                          sessionId,
-                          target: e.target.value,
-                        })
-                        .catch((err: unknown) => setPhaseError(errorMessage(err)));
-                    }}
-                  >
-                    {PHASE_NAMES.map((name) => (
-                      <option key={name} value={name}>
-                        {name}
-                      </option>
-                    ))}
-                  </select>
-                  {phaseError && (
-                    <span
-                      role="alert"
-                      className="ml-2 font-code-sm text-code-sm text-error"
-                      title={phaseError}
-                    >
-                      phase not advanced: {phaseError}
-                    </span>
-                  )}
-                </span>
-              </>
-            )}
-            <SessionFindingsBanner sessionId={sessionId} />
-            {session.base_repo_path && (
-              <>
-                <span className="mx-2 text-outline-variant">·</span>
-                <span
-                  className="font-code-sm text-code-sm text-on-surface-variant"
-                  title={`Isolated worktree of ${session.base_repo_path} — work lands on branch bothq/${sessionId}`}
+      {/* The visual pass, S4: two fixed rows. Row 1 is the session — the way
+          back, the title, the phase and the actions — and never wraps (the
+          title truncates). Row 2 is what runs in it — the id, the worktree,
+          the account, the roster as one chip per participant, the review
+          state — and wraps BETWEEN chips, never inside one. */}
+      <header className="border-b border-outline-variant px-4 py-2">
+        <div className="flex min-w-0 items-center gap-3">
+          <Link
+            to="/"
+            className="inline-flex shrink-0 items-center gap-1 font-code-sm text-code-sm text-on-surface-variant hover:text-on-surface"
+          >
+            <ArrowLeftIcon className="size-3.5" />
+            Dashboard
+          </Link>
+          <div className="min-w-0 flex-1">
+            {editingTitle === null ? (
+              <h2 className="group flex min-w-0 items-center gap-1 font-headline-md text-headline-md tracking-tight">
+                <span className="truncate">{session.title}</span>
+                <button
+                  type="button"
+                  aria-label="Rename session"
+                  title="Rename session"
+                  onClick={() => {
+                    setRenameError(null);
+                    setEditingTitle(session.title);
+                  }}
+                  className="shrink-0 px-1 text-on-surface-variant opacity-0 transition-opacity hover:text-on-surface focus:opacity-100 group-hover:opacity-100"
                 >
-                  <BranchIcon className="mr-1 inline-block size-3 align-middle" />
-                  bothq/{sessionId}
-                </span>
-              </>
-            )}
-            {/* rc3 D10 + the roster the user asked for: who is IN this session,
-                as ROLE · Model, legible while it runs. The live complaint was
-                that a duplicate-role roster was invisible until the agents said
-                so — this is where it becomes visible. */}
-            {participants.map((p) => (
-              <span key={p.id}>
-                <span className="mx-2 text-outline-variant">·</span>
-                <span
-                  className={cn(
-                    "text-on-surface-variant",
-                    !p.enabled && "opacity-50",
-                  )}
-                  title={
-                    p.enabled
-                      ? `Participant ${p.turn_position + 1} — ${p.participation_mode}. Live agent health.`
-                      : `Participant ${p.turn_position + 1} — not running in this session.`
+                  <EditIcon className="size-3.5" />
+                </button>
+              </h2>
+            ) : (
+              <input
+                autoFocus
+                value={editingTitle}
+                onChange={(e) => setEditingTitle(e.target.value)}
+                onBlur={commitRename}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitRename();
+                  } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    setEditingTitle(null);
                   }
-                >
-                  {/* rc3 P1: the label is the way in to what this participant
-                      was actually told. Attribution is structural — the chip
-                      you click IS the participant, so a prompt can't be shown
-                      under the wrong heading. */}
-                  <button
-                    type="button"
-                    onClick={() => void openComposedPrompt(p)}
-                    title="View the composed system prompt this participant spawned with"
-                    className="underline decoration-dotted underline-offset-2 transition-colors hover:text-on-surface"
-                  >
-                    {participantLabel(p)}
-                  </button>
-                  {/* CONFIGURATION, so it sits beside the label rather than
-                      inside the runtime pair below: what this participant was
-                      spawned with is a fact about the spawn, while the dot and
-                      the meter are facts about the process. */}
-                  <SpawnBadge participant={p} />{" "}
-                  {/* 0090: which Claude account this participant bills, from
-                      the SPAWN SNAPSHOT (the email the CLI reported, else the
-                      config dir's last segment). The model name cannot say —
-                      it is the same on every account. Nothing when the row
-                      predates 0090 or the participant bills a gateway. */}
-                  {(() => {
-                    const account = participantAccount(p);
-                    return account ? (
-                      <span
-                        data-testid={`participant-account-${p.slug}`}
-                        title={account.title}
-                        className="mr-1 rounded border border-outline-variant px-1 font-label-caps text-label-caps text-on-surface-variant"
-                      >
-                        {account.text}
-                      </span>
-                    ) : null;
-                  })()}
-                  {/* Both stores hold TWO key spaces: the live
-                      `session:agent_health` / `session:agent_context` events
-                      key by the participant's slug, while the mount backfill
-                      unpacks the slot-shaped `get_session_runtime` pair. A bare
-                      `[p.slug]` read the first and missed the second, so every
-                      dot and meter went blank after a restart until the next
-                      transition — `participantRuntime` spans both. It needs the
-                      whole roster because a slot is a place IN it: the backend
-                      numbers slots over the SPAWNABLE rows, so a disabled or
-                      on-demand row shifts every slot after it. */}
-                  <HealthDot
-                    health={participantRuntime(health, participants, p)}
-                    name={participantLabel(p)}
-                  />
-                  <ContextMeter
-                    context={participantRuntime(agentContext, participants, p)}
-                    name={participantLabel(p)}
-                    onOpenHistory={() => void openContextHistory(p)}
-                  />
-                  <BacklogChip
-                    backlog={backlogBySlug.get(p.slug)}
-                    name={participantLabel(p)}
-                  />
-                </span>
-              </span>
-            ))}
-            {attention === ATTENTION_IDLE_UNFLAGGED && (
-              <>
-                <span className="mx-2 text-outline-variant">·</span>
-                <Chip tone="warning" title={ATTENTION_IDLE_TOOLTIP}>
-                  {ATTENTION_IDLE_LABEL}
-                </Chip>
-              </>
+                }}
+                aria-label="Session title"
+                className="w-full max-w-sm rounded border border-outline-variant bg-surface px-2 py-0.5 font-headline-md text-headline-md tracking-tight text-on-surface focus:border-primary focus:outline-none"
+              />
             )}
-          </p>
+          </div>
+          {phase && (
+            <label className="inline-flex shrink-0 items-center gap-1.5 font-label-caps text-label-caps text-on-surface-variant">
+              Phase
+              {/* **The user's own hand on the phase**, and until round 4 it
+                  did not exist: no Tauri command wrote the phase and this
+                  was plain text — while `protocol.rs` told every agent "the
+                  ring stops until the user advances the chip". An agent
+                  calling `request_phase_advance` could only ever be
+                  declined.
+
+                  It lives HERE and not on `SessionPhaseChip`, which is the
+                  obvious-looking home: that chip's only render site is the
+                  dashboard tile, whose whole surface is `onClick={open}` →
+                  navigate, so a button inside it would both advance and
+                  navigate away (and nest interactives). It also puts the
+                  control in the list rather than in the session — and the
+                  escape valve for a stalled phase is needed while you are
+                  IN one. */}
+              <select
+                aria-label="Session phase"
+                className="rounded border border-outline-variant bg-surface-container-lowest px-1.5 py-0.5 font-code-sm text-code-sm text-on-surface focus:border-primary focus:outline-none"
+                value={phase}
+                onChange={(e) => {
+                  setPhaseError(null);
+                  void advancePhase
+                    .mutateAsync({
+                      sessionId,
+                      target: e.target.value,
+                    })
+                    .catch((err: unknown) => setPhaseError(errorMessage(err)));
+                }}
+              >
+                {PHASE_NAMES.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Session settings — policy & push gate"
+              aria-label="Session settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <GearIcon />
+            </Button>
+            {/* Labelled, not a bare ✕: the glyph read as "close this view"
+                while the action ends the agents and archives the session;
+                ← Dashboard is the way back. The confirm stays behind it. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              title="Ends the session's agents and archives it (asks first)"
+              aria-label="Close session"
+              disabled={closing}
+              onClick={onCloseClick}
+            >
+              {closing ? "Closing…" : "Close session…"}
+            </Button>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            title="Session settings — policy & push gate"
-            aria-label="Session settings"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <GearIcon />
-          </Button>
-          {/* Labelled, not a bare ✕: the glyph read as "close this view"
-              while the action ends the agents and archives the session;
-              ← Dashboard is the way back. The confirm stays behind it. */}
-          <Button
-            variant="ghost"
-            size="sm"
-            title="Ends the session's agents and archives it (asks first)"
-            aria-label="Close session"
-            disabled={closing}
-            onClick={onCloseClick}
-          >
-            {closing ? "Closing…" : "Close session…"}
-          </Button>
+        {phaseError && (
+          <p role="alert" className="mt-1 break-words font-code-sm text-code-sm text-error" title={phaseError}>
+            Phase not advanced: {phaseError}
+          </p>
+        )}
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-code-sm text-code-sm text-on-surface-variant">
+          <code className="shrink-0 font-code-sm text-code-sm text-muted" title={sessionId}>
+            {shortSessionId(sessionId)}
+          </code>
+          {session.base_repo_path && (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 text-muted"
+              title={`Isolated worktree of ${session.base_repo_path} — work lands on branch bothq/${sessionId}`}
+            >
+              <BranchIcon className="size-3" />
+              worktree
+            </span>
+          )}
+          {/* 0090: which Claude account the session bills, from each
+              participant's SPAWN SNAPSHOT (the email the CLI reported, else
+              the config dir). Shown ONCE when every participant bills the
+              same account; when they differ, each chip carries a short tag
+              instead (EYES: who bills which stays readable without a hover).
+              Nothing for a row that predates 0090 or bills a gateway. */}
+          {sharedAccount && (
+            <Chip tone="neutral" title={sharedAccount.title} data-testid="session-account">
+              {sharedAccount.text}
+            </Chip>
+          )}
+          {/* rc3 D10 + the roster the user asked for: who is IN this session,
+              as ROLE · Model, legible while it runs. */}
+          {participants.map((p) => {
+            const label = participantLabel(p);
+            const account = participantAccount(p);
+            const tag = sharedAccount ? null : accountTagOf(p);
+            return (
+              <ParticipantChip
+                key={p.id}
+                label={label}
+                hueClass={authorColorClass(label, hues)}
+                enabled={p.enabled}
+                title={
+                  (p.enabled
+                    ? `Participant ${p.turn_position + 1} — ${p.participation_mode}. Live agent health.`
+                    : `Participant ${p.turn_position + 1} — not running in this session.`) +
+                  (account ? ` ${account.title}.` : "")
+                }
+                onOpenPrompt={() => void openComposedPrompt(p)}
+              >
+                {/* CONFIGURATION, beside the label: what this participant was
+                    spawned with is a fact about the spawn, while the dot and
+                    the meter are facts about the process. */}
+                <SpawnBadge participant={p} />
+                {tag && account && (
+                  <Chip size="sm" tone="neutral" data-testid={`participant-account-${p.slug}`} title={account.title}>
+                    {tag}
+                  </Chip>
+                )}
+                {/* Both stores hold TWO key spaces: the live
+                    `session:agent_health` / `session:agent_context` events
+                    key by the participant's slug, while the mount backfill
+                    unpacks the slot-shaped `get_session_runtime` pair. A bare
+                    `[p.slug]` read the first and missed the second, so every
+                    dot and meter went blank after a restart until the next
+                    transition — `participantRuntime` spans both. It needs the
+                    whole roster because a slot is a place IN it: the backend
+                    numbers slots over the SPAWNABLE rows, so a disabled or
+                    on-demand row shifts every slot after it. */}
+                <HealthDot health={participantRuntime(health, participants, p)} name={label} />
+                <ContextMeter
+                  context={participantRuntime(agentContext, participants, p)}
+                  name={label}
+                  onOpenHistory={() => void openContextHistory(p)}
+                />
+                <BacklogChip backlog={backlogBySlug.get(p.slug)} name={label} />
+              </ParticipantChip>
+            );
+          })}
+          <SessionFindingsBanner sessionId={sessionId} />
+          {attention === ATTENTION_IDLE_UNFLAGGED && (
+            <Chip tone="warning" title={ATTENTION_IDLE_TOOLTIP}>
+              {ATTENTION_IDLE_LABEL}
+            </Chip>
+          )}
         </div>
       </header>
 
