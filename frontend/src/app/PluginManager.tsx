@@ -13,6 +13,7 @@ import type {
   PluginManifestPreview,
   PluginStatus,
 } from "../lib/bindings";
+import { Chip } from "../components/ui/Chip";
 
 /**
  * Consent copy per CSP directive, in user terms. Order matters: code first
@@ -590,16 +591,11 @@ export function PluginCard({
           title={statusLabel(status, enabled)}
         />
         <CardTitle>{plugin.name}</CardTitle>
-        <span className="rounded bg-surface-container-high px-1.5 py-0.5 font-code-sm text-code-sm text-on-surface">
-          v{plugin.version}
-        </span>
+        <Chip tone="neutral">v{plugin.version}</Chip>
         {plugin.linked && (
-          <span
-            className="rounded bg-tertiary/15 px-1.5 py-0.5 font-code-sm text-code-sm text-tertiary"
-            title={`Serving directly from ${plugin.dir_path}`}
-          >
+          <Chip tone="tertiary" title={`Serving directly from ${plugin.dir_path}`}>
             linked
-          </span>
+          </Chip>
         )}
         <span className="ml-auto font-code-sm text-code-sm text-on-surface-variant">
           {statusLabel(status, enabled)}
