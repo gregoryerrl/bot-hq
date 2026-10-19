@@ -7,6 +7,7 @@ import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { Textarea } from "../components/ui/Textarea";
 import { Skeleton } from "../components/ui/Skeleton";
+import { SettingsPage } from "../components/ui/SettingsPage";
 
 /** One code → prompt pair, as stored. */
 interface Promptcode {
@@ -93,9 +94,8 @@ export function PromptcodesPanel() {
   };
 
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden p-6">
-      <div className="mx-auto max-w-3xl">
-        <h2 className="font-headline-md text-headline-md text-on-surface">
+    <SettingsPage>
+        <h2 className="font-headline-lg text-headline-lg text-on-surface">
           Promptcodes
         </h2>
         <p className="mt-1 text-sm text-on-surface-variant">
@@ -184,7 +184,6 @@ export function PromptcodesPanel() {
             </div>
           </>
         )}
-      </div>
-    </div>
+      </SettingsPage>
   );
 }

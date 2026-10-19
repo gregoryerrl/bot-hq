@@ -38,6 +38,7 @@ import { shortSessionId } from "../lib/sessionId";
 import { Skeleton } from "../components/ui/Skeleton";
 import { fieldClass } from "../components/ui/field";
 import { Chip } from "../components/ui/Chip";
+import { SettingsPage } from "../components/ui/SettingsPage";
 
 type SettingsSubTab =
   | "roles"
@@ -283,10 +284,10 @@ export function Settings() {
 
 function ToolGatePanel() {
   return (
-    <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <PresetOfferCard kind="gates" />
       <ToolGateSection />
-    </div>
+    </SettingsPage>
   );
 }
 
@@ -314,14 +315,14 @@ function GlobalPolicyPanel() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <PresetOfferCard kind="policy" />
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Global Policy
           </h2>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
             The base policy every project and session inherits at spawn
             (<code>general-policy.yaml</code>). Projects can tighten it in the
             Context Library; a live session can override it in the gear panel.
@@ -353,7 +354,7 @@ function GlobalPolicyPanel() {
         </p>
       )}
       <SessionDefaults />
-    </div>
+    </SettingsPage>
   );
 }
 
@@ -489,12 +490,12 @@ function ArchivePanel() {
     "list_closed_sessions",
   );
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <div className="mb-6">
         <h2 className="font-headline-lg text-headline-lg text-on-surface">
           Archived Sessions
         </h2>
-        <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+        <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
           Every closed session. Click one to review its history — read-only,
           nothing respawns. <strong>Reopen</strong> (in the session view)
           brings its participants back via <code>--resume</code> with their
@@ -549,7 +550,7 @@ function ArchivePanel() {
           ))}
         </ul>
       )}
-    </div>
+    </SettingsPage>
   );
 }
 
@@ -565,13 +566,13 @@ function UpdatesPanel() {
   );
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Updates
           </h2>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
             bot-hq checks GitHub Releases for a newer version on launch. The
             install is manual — <span className="text-primary">Download</span>{" "}
             opens the release page in your browser.
@@ -636,7 +637,7 @@ function UpdatesPanel() {
           )}
         </div>
       </div>
-    </div>
+    </SettingsPage>
   );
 }
 
@@ -675,7 +676,7 @@ function ToolGateSection() {
           <h3 className="font-headline-md text-headline-md text-on-surface">
             Gated Bash Keywords
           </h3>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
             The global list. Each session copies it when it spawns, so an edit
             here reaches a session the next time it spawns (every session after
             an app restart); until then a running session keeps its own copy,
@@ -796,11 +797,11 @@ function NotificationsPanel() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <h2 className="font-headline-lg text-headline-lg text-on-surface">
         Notifications
       </h2>
-      <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+      <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
         While the window is unfocused, bot-hq escalates needs-you moments to
         your machine&rsquo;s notifications. The in-app bell counts parked
         questions; OS escalation deliberately covers more — questions and
@@ -868,7 +869,7 @@ function NotificationsPanel() {
           the test again.
         </p>
       )}
-    </div>
+    </SettingsPage>
   );
 }
 
@@ -894,11 +895,11 @@ function DiagnosticsPanel() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <h2 className="font-headline-lg text-headline-lg text-on-surface">
         Diagnostics
       </h2>
-      <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+      <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
         Strictly opt-in. When enabled, bot-hq sends anonymous crash reports
         (hashes, never text), app version + OS, and error classes to an
         endpoint operated by the bot-hq author on Cloudflare — never code,
@@ -984,6 +985,6 @@ function DiagnosticsPanel() {
           )}
         </label>
       </div>
-    </div>
+    </SettingsPage>
   );
 }

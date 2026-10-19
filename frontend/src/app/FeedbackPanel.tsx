@@ -11,6 +11,7 @@ import { cn } from "../lib/cn";
 import { formatRelative, formatTimestamp } from "../lib/time";
 import { shortSessionId } from "../lib/sessionId";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
+import { SettingsPage } from "../components/ui/SettingsPage";
 
 /** Mirror of the Rust `AgentFeedbackView` — raw invoke, no binding needed. */
 interface AgentFeedbackView {
@@ -87,7 +88,7 @@ export function FeedbackPanel() {
     });
 
   return (
-    <div className="mx-auto h-full max-w-4xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <p className="mb-3 font-body-md text-body-md text-on-surface-variant">
         Issues and ideas the agents raised about bot-hq itself, filed from
         whatever project they were working on. Work them from a bot-hq session.
@@ -218,7 +219,7 @@ export function FeedbackPanel() {
           ))}
         </ul>
       )}
-    </div>
+    </SettingsPage>
   );
 }
 

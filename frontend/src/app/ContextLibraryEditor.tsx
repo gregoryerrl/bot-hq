@@ -246,7 +246,7 @@ function ProjectPolicyForm({ project }: { project: string }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-5 py-5">
       <div className="mb-4 flex items-start justify-between gap-4">
-        <p className="max-w-prose font-body-md text-body-md text-on-surface-variant">
+        <p className="max-w-prose font-body-md text-body-md text-muted">
           Per-project overrides on top of the global policy. Empty fields
           inherit the global tier; non-empty lists / non-default toggles
           replace it. The form rewrites <code>policy.yaml</code> as clean YAML

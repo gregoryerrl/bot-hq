@@ -10,6 +10,7 @@ import { authorLabel, useParticipantLabels } from "../lib/participants";
 import { Skeleton } from "../components/ui/Skeleton";
 import { Button } from "../components/ui/Button";
 import { Chip, type ChipTone } from "../components/ui/Chip";
+import { SettingsPage } from "../components/ui/SettingsPage";
 
 // Human labels for the snake_case wire kinds (mirrors policy/violations.rs).
 const KIND_LABELS: Record<ViolationKind, string> = {
@@ -57,13 +58,13 @@ export function ViolationsPanel() {
   }, [data, kind, outcome, session]);
 
   return (
-    <div className="mx-auto h-full max-w-5xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Enforcement Log
           </h2>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
             Every policy gate that fired — push / force-push approvals,
             commit-word blocks, gated commands, and policy-file changes. Read
             from <code>.local/violations.jsonl</code>; the full audit trail,
@@ -196,7 +197,7 @@ export function ViolationsPanel() {
           {rows.length} of {data.length} event{data.length === 1 ? "" : "s"}
         </p>
       ) : null}
-    </div>
+    </SettingsPage>
   );
 }
 

@@ -25,6 +25,7 @@ import {
 import { EDIT_FILES } from "../lib/participants";
 import { fieldClass } from "../components/ui/field";
 import { SaveStateChip } from "../components/ui/Chip";
+import { SETTINGS_PAGE_COLUMN } from "../components/ui/SettingsPage";
 
 /**
  * The participation modes the picker OFFERS — **two, and both of them do
@@ -153,13 +154,13 @@ export function RolesPanel() {
   }, [creating, selected, roles]);
 
   return (
-    <div className="mx-auto flex h-full max-w-7xl flex-col overflow-hidden px-6 py-6">
+    <div className={cn("flex h-full flex-col overflow-hidden", SETTINGS_PAGE_COLUMN)}>
       <div className="mb-4 flex shrink-0 items-start justify-between gap-4">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Roles
           </h2>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
             A role is a template a session's participants are invited from: the
             instruction it runs with, what it is allowed to do, and the model it
             defaults to. A session picks its participants from the roles you

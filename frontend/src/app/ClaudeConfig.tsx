@@ -445,7 +445,7 @@ function PaneHeader({
       <h2 className="font-headline-md text-headline-md text-on-surface">
         {title}
       </h2>
-      <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+      <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
         {blurb}
       </p>
     </div>
