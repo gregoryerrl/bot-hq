@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
+import { fieldClass } from "./ui/field";
 
 /** Shape ChoicePrompt renders — a pending question row. Hand-defined (not a
  *  generated binding) because it's built frontend-side from a durable
@@ -86,7 +87,7 @@ export function ChoicePrompt({
             onOther(choice.choice_id, e.target.value);
           }}
           placeholder="Other — type a custom answer; it sends with your message…"
-          className="w-full rounded border border-outline/40 bg-surface px-2 py-1 font-code-sm text-xs text-on-surface placeholder:text-on-surface-variant/70 focus:border-secondary focus:outline-none"
+          className={fieldClass}
         />
         {/* One-click "I answered this in my message" (Batch 9 T3, dissect
             #18): prose answers used to leave the row pending until the AGENT

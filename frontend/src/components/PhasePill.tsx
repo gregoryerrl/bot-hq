@@ -35,7 +35,7 @@ export function PhasePill({ phase, selected, onSelect }: PhasePillProps) {
       aria-selected={selected}
       onClick={() => onSelect(phase)}
       className={cn(
-        "inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-semibold uppercase",
+        "inline-flex items-center gap-1 rounded px-2 py-1 font-label-caps text-label-caps uppercase",
         "border-t-2",
         // The accent is the SELECTED pill's (round 12). `cn` is clsx, not
         // tailwind-merge: with the tint and `text-on-surface-variant` both on

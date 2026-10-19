@@ -16,7 +16,7 @@ export function Card({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
 export function CardTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
   return (
     <h3
-      className={cn("text-sm font-semibold tracking-tight text-on-surface", className)}
+      className={cn("font-body-md text-body-md font-semibold tracking-tight text-on-surface", className)}
       {...props}
     />
   );
@@ -27,6 +27,6 @@ export function CardDescription({
   ...props
 }: HTMLAttributes<HTMLParagraphElement>) {
   return (
-    <p className={cn("text-xs text-on-surface-variant mt-1", className)} {...props} />
+    <p className={cn("mt-1 font-body-md text-body-md text-muted", className)} {...props} />
   );
 }

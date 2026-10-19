@@ -695,7 +695,7 @@ export function ChatInput({
       )}
       {paused && (
         <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
-          <span className="flex-1 text-xs text-on-surface-variant">
+          <span className="flex-1 font-code-sm text-code-sm text-muted">
             <span className="font-semibold text-on-surface">
               <PauseIcon className="mr-1 inline-block size-3 align-middle" />
               Paused
@@ -772,7 +772,7 @@ export function ChatInput({
                     // the container scrolls sideways — which the pair above
                     // now clips into invisibility rather than fixing.
                     className={cn(
-                      "flex w-full min-w-0 items-baseline gap-2 px-3 py-1.5 text-left text-sm",
+                      "flex w-full min-w-0 items-baseline gap-2 px-3 py-1.5 text-left font-body-md text-body-md",
                       m.key === active?.key
                         ? "bg-surface-container-high text-on-surface"
                         : "text-on-surface-variant",
@@ -786,7 +786,7 @@ export function ChatInput({
                     >
                       {m.label}
                     </span>
-                    <span className="shrink-0 font-code-sm text-xs opacity-60">
+                    <span className="shrink-0 font-code-sm text-code-sm opacity-60">
                       {token?.sigil}
                       {m.key}
                     </span>
@@ -809,7 +809,7 @@ export function ChatInput({
             className={cn(
               "pointer-events-none absolute inset-0 overflow-hidden",
               "whitespace-pre-wrap break-words rounded border border-transparent",
-              "bg-surface-container px-2.5 py-1.5 text-sm text-transparent",
+              "bg-surface-container px-2.5 py-1.5 font-body-md text-body-md text-transparent",
               staged && "opacity-80",
             )}
           >
@@ -899,7 +899,7 @@ export function ChatInput({
           />
         </div>
         <div className="flex items-center gap-2">
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-on-surface-variant">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-0.5 font-code-sm text-code-sm text-muted">
             {locked ? (
               <TurnStatus
                 activity={activity}

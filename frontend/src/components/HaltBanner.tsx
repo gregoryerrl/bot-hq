@@ -255,7 +255,7 @@ export function HaltBanner({
         aria-label="Questions in the tray"
         className="border-b border-outline-variant bg-surface-container-low px-3 py-1.5"
       >
-        <Button variant="link" onClick={onOpenTray} className="text-xs">
+        <Button variant="link" onClick={onOpenTray} className="font-code-sm text-code-sm">
           {`◆ ${choices.length} question${choices.length > 1 ? "s" : ""} in the tray — the session keeps working →`}
         </Button>
       </div>
@@ -283,7 +283,7 @@ export function HaltBanner({
               <PauseIcon className="mr-1 inline-block size-3 align-middle" />
               TEMPORARY HALT
             </span>
-            <span className="text-xs text-on-surface-variant">
+            <span className="font-code-sm text-code-sm text-muted">
               {wakeAtMs - now > 0
                 ? `wakes in ${countdownLabel(wakeAtMs, now)} — the session resumes on its own; answer to cut it short`
                 : "waking…"}
@@ -295,7 +295,7 @@ export function HaltBanner({
               <PauseIcon className="mr-1 inline-block size-3 align-middle" />
               HALT
             </span>
-            <span className="text-xs text-on-surface-variant">
+            <span className="font-code-sm text-code-sm text-muted">
               {/* rc3 D35 made "waiting on you" literal: a declared halt stops the
                   ring where it stands — nobody keeps working under this header. */}
               the session is waiting on you
@@ -307,7 +307,7 @@ export function HaltBanner({
           D35) — a later declaration replaces the earlier, so the freshest recap
           is always the one on screen. */}
       {activeHalt && (
-        <div className="mt-1 text-sm text-on-surface">
+        <div className="mt-1 font-body-md text-body-md text-on-surface">
           <span
             className={cn(
               "font-semibold",
@@ -343,7 +343,7 @@ export function HaltBanner({
             <Button
               variant="link"
               onClick={() => setExpanded((v) => !v)}
-              className="mt-0.5 text-xs"
+              className="mt-0.5 font-code-sm text-code-sm"
             >
               {expanded ? "show less" : "show the full recap"}
             </Button>
@@ -351,7 +351,7 @@ export function HaltBanner({
         </div>
       )}
       {choices.length > 0 && (
-        <Button variant="link" onClick={onOpenTray} className="mt-1 text-xs">
+        <Button variant="link" onClick={onOpenTray} className="mt-1 font-code-sm text-code-sm">
           {`${choices.length} question${choices.length > 1 ? "s" : ""} in the tray →`}
         </Button>
       )}

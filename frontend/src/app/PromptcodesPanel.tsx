@@ -98,7 +98,7 @@ export function PromptcodesPanel() {
         <h2 className="font-headline-lg text-headline-lg text-on-surface">
           Promptcodes
         </h2>
-        <p className="mt-1 text-sm text-on-surface-variant">
+        <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
           Type <code className="font-code-sm">/code</code> in a session composer —
           the token stays visible in the box and expands to the full prompt
           when the message sends. Backticks escape it:{" "}
@@ -125,7 +125,7 @@ export function PromptcodesPanel() {
                   className="rounded border border-outline-variant bg-surface-container-low p-3"
                 >
                   <div className="flex items-center gap-2">
-                    <span className="font-code-sm text-sm text-on-surface-variant">
+                    <span className="font-code-sm text-code-sm text-on-surface-variant">
                       /
                     </span>
                     <Input
@@ -161,7 +161,7 @@ export function PromptcodesPanel() {
               ))}
             </ul>
             {rows.length === 0 && (
-              <p className="mt-4 text-sm text-on-surface-variant">
+              <p className="mt-4 font-body-md text-body-md text-muted">
                 No promptcodes yet — add one below.
               </p>
             )}

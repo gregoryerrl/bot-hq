@@ -50,7 +50,7 @@ export function ActionItemsPanel() {
     >
       <div className="mb-1 flex items-baseline gap-2">
         <h3 className="font-label-caps text-label-caps text-tertiary">Your action items</h3>
-        <span className="text-xs text-on-surface-variant">
+        <span className="font-code-sm text-code-sm text-muted">
           {items.length === 1 ? "1 document an agent left for you to act on" : `${items.length} documents agents left for you to act on`}
         </span>
       </div>
@@ -58,20 +58,20 @@ export function ActionItemsPanel() {
         {items.map((item) => {
           const key = `${item.session_id}/${item.slug}`;
           return (
-            <li key={key} className="flex items-center gap-3 py-1.5 text-sm">
+            <li key={key} className="flex items-center gap-3 py-1.5 font-body-md text-body-md">
               <div className="min-w-0 flex-1">
                 <div className="flex items-baseline gap-2">
-                  <code className="font-code-sm text-xs text-on-surface">{item.slug}</code>
-                  <span className="truncate text-xs text-on-surface-variant" title={item.session_title}>
+                  <code className="font-code-sm text-code-sm text-on-surface">{item.slug}</code>
+                  <span className="truncate font-code-sm text-code-sm text-muted" title={item.session_title}>
                     {item.session_title}
                     {item.session_closed_at ? " · closed" : ""}
                   </span>
-                  <span className="shrink-0 text-xs text-on-surface-variant">
+                  <span className="shrink-0 font-code-sm text-code-sm text-muted">
                     {formatRelative(item.updated_at)}
                   </span>
                 </div>
                 {item.preview && (
-                  <p className="truncate text-xs text-on-surface-variant">{item.preview}</p>
+                  <p className="truncate font-code-sm text-code-sm text-muted">{item.preview}</p>
                 )}
               </div>
               <Button size="sm" variant="secondary" onClick={() => navigate(`/sessions/${item.session_id}?doc=${encodeURIComponent(item.slug)}`)}>
@@ -84,7 +84,7 @@ export function ActionItemsPanel() {
           );
         })}
       </ul>
-      {error && <p className="mt-1 text-xs text-error">{error}</p>}
+      {error && <p className="mt-1 font-code-sm text-code-sm text-error">{error}</p>}
     </section>
   );
 }

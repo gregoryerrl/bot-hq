@@ -67,7 +67,7 @@ export function ScheduledRuns({
         return (
           <div
             key={row.choice_id}
-            className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5 text-xs"
+            className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5 font-code-sm text-code-sm"
           >
             <span className="inline-flex items-center gap-1 font-label-caps text-label-caps text-tertiary">
               <ClockIcon className="size-3" />
@@ -95,7 +95,7 @@ export function ScheduledRuns({
           </div>
         );
       })}
-      {error && <p className="mt-1 text-xs text-error">{error}</p>}
+      {error && <p className="mt-1 font-code-sm text-code-sm text-error">{error}</p>}
       <ConfirmDialog
         open={confirming !== null}
         title="Cancel this scheduled run?"
