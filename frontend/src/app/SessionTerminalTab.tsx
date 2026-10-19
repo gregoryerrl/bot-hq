@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { errorMessage } from "../hooks/useInvoke";
 import type { TerminalOpenView } from "../lib/bindings";
+import { XTERM_THEME } from "../lib/xtermTheme";
 
 // ============================================================================
 // SessionTerminalTab — the session container's "Terminal" subtab: an xterm.js
@@ -20,14 +21,6 @@ import type { TerminalOpenView } from "../lib/bindings";
 // keystrokes go out through `terminal_input`; the fit addon reports geometry
 // via `terminal_resize`.
 // ============================================================================
-
-/** Matches the Industrial-Terminal palette (tailwind.config theme colors). */
-const XTERM_THEME = {
-  background: "#0b1326", // surface
-  foreground: "#dae2fd", // on-surface
-  cursor: "#dae2fd",
-  selectionBackground: "#2d3449", // surface-container-highest
-};
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
