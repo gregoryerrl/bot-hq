@@ -18,6 +18,7 @@ import { PolicyForm } from "../components/PolicyForm";
 import { SegToggle } from "../components/ui/SegToggle";
 import { Button } from "../components/ui/Button";
 import { fieldClass } from "../components/ui/field";
+import { Chip } from "../components/ui/Chip";
 
 /** A CL file is a project policy blueprint when its basename is `policy.yaml`. */
 function isPolicyFile(filePath: string): boolean {
@@ -525,12 +526,9 @@ function EditorPane({
             </span>
           )}
           {dirty && (
-            <span
-              className="rounded border border-warning/40 bg-warning/15 px-2 py-0.5 font-label-caps text-label-caps text-warning"
-              title="Unsaved edits"
-            >
+            <Chip tone="warning" title="Unsaved edits">
               UNSAVED CHANGES
-            </span>
+            </Chip>
           )}
           <Button
             variant="secondary"

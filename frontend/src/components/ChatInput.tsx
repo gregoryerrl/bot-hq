@@ -16,6 +16,7 @@ import {
   tokenSegments,
 } from "../lib/tokenExpand";
 import { CheckIcon, PauseIcon } from "./icons";
+import { Chip } from "./ui/Chip";
 
 /** One participant the `@` picker can insert (rc3 D17). */
 type Mentionable = {
@@ -919,12 +920,9 @@ export function ChatInput({
               </span>
             )}
             {stagedAnswers > 0 && (
-              <span
-                className="whitespace-nowrap rounded bg-primary/15 px-1.5 py-0.5 font-code-sm text-code-sm text-primary"
-                title="Staged tray answers — they travel with this response as one Send"
-              >
+              <Chip tone="primary" title="Staged tray answers — they travel with this response as one Send">
                 +{stagedAnswers} answer{stagedAnswers > 1 ? "s" : ""}
-              </span>
+              </Chip>
             )}
           </div>
           {locked ? (

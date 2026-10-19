@@ -1,5 +1,5 @@
-import { cn } from "../lib/cn";
 import type { ParticipantView } from "../lib/participants";
+import { Chip } from "./ui/Chip";
 
 /**
  * What a participant was actually spawned with — its effort posture, or
@@ -82,13 +82,9 @@ export function SpawnBadge({
   const chosen = ultracode ? p.ultracode !== null : p.effort !== null;
 
   return (
-    <span
-      className={cn(
-        "ml-1 rounded border px-1.5 py-0.5 font-label-caps text-label-caps",
-        chosen
-          ? "border-primary/50 bg-primary/15 text-primary"
-          : "border-outline-variant text-on-surface-variant",
-      )}
+    <Chip
+      tone={chosen ? "primary" : "neutral"}
+      className="ml-1"
       title={
         chosen
           ? `Spawned with ${text} — picked for this session.`
@@ -96,6 +92,6 @@ export function SpawnBadge({
       }
     >
       {text}
-    </span>
+    </Chip>
   );
 }

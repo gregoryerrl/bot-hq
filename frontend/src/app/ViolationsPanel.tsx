@@ -6,10 +6,10 @@ import type {
   ViolationRecord,
 } from "../lib/bindings";
 import { formatTimestamp } from "../lib/time";
-import { cn } from "../lib/cn";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
 import { Skeleton } from "../components/ui/Skeleton";
 import { Button } from "../components/ui/Button";
+import { Chip, type ChipTone } from "../components/ui/Chip";
 
 // Human labels for the snake_case wire kinds (mirrors policy/violations.rs).
 const KIND_LABELS: Record<ViolationKind, string> = {
@@ -23,12 +23,11 @@ const KIND_LABELS: Record<ViolationKind, string> = {
   findings: "Review findings",
 };
 
-const OUTCOME_CLS: Record<ViolationOutcome, string> = {
-  approved: "border-success/40 bg-success/15 text-success",
-  denied: "border-error/40 bg-error/15 text-error",
-  abandoned: "border-warning/40 bg-warning/15 text-warning",
-  detected:
-    "border-outline-variant bg-surface-container text-on-surface-variant",
+const OUTCOME_TONE: Record<ViolationOutcome, ChipTone> = {
+  approved: "success",
+  denied: "error",
+  abandoned: "warning",
+  detected: "neutral",
 };
 
 /**
@@ -173,14 +172,9 @@ export function ViolationsPanel() {
                     {KIND_LABELS[r.kind] ?? r.kind}
                   </td>
                   <td className="px-3 py-2">
-                    <span
-                      className={cn(
-                        "rounded border px-1.5 py-0.5 font-label-caps text-label-caps capitalize",
-                        OUTCOME_CLS[r.outcome],
-                      )}
-                    >
+                    <Chip tone={OUTCOME_TONE[r.outcome]} className="capitalize">
                       {r.outcome}
-                    </span>
+                    </Chip>
                   </td>
                   <td className="px-3 py-2 text-on-surface">
                     <span className="break-all">{r.action}</span>

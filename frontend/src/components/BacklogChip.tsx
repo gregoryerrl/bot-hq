@@ -1,3 +1,5 @@
+import { Chip } from "./ui/Chip";
+
 /** One participant's delivery lag (WS1c, 2026-08-27) — the visibility half of
  *  the anti-starvation work. Hand-defined mirror of the Rust
  *  `ParticipantBacklogView` (bindings.ts regenerates only at app launch). */
@@ -43,15 +45,12 @@ export function BacklogChip({
   const dealt =
     mins === undefined ? "never been dealt a turn" : `last dealt a turn ${mins}m ago`;
   return (
-    <span
-      className="ml-1 rounded border border-warning/50 bg-warning/15 px-1 py-px align-middle font-label-caps text-label-caps text-warning"
-      title={
+    <Chip tone="warning" size="sm" className="ml-1 align-middle" title={
         `${name} has ${backlog.undelivered_peer_texts} peer messages undelivered and has ` +
         `${dealt}. The ring serves it one turn on the next user message ` +
         `(anti-starvation summons); typing @${backlog.slug} summons it now.`
-      }
-    >
+      }>
       {backlog.undelivered_peer_texts} unread
-    </span>
+    </Chip>
   );
 }

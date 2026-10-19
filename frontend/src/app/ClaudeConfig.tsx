@@ -29,6 +29,7 @@ import type {
 } from "../lib/bindings";
 import { EFFORT_LEVELS } from "../lib/effort";
 import { fieldClass } from "../components/ui/field";
+import { Chip } from "../components/ui/Chip";
 
 // ============================================================================
 // Claude Config — the Settings subtab that surfaces the Claude Code config the
@@ -413,20 +414,14 @@ function InheritanceBadges({ inheritance }: { inheritance: Inheritance }) {
   return (
     <div className="flex flex-wrap items-center gap-1" title={inheritance.note}>
       {inheritance.inherited_by.map((a) => (
-        <span
-          key={`in-${a}`}
-          className="rounded border border-success/40 bg-success/10 px-1.5 py-0.5 font-label-caps text-label-caps capitalize text-success"
-        >
+        <Chip tone="success" className="capitalize" key={`in-${a}`}>
           {a} inherits
-        </span>
+        </Chip>
       ))}
       {inheritance.skipped_by.map((a) => (
-        <span
-          key={`sk-${a}`}
-          className="rounded border border-outline-variant/50 bg-surface-container px-1.5 py-0.5 font-label-caps text-label-caps capitalize text-on-surface-variant"
-        >
+        <Chip tone="neutral" className="capitalize" key={`sk-${a}`}>
           {a} skips
-        </span>
+        </Chip>
       ))}
       {inheritance.inherited_by.length === 0 &&
         inheritance.skipped_by.length === 0 && (
@@ -730,9 +725,9 @@ function SkillsPane({
                         {s.name}
                       </span>
                       {s.disable_model_invocation && (
-                        <span className="rounded border border-outline-variant/50 px-1 font-label-caps text-label-caps text-on-surface-variant">
+                        <Chip tone="neutral" size="sm">
                           frontmatter: manual-only
-                        </span>
+                        </Chip>
                       )}
                     </div>
                     {s.description && (
@@ -881,13 +876,13 @@ function McpPane({
                       <span className="font-code-sm text-code-sm text-on-surface">
                         {m.name}
                       </span>
-                      <span className="rounded border border-outline-variant/50 px-1 font-label-caps text-label-caps text-on-surface-variant">
+                      <Chip tone="neutral" size="sm">
                         {m.transport}
-                      </span>
+                      </Chip>
                       {!m.effective && (
-                        <span className="rounded border border-warning/40 bg-warning/10 px-1 font-label-caps text-label-caps text-warning">
+                        <Chip tone="warning" size="sm">
                           ignored by claude-code
-                        </span>
+                        </Chip>
                       )}
                     </div>
                     <div className="truncate font-label-caps text-label-caps text-on-surface-variant" title={m.detail}>
@@ -895,9 +890,9 @@ function McpPane({
                     </div>
                   </div>
                   {m.reserved_filtered ? (
-                    <span className="shrink-0 rounded border border-outline-variant/50 px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant">
+                    <Chip tone="neutral">
                       always filtered
-                    </span>
+                    </Chip>
                   ) : (
                     <select
                       className={selectClass}

@@ -18,6 +18,7 @@ import { HealthDot } from "./HealthDot";
 import { authorColorClass } from "./authorColor";
 import { WarnIcon } from "./icons";
 import { authorLabel } from "../lib/participants";
+import { Chip } from "./ui/Chip";
 
 interface SessionTileProps {
   session: SessionInfo;
@@ -124,20 +125,14 @@ function SessionTileImpl({
               />
             )}
             {!closed && attention === ATTENTION_IDLE_UNFLAGGED && (
-              <span
-                className="shrink-0 rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"
-                title={ATTENTION_IDLE_TOOLTIP}
-              >
+              <Chip tone="warning" title={ATTENTION_IDLE_TOOLTIP}>
                 {ATTENTION_IDLE_LABEL}
-              </span>
+              </Chip>
             )}
             {!session.multi_participant && (
-              <span
-                className="shrink-0 rounded border border-primary/40 bg-primary/15 px-1.5 py-0.5 font-label-caps text-label-caps text-primary"
-                title="One participant — this session runs a single agent"
-              >
+              <Chip tone="primary" title="One participant — this session runs a single agent">
                 SOLO
-              </span>
+              </Chip>
             )}
           </div>
           <RelativeTime

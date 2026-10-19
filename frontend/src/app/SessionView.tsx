@@ -59,6 +59,7 @@ import { SessionContextTab } from "./SessionContextTab";
 import { SessionTerminalTab } from "./SessionTerminalTab";
 import { invoke } from "@tauri-apps/api/core";
 import { shortSessionId } from "../lib/sessionId";
+import { Chip } from "../components/ui/Chip";
 
 
 /** Session-container subtabs. Workspace = chat + IPAV documents (the
@@ -811,12 +812,9 @@ export function SessionView() {
             {attention === ATTENTION_IDLE_UNFLAGGED && (
               <>
                 <span className="mx-2 text-outline-variant">·</span>
-                <span
-                  className="rounded border border-warning/50 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning"
-                  title={ATTENTION_IDLE_TOOLTIP}
-                >
+                <Chip tone="warning" title={ATTENTION_IDLE_TOOLTIP}>
                   {ATTENTION_IDLE_LABEL}
-                </span>
+                </Chip>
               </>
             )}
           </p>

@@ -37,6 +37,7 @@ import type {
 import { shortSessionId } from "../lib/sessionId";
 import { Skeleton } from "../components/ui/Skeleton";
 import { fieldClass } from "../components/ui/field";
+import { Chip } from "../components/ui/Chip";
 
 type SettingsSubTab =
   | "roles"
@@ -476,13 +477,10 @@ function WorktreeKeptBadge({ sessionId }: { sessionId: string }) {
   );
   if (!keptPath) return null;
   return (
-    <span
-      className="shrink-0 rounded border border-warning/40 bg-warning/15 px-2 py-0.5 font-label-caps text-label-caps text-warning"
-      title={`Worktree kept — may have uncommitted work: ${keptPath}`}
-    >
+    <Chip tone="warning" title={`Worktree kept — may have uncommitted work: ${keptPath}`}>
       <WarnIcon className="mr-1 inline-block size-3 align-middle" />
       Worktree kept
-    </span>
+    </Chip>
   );
 }
 

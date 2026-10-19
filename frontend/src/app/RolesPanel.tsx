@@ -6,7 +6,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 import { cn } from "../lib/cn";
 import { FieldLabel } from "./contextLibraryShared";
-import { CheckIcon, SaveIcon } from "../components/icons";
+import { SaveIcon } from "../components/icons";
 import type {
   AppError,
   CapabilityView,
@@ -24,6 +24,7 @@ import {
 } from "../lib/effort";
 import { EDIT_FILES } from "../lib/participants";
 import { fieldClass } from "../components/ui/field";
+import { SaveStateChip } from "../components/ui/Chip";
 
 /**
  * The participation modes the picker OFFERS — **two, and both of them do
@@ -575,16 +576,7 @@ function RoleForm({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {dirty && (
-            <span className="rounded border border-warning/40 bg-warning/15 px-1.5 py-0.5 font-label-caps text-label-caps text-warning">
-              Unsaved
-            </span>
-          )}
-          {saved && !dirty && (
-            <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
-              Saved <CheckIcon className="inline-block size-3 align-middle" />
-            </span>
-          )}
+          <SaveStateChip dirty={dirty} saved={saved} />
         </div>
       </div>
 

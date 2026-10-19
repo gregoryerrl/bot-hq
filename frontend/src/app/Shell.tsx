@@ -8,6 +8,7 @@ import { useHealthStore, appHealthSummary } from "../stores/health";
 import { useActivityStore, anyBusy } from "../stores/activity";
 import { useTauriQuery } from "../hooks/useInvoke";
 import type { BuildInfo, InstalledPluginView } from "../lib/bindings";
+import { Chip } from "../components/ui/Chip";
 
 // Topbar tabs for enabled plugins that contribute a panel (manifest
 // `slots[].panel_route`). The `plugin:*` events invalidate this query from
@@ -98,22 +99,24 @@ export function BuildStamp() {
         {tag && <span className="text-on-surface-variant"> · {tag}</span>}
       </span>
       {build?.exe_state === "changed" && (
-        <span
-          className="shrink-0 cursor-default rounded bg-warning/15 px-1.5 py-0.5 font-code-sm text-code-sm text-warning"
+        <Chip
+          tone="warning"
+          className="cursor-default"
           title="The program file changed since this app launched. Git hooks already run the new one; restart bot-hq to match it."
           data-testid="restart-pending"
         >
           restart pending
-        </span>
+        </Chip>
       )}
       {build?.exe_state === "missing" && (
-        <span
-          className="shrink-0 cursor-default rounded bg-error/15 px-1.5 py-0.5 font-code-sm text-code-sm text-error"
+        <Chip
+          tone="error"
+          className="cursor-default"
           title="The program file is gone (a cargo clean?). Git hooks cannot run it, so every commit fails until it is rebuilt. Rebuild, then restart."
           data-testid="rebuild-needed"
         >
           rebuild needed
-        </span>
+        </Chip>
       )}
     </div>
   );
