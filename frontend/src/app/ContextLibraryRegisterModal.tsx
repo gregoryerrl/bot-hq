@@ -5,6 +5,7 @@ import { baseName, pickFolder, terminalInputClass } from "./contextLibraryShared
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
 import { ChevronRightIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
 
 // ============================================================================
 // New-project modal — the primary "add a project" flow.
@@ -109,9 +110,6 @@ export function RegisterProjectModal({
     }
   };
 
-  const browseBtnClass =
-    "shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface";
-
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
@@ -161,15 +159,16 @@ export function RegisterProjectModal({
               placeholder="(where sessions run — leave blank for none)"
               className={terminalInputClass}
             />
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() =>
                 browse("Choose working repo", workingRepo, setWorkingRepo)
               }
-              className={browseBtnClass}
+              className="shrink-0"
             >
               Browse…
-            </button>
+            </Button>
           </div>
         </label>
 
@@ -214,15 +213,16 @@ export function RegisterProjectModal({
                   placeholder="(advanced — for a docs folder, not a code repo)"
                   className={terminalInputClass}
                 />
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() =>
                     browse("Choose CL content folder", clPath, setClPath)
                   }
-                  className={browseBtnClass}
+                  className="shrink-0"
                 >
                   Browse…
-                </button>
+                </Button>
               </div>
               <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
                 Indexes that folder's docs as this project's Context Library.
@@ -237,21 +237,17 @@ export function RegisterProjectModal({
         )}
 
         <div className="mt-4 flex items-center justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-outline-variant bg-transparent px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-          >
+          <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             disabled={busy || !effectiveName}
             onClick={submit}
-            className="rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
             {busy ? "Creating…" : useClPath ? "Index folder" : "Create"}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

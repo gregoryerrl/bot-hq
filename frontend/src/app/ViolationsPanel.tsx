@@ -9,6 +9,7 @@ import { formatTimestamp } from "../lib/time";
 import { cn } from "../lib/cn";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
 import { Skeleton } from "../components/ui/Skeleton";
+import { Button } from "../components/ui/Button";
 
 // Human labels for the snake_case wire kinds (mirrors policy/violations.rs).
 const KIND_LABELS: Record<ViolationKind, string> = {
@@ -70,13 +71,14 @@ export function ViolationsPanel() {
             newest first.
           </p>
         </div>
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => refetch()}
-          className="shrink-0 rounded border border-outline-variant px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+          className="shrink-0"
         >
           {isFetching ? "Refreshing…" : "Refresh"}
-        </button>
+        </Button>
       </div>
 
       <div className="mb-4 flex flex-wrap items-center gap-2">

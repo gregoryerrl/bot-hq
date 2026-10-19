@@ -415,14 +415,9 @@ function ModelDialog({
           <h2 className="font-headline-md text-headline-md text-on-surface">
             {title}
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            className="inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-          >
+          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
             <CloseIcon />
-          </button>
+          </Button>
         </div>
 
         {/* Two columns, as New session: the model — its id and context

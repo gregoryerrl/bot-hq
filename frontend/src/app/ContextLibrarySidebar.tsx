@@ -2,6 +2,7 @@ import { memo, useMemo, type MouseEvent, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { cn } from "../lib/cn";
 import { Skeleton } from "../components/ui/Skeleton";
+import { Button } from "../components/ui/Button";
 import type {
   ClIndexEntryView,
   ClRescanReportView,
@@ -38,14 +39,6 @@ const INDENT_PX = 12;
 // described folders) — lets the memoized tree map fall back without an inline
 // buildTree([], []) per such node. Never mutated (nodes only read it).
 const EMPTY_TREE: TreeNode = { name: "", path: "", folders: [], files: [] };
-
-// Icon-only header action. Color is applied per-button (cn is plain clsx —
-// conflicting text-* classes would both stick).
-const headerIconButtonClass = cn(
-  "inline-flex items-center justify-center rounded p-1 transition-colors",
-  "hover:bg-surface-container-high disabled:opacity-50",
-  "disabled:hover:bg-transparent",
-);
 
 // ============================================================================
 // WorkspaceSidebar (left ~240px) — "Library Tree"
@@ -185,44 +178,35 @@ export function WorkspaceSidebar({
         {/* New file/folder is created via right-click on a folder node (it
             needs the target folder + a name) — no header button for those. */}
         <div className="flex items-center gap-1">
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onCollapseAll}
             disabled={projectCount === 0}
             aria-label="Collapse all folders"
             title="Collapse all folders"
-            className={cn(
-              headerIconButtonClass,
-              "text-on-surface-variant hover:text-on-surface",
-            )}
           >
             <CollapseAllIcon />
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onRescan}
             disabled={rescanning || projectCount === 0}
             aria-label="Rescan all projects"
             title="Rescan all projects"
-            className={cn(
-              headerIconButtonClass,
-              "text-on-surface-variant hover:text-on-surface",
-            )}
           >
             <RefreshIcon className={rescanning ? "animate-spin" : undefined} />
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={onRequestRegister}
             aria-label="Register project"
             title="Register an on-disk folder as a Context Library project"
-            className={cn(
-              headerIconButtonClass,
-              "text-on-surface-variant hover:text-on-surface",
-            )}
           >
             <PlusIcon />
-          </button>
+          </Button>
         </div>
       </header>
 

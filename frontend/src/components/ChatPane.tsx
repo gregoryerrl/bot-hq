@@ -17,6 +17,7 @@ import { authorLabel, useParticipantLabels } from "../lib/participants";
 import { compactRows } from "../lib/chatRows";
 import type { AgentMessage } from "../lib/bindings";
 import { SkipIcon } from "./icons";
+import { Button } from "./ui/Button";
 
 // Stable reference so the zustand selector doesn't return a fresh array per
 // call (would trigger infinite re-renders via Object.is).
@@ -212,14 +213,14 @@ export function ChatPane({
         <>
         {mayHaveOlder && (
           <div className="mb-2 flex justify-center">
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => void loadOlder()}
               disabled={loadingOlder}
-              className="rounded border border-outline-variant px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface disabled:opacity-60"
             >
               {loadingOlder ? "Loading older…" : `Load ${CHAT_PAGE} older`}
-            </button>
+            </Button>
           </div>
         )}
         <div

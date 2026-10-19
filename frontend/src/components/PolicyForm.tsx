@@ -234,15 +234,16 @@ function StringList({
             onChange={(e) => replaceAt(i, e.target.value)}
             className={cn(terminalInputClass, "flex-1")}
           />
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={disabled}
             onClick={() => removeAt(i)}
             aria-label="Remove entry"
-            className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+            className="shrink-0"
           >
             <CloseIcon className="size-3.5" />
-          </button>
+          </Button>
         </div>
       ))}
       <div>

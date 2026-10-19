@@ -6,6 +6,7 @@ import type { ClRescanReportView, ProjectView } from "../lib/bindings";
 import { MeasurementView } from "./MeasurementView";
 import { RegisterProjectModal } from "./ContextLibraryRegisterModal";
 import { RefreshIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
 
 // ============================================================================
 // ContextManager — the management half of the Context Library: a per-project
@@ -89,13 +90,14 @@ export function ContextManager() {
           )}
         </div>
         <div className="border-t border-outline-variant p-2">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="md"
             onClick={() => setRegisterOpen(true)}
-            className="w-full rounded border border-outline-variant px-2 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+            className="w-full"
           >
             + Register project
-          </button>
+          </Button>
         </div>
       </aside>
 
@@ -123,19 +125,19 @@ export function ContextManager() {
                     {rescanSummary}
                   </span>
                 )}
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={handleRescan}
                   disabled={rescanning}
                   aria-label={`Rescan ${activeProject.name}`}
                   title={`Rescan ${activeProject.name}`}
-                  className="inline-flex items-center gap-1.5 rounded border border-outline-variant px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
                 >
                   <RefreshIcon
                     className={rescanning ? "animate-spin" : undefined}
                   />
                   Rescan
-                </button>
+                </Button>
               </div>
             </header>
 

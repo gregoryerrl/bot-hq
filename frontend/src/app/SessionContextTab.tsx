@@ -12,6 +12,7 @@ import type {
 import { buildTree, type TreeNode } from "./contextLibraryShared";
 import { FileIcon, FolderIcon } from "../components/icons";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Button } from "../components/ui/Button";
 import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 
 // ============================================================================
@@ -274,19 +275,15 @@ function LeanFileEditor({
             read-only
           </span>
         ) : (
-          <button
-            type="button"
+          <Button
+            variant={dirty ? "primary" : "secondary"}
+            size="sm"
             disabled={!dirty || saving}
             onClick={onSave}
-            className={cn(
-              "shrink-0 rounded border px-2 py-1 font-code-sm text-code-sm transition-colors",
-              dirty
-                ? "border-primary/50 text-primary hover:bg-primary/10"
-                : "border-outline-variant text-on-surface-variant opacity-50",
-            )}
+            className="shrink-0"
           >
             {saving ? "Saving…" : "Save"}
-          </button>
+          </Button>
         )}
       </div>
       {saveError && (

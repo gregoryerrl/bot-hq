@@ -8,6 +8,7 @@ import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
 import { fileArgInCommand } from "./FileViewerDialog";
 import { ChevronDownIcon, ChevronRightIcon, WarnIcon } from "./icons";
+import { Button } from "./ui/Button";
 
 interface ChatMessageProps {
   message: AgentMessage;
@@ -228,14 +229,14 @@ function ToolMessage({
         </span>
       </button>
       {viewablePath && onViewFile && (
-        <button
-          type="button"
+        <Button
+          variant="link"
           onClick={() => onViewFile(viewablePath)}
-          className="mt-0.5 font-code-sm text-code-sm text-primary hover:underline"
+          className="mt-0.5 font-code-sm text-code-sm"
           title={viewablePath}
         >
           View {viewablePath.split("/").pop()}
-        </button>
+        </Button>
       )}
       {expanded && (
         <pre className="mt-1 whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm leading-relaxed text-on-surface">

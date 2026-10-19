@@ -497,8 +497,6 @@ function DocArticle({
       setMarking(false);
     }
   };
-  const pill =
-    "rounded border border-outline-variant bg-transparent px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50";
   return (
     <article className="mb-6">
       <header className="mb-2 flex items-center justify-between gap-2">
@@ -515,59 +513,61 @@ function DocArticle({
                 >
                   Done · {formatTimestamp(doc.dismissed_at ?? "")}
                 </span>
-                <button
-                  type="button"
+                <Button
+                  variant="secondary"
+                  size="sm"
                   onClick={() => setDone(false)}
                   disabled={marking}
                   title="Put this back on your action items"
-                  className={pill}
                 >
                   Undo
-                </button>
+                </Button>
               </>
             ) : (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={() => setDone(true)}
                 disabled={marking}
                 title="Done with it — takes it off your action items"
-                className={cn(pill, "border-tertiary/60 text-tertiary")}
+                tone="tertiary"
               >
                 Mark done
-              </button>
+              </Button>
             ))}
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={() => onSummarize(doc.slug)}
             disabled={loading}
             title="Summarize this document (TL;DR) with a background model"
-            className={pill}
           >
             {loading ? "…" : "TL;DR"}
-          </button>
+          </Button>
           {editable && !editing && (
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => {
                 setDraft(doc.body);
                 setEditing(true);
               }}
               title="Edit this document"
-              className={pill}
             >
               Edit
-            </button>
+            </Button>
           )}
           {onDelete && !editing && (
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="icon"
               onClick={onDelete}
               title="Delete this document"
               aria-label={`Delete ${doc.slug}`}
-              className={cn(pill, "hover:text-on-error-container")}
+              className="hover:text-on-error-container"
             >
               <TrashIcon className="h-3 w-3" />
-            </button>
+            </Button>
           )}
           <span
             className="font-code-sm text-code-sm text-on-surface-variant"
@@ -740,13 +740,9 @@ function SummaryDialog({
           )}
         </div>
         <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-outline-variant bg-surface-container-high px-3 py-1.5 text-sm text-on-surface transition-colors hover:bg-surface-container-highest"
-          >
+          <Button variant="secondary" size="md" onClick={onClose}>
             Close
-          </button>
+          </Button>
         </div>
       </div>
     </>
@@ -802,14 +798,15 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
       <header className="flex items-center justify-between gap-2 border-b border-outline-variant px-3 py-1.5 font-label-caps text-label-caps text-on-surface-variant">
         <span>git diff{diff.note ? ` — ${diff.note}` : ""}</span>
         {groups.length > 1 && (
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={toggleAll}
-            className="shrink-0 rounded border border-outline-variant px-1.5 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+            className="shrink-0"
             title={allClosed ? "Expand all files" : "Collapse all files"}
           >
             {allClosed ? "Expand all" : "Collapse all"}
-          </button>
+          </Button>
         )}
       </header>
       <div className="divide-y divide-outline-variant">
@@ -1124,15 +1121,16 @@ function TrayChoice({
         <span className="font-code-sm text-code-sm text-on-surface-variant">
           {askedByLabel}
         </span>
-        <button
-          type="button"
+        <Button
+          variant="ghost"
+          size="icon"
           onClick={onDiscard}
           aria-label="Discard this card without answering"
           title="Discard — removes it from your tray; nothing is sent to the agent"
-          className="ml-auto rounded p-1 text-on-surface-variant transition-colors hover:bg-error-container/30 hover:text-error"
+          className="ml-auto hover:text-error"
         >
           <TrashIcon />
-        </button>
+        </Button>
       </div>
       {entry.command_text && (
         <div className="mb-1">
@@ -1193,16 +1191,16 @@ function TrayChoice({
         <div className="mb-1 flex flex-wrap items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant">
           <span>Named here:</span>
           {docLinks.map((slug) => (
-            <button
+            <Button
               key={slug}
-              type="button"
+              variant="secondary"
+              size="sm"
               data-testid="tray-doc-link"
               onClick={() => onOpenDoc(slug)}
-              className="rounded border border-outline-variant px-1.5 py-0.5 font-code-sm text-on-surface hover:bg-surface-container-high"
               title={`Open the session document ${slug}`}
             >
               {slug}
-            </button>
+            </Button>
           ))}
         </div>
       )}
@@ -1225,13 +1223,9 @@ function TrayChoice({
           </span>
           <span>sends with your message</span>
           {onUnstage && (
-            <button
-              type="button"
-              onClick={onUnstage}
-              className="underline underline-offset-2 hover:text-on-surface"
-            >
+            <Button variant="link" tone="inherit" onClick={onUnstage}>
               undo
-            </button>
+            </Button>
           )}
         </div>
       )}

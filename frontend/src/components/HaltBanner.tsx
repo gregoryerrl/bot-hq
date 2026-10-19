@@ -4,6 +4,7 @@ import { cn } from "../lib/cn";
 import { parseUtcMs } from "../lib/time";
 import { authorColorClass } from "./authorColor";
 import { PauseIcon } from "./icons";
+import { Button } from "./ui/Button";
 
 /** One pending tray row, as `list_session_tray` returns it. */
 export type TrayRow = {
@@ -254,13 +255,9 @@ export function HaltBanner({
         aria-label="Questions in the tray"
         className="border-b border-outline-variant bg-surface-container-low px-3 py-1.5"
       >
-        <button
-          type="button"
-          onClick={onOpenTray}
-          className="text-xs text-primary underline underline-offset-2"
-        >
+        <Button variant="link" onClick={onOpenTray} className="text-xs">
           {`◆ ${choices.length} question${choices.length > 1 ? "s" : ""} in the tray — the session keeps working →`}
-        </button>
+        </Button>
       </div>
     );
   }
@@ -343,24 +340,20 @@ export function HaltBanner({
             {activeHalt.reason}
           </span>
           {(recapOverflows(activeHalt.reason) || measuredOverflow) && (
-            <button
-              type="button"
+            <Button
+              variant="link"
               onClick={() => setExpanded((v) => !v)}
-              className="mt-0.5 text-xs text-primary underline underline-offset-2"
+              className="mt-0.5 text-xs"
             >
               {expanded ? "show less" : "show the full recap"}
-            </button>
+            </Button>
           )}
         </div>
       )}
       {choices.length > 0 && (
-        <button
-          type="button"
-          onClick={onOpenTray}
-          className="mt-1 text-xs text-primary underline underline-offset-2"
-        >
+        <Button variant="link" onClick={onOpenTray} className="mt-1 text-xs">
           {`${choices.length} question${choices.length > 1 ? "s" : ""} in the tray →`}
-        </button>
+        </Button>
       )}
       <p className="mt-1 font-code-sm text-code-sm text-muted">
         {/* An approval has TAKEN the input box (rc3 D33), so "answer here"

@@ -531,15 +531,15 @@ function EditorPane({
               UNSAVED CHANGES
             </span>
           )}
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="md"
             onClick={() => setShowMetadata((v) => !v)}
             title={
               showMetadata
                 ? "Hide CL index metadata"
                 : "Edit CL index metadata (description + tags)"
             }
-            className="inline-flex items-center gap-1.5 rounded border border-outline-variant bg-transparent px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
           >
             {showMetadata ? "Hide metadata" : "Edit metadata"}
             {!showMetadata && metadataDirty && (
@@ -548,7 +548,7 @@ function EditorPane({
                 aria-label="unsaved metadata edits"
               />
             )}
-          </button>
+          </Button>
           <Button
             type="button"
             variant="primary"
@@ -571,12 +571,9 @@ function EditorPane({
       {saveError && (
         <p className="flex-shrink-0 border-b border-outline-variant px-4 py-1.5 font-code-sm text-code-sm text-error">
           Save failed: {saveError}{" "}
-          <button
-            onClick={() => setSaveError(null)}
-            className="underline hover:text-on-surface"
-          >
+          <Button variant="link" tone="inherit" onClick={() => setSaveError(null)}>
             dismiss
-          </button>
+          </Button>
         </p>
       )}
 
@@ -751,35 +748,32 @@ function DescriptionEditor({
       {error && (
         <p className="mt-2 font-code-sm text-code-sm text-error">
           Save failed: {error}{" "}
-          <button
-            onClick={() => setError(null)}
-            className="underline hover:text-on-error-container"
-          >
+          <Button variant="link" tone="inherit" onClick={() => setError(null)}>
             dismiss
-          </button>
+          </Button>
         </p>
       )}
       <div className="mt-3 flex items-center justify-end gap-2">
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           disabled={!dirty || saving}
           onClick={() => {
             setDesc(initial);
             setTagsStr(initialTagsStr);
             setError(null);
           }}
-          className="rounded border border-outline-variant bg-transparent px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
         >
           Reset
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="primary"
+          size="sm"
           disabled={!dirty || saving}
           onClick={handleSave}
-          className="rounded border border-outline-variant bg-surface-container-high px-3 py-1 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-container-highest disabled:opacity-50"
         >
           {saving ? "Saving…" : "Save metadata"}
-        </button>
+        </Button>
       </div>
     </div>
   );

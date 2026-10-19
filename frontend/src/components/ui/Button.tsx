@@ -3,10 +3,22 @@ import { cn } from "../../lib/cn";
 
 type Variant = "primary" | "secondary" | "ghost" | "danger" | "link";
 type Size = "sm" | "md" | "icon";
+type Tone = "inherit" | "success" | "warning" | "error" | "tertiary";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: Variant;
   size?: Size;
+  /**
+   * The label's colour, in place of the variant's own: a status colour on an
+   * outline (`success` on "Restart agents"), or `inherit` for a link inside a
+   * line that already has its colour (an error line's "dismiss").
+   *
+   * A prop, not a `className`: `cn` is plain clsx, so two text colours both
+   * land and the stylesheet's order decides — which follows the class NAMES,
+   * so `text-error` silently loses to the variant's `text-on-surface` while
+   * `text-success` happens to win (found migrating S2b's 72 buttons).
+   */
+  tone?: Tone;
 }
 
 /**
@@ -25,12 +37,30 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
  *   sits in a run of text at the text's size.
  */
 const variantClasses: Record<Variant, string> = {
-  primary: "border border-primary bg-primary text-on-primary hover:border-primary-fixed hover:bg-primary-fixed",
-  secondary: "border border-outline-variant bg-transparent text-on-surface hover:bg-surface-container-high",
-  ghost: "border border-transparent bg-transparent text-on-surface hover:bg-surface-container-high",
-  danger:
-    "border border-error-container bg-error-container text-on-error-container hover:border-error-container/80 hover:bg-error-container/80",
-  link: "text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary",
+  primary: "border border-primary bg-primary hover:border-primary-fixed hover:bg-primary-fixed",
+  secondary: "border border-outline-variant bg-transparent hover:bg-surface-container-high",
+  ghost: "border border-transparent bg-transparent hover:bg-surface-container-high",
+  danger: "border border-error-container bg-error-container hover:border-error-container/80 hover:bg-error-container/80",
+  // Dotted until hovered: a link may take any tone (`inherit` too), so its
+  // underline cannot be a fixed colour at partial strength.
+  link: "underline decoration-dotted underline-offset-2 hover:decoration-solid",
+};
+
+/** Each variant's own label colour, replaced whole by a `tone`. */
+const variantText: Record<Variant, string> = {
+  primary: "text-on-primary",
+  secondary: "text-on-surface",
+  ghost: "text-on-surface",
+  danger: "text-on-error-container",
+  link: "text-primary",
+};
+
+const toneText: Record<Tone, string> = {
+  inherit: "text-inherit",
+  success: "text-success",
+  warning: "text-warning",
+  error: "text-error",
+  tertiary: "text-tertiary",
 };
 
 /**
@@ -51,7 +81,7 @@ const sizeClasses: Record<Size, string> = {
  * Copy or Cancel means. Pass `type="submit"` for the one that should.
  */
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant = "secondary", size = "md", type = "button", ...props }, ref) => (
+  ({ className, variant = "secondary", size = "md", tone, type = "button", ...props }, ref) => (
     <button
       ref={ref}
       type={type}
@@ -61,6 +91,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           ? "inline rounded-sm"
           : cn("inline-flex items-center justify-center rounded", sizeClasses[size]),
         variantClasses[variant],
+        tone ? toneText[tone] : variantText[variant],
         className,
       )}
       {...props}

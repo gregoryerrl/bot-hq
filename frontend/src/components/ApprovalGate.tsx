@@ -160,14 +160,14 @@ export function ApprovalGate({
         <span className="text-xs text-on-surface-variant">
           {isClose ? "says the work is done — the session waits for your answer" : "is blocked until you answer"}
         </span>
-        <button
-          type="button"
+        <Button
+          variant="link"
           onClick={() => setShowDetails(true)}
-          className="ml-auto text-xs text-primary underline underline-offset-2"
+          className="ml-auto text-xs"
           title="Everything about this gate — the full request, the exact command, who asked and when"
         >
           Details
-        </button>
+        </Button>
         {more > 0 && (
           <span className="text-xs text-on-surface-variant">
             1 of {rows.length} · {more} more after this
@@ -502,13 +502,13 @@ function ClampedPrompt({ text }: { text: string }) {
         {text}
       </p>
       {(clampOverflows(text, 4) || measuredOverflow) && (
-        <button
-          type="button"
+        <Button
+          variant="link"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-0.5 text-xs text-primary underline underline-offset-2"
+          className="mt-0.5 text-xs"
         >
           {expanded ? "show less" : "show the full request"}
-        </button>
+        </Button>
       )}
     </>
   );

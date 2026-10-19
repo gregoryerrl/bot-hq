@@ -679,14 +679,14 @@ export function Dashboard() {
               <h2 className="font-headline-md text-headline-md text-on-surface">
                 New session
               </h2>
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon"
                 onClick={() => setCreating(false)}
                 aria-label="Close"
-                className="inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
               >
                 <CloseIcon />
-              </button>
+              </Button>
             </div>
             {/* Two columns (ideas.md 2026-08-24): the session's SCOPE — title,
                 project, repo, worktree — on the left; the ROSTER on the right.
@@ -743,18 +743,18 @@ export function Dashboard() {
                   >
                     {adHocRepo}
                   </span>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    size="icon"
                     onClick={() => setAdHocRepo("")}
                     aria-label="Clear picked folder"
-                    className="inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
                   >
                     <CloseIcon />
-                  </button>
+                  </Button>
                 </div>
               ) : (
-                <button
-                  type="button"
+                <Button
+                  variant="link"
                   onClick={async () => {
                     try {
                       const picked = await pickFolder("Choose a working repo");
@@ -766,10 +766,10 @@ export function Dashboard() {
                       setCreateError(errorMessage(e));
                     }
                   }}
-                  className="font-code-sm text-code-sm text-primary transition-colors hover:underline"
+                  className="font-code-sm text-code-sm"
                 >
                   or pick a folder not listed…
-                </button>
+                </Button>
               )}
               {adHocRepo && (
                 <p className="font-code-sm text-code-sm text-on-surface-variant">
@@ -918,18 +918,19 @@ export function Dashboard() {
                             );
                           })}
                           {participants.length > 1 && (
-                            <button
-                              type="button"
+                            <Button
+                              variant="ghost"
+                              size="icon"
                               aria-label={`Remove participant ${index + 1}`}
                               onClick={() =>
                                 setParticipants((rows) =>
                                   rows.filter((_, i) => i !== index),
                                 )
                               }
-                              className="ml-1 inline-flex size-7 shrink-0 items-center justify-center rounded text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
+                              className="ml-1"
                             >
                               <CloseIcon />
-                            </button>
+                            </Button>
                           )}
                         </span>
                       </div>
@@ -1090,18 +1091,18 @@ export function Dashboard() {
                 </div>
                 <div className="shrink-0">
                 {participants.length < MAX_PARTICIPANTS && (
-                  <button
-                    type="button"
+                  <Button
+                    variant="link"
                     onClick={() =>
                       setParticipants((rows) => [
                         ...rows,
                         { ...emptyParticipant(), roleId: nextUnusedRoleId(rows) },
                       ])
                     }
-                    className="mt-2 font-code-sm text-code-sm text-primary transition-colors hover:underline"
+                    className="mt-2 font-code-sm text-code-sm"
                   >
                     + Add participant
-                  </button>
+                  </Button>
                 )}
                 <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
                   Row order sets each participant's turn slot. Effort applies to
@@ -1202,12 +1203,9 @@ export function Dashboard() {
           <p className="text-sm text-on-error-container">
             Failed to load sessions: {error.message}
           </p>
-          <button
-            onClick={() => refetch()}
-            className="mt-1 text-xs text-on-error-container underline hover:text-error"
-          >
+          <Button variant="link" tone="inherit" onClick={() => refetch()} className="mt-1 text-xs">
             Retry
-          </button>
+          </Button>
         </div>
       )}
       {isLoading ? (

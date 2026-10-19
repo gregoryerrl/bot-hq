@@ -5,6 +5,7 @@ import type { ClFolderView, ProjectView } from "../lib/bindings";
 import { type OpenTab, pickFolder, terminalInputClass } from "./contextLibraryShared";
 import { FolderIcon } from "../components/icons";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { Button } from "../components/ui/Button";
 
 // ============================================================================
 // FolderView — editor-pane content for a folder tab. Edits the folder's CL
@@ -121,32 +122,32 @@ export function FolderView({
         {error && (
           <p className="mt-2 font-code-sm text-code-sm text-error">
             Save failed: {error}{" "}
-            <button onClick={() => setError(null)} className="underline">
+            <Button variant="link" tone="inherit" onClick={() => setError(null)}>
               dismiss
-            </button>
+            </Button>
           </p>
         )}
         <div className="mt-3 flex items-center justify-end gap-2">
-          <button
-            type="button"
+          <Button
+            variant="secondary"
+            size="sm"
             disabled={!dirty || saving}
             onClick={() => {
               setDesc(initialDesc);
               setTagsStr(initialTags);
               setError(null);
             }}
-            className="rounded border border-outline-variant bg-transparent px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
           >
             Reset
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
             disabled={!dirty || saving}
             onClick={handleSave}
-            className="rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
           >
             {saving ? "Saving…" : "Save folder"}
-          </button>
+          </Button>
         </div>
 
         {isRoot && project && (
@@ -287,9 +288,6 @@ function ProjectSection({
     }
   };
 
-  const browseBtnClass =
-    "shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface";
-
   return (
     <div className="mt-6 border-t border-outline-variant pt-4">
       <p className="mb-2 font-label-caps text-label-caps text-on-surface-variant/70">
@@ -316,38 +314,41 @@ function ProjectSection({
               autoFocus
               className={terminalInputClass}
             />
-            <button
-              type="button"
+            <Button
+              variant="primary"
+              size="sm"
               disabled={!renameDirty || busy}
               onClick={doRename}
-              className="shrink-0 rounded border border-primary bg-primary px-2 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+              className="shrink-0"
             >
               Save
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => {
                 setRenaming(false);
                 setNewName(project.name);
               }}
-              className={browseBtnClass}
+              className="shrink-0"
             >
               Cancel
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="flex items-center justify-between gap-2">
             <span className="truncate font-code-sm text-code-sm text-on-surface">
               {project.name}
             </span>
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="sm"
               disabled={busy}
               onClick={() => setRenaming(true)}
-              className={browseBtnClass}
+              className="shrink-0"
             >
               Rename
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -364,48 +365,48 @@ function ProjectSection({
             placeholder="(none)"
             className={terminalInputClass}
           />
-          <button type="button" onClick={browseRepo} className={browseBtnClass}>
+          <Button variant="secondary" size="sm" onClick={browseRepo} className="shrink-0">
             Browse…
-          </button>
+          </Button>
         </div>
       </label>
       {error && (
         <p className="mt-2 font-code-sm text-code-sm text-error">{error}</p>
       )}
       <div className="mt-3 flex items-center justify-end">
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          size="sm"
           disabled={!wrDirty || busy}
           onClick={saveWorkingRepo}
-          className="rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
         >
           Save working repo
-        </button>
+        </Button>
       </div>
 
       {/* Removal actions */}
       <div className="mt-4 flex items-center justify-between gap-2 border-t border-outline-variant pt-3">
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           disabled={busy}
           onClick={() => setShowUnbindConfirm(true)}
           title="Clears the working-repo + custom CL path. Keeps files & descriptions."
-          className="rounded border border-outline-variant bg-transparent px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
         >
           Unbind working repo
-        </button>
-        <button
-          type="button"
+        </Button>
+        <Button
+          variant="danger"
+          size="sm"
           disabled={busy}
           onClick={() => {
             setDeleteFiles(false);
             setShowDeleteConfirm(true);
           }}
           title="Permanently removes the project + its CL index from bot-hq."
-          className="rounded border border-error/50 bg-transparent px-3 py-1 font-code-sm text-code-sm text-error transition-colors hover:bg-error/10 disabled:opacity-50"
         >
           Delete project
-        </button>
+        </Button>
       </div>
 
       <ConfirmDialog

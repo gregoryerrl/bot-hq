@@ -1,4 +1,5 @@
 import { cn } from "../lib/cn";
+import { Button } from "./ui/Button";
 
 /**
  * Dismissible inline error banner in the Industrial-Terminal error styling.
@@ -36,13 +37,9 @@ export function ErrorBanner({
       )}
     >
       <span className="font-semibold">{label}</span> {message}
-      <button
-        type="button"
-        className="ml-2 underline hover:text-error"
-        onClick={onDismiss}
-      >
+      <Button variant="link" tone="inherit" className="ml-2" onClick={onDismiss}>
         {dismissLabel}
-      </button>
+      </Button>
     </div>
   );
 }

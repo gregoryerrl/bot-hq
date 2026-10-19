@@ -579,14 +579,15 @@ function UpdatesPanel() {
             opens the release page in your browser.
           </p>
         </div>
-        <button
-          type="button"
+        <Button
+          variant="primary"
+          size="md"
           onClick={() => refetch()}
           disabled={isFetching}
-          className="inline-flex shrink-0 items-center gap-2 rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed disabled:opacity-50"
+          className="shrink-0"
         >
           {isFetching ? "Checking…" : "Check now"}
-        </button>
+        </Button>
       </div>
 
       <div className="rounded-lg border border-outline-variant bg-surface-container p-5">
@@ -617,13 +618,14 @@ function UpdatesPanel() {
                 <span className="text-primary">{data.latest_version}</span>) is
                 available.
               </p>
-              <button
-                type="button"
+              <Button
+                variant="primary"
+                size="md"
                 onClick={() => void openUrl(data.release_url)}
-                className="inline-flex shrink-0 items-center rounded border border-primary bg-primary px-3 py-1.5 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed"
+                className="shrink-0"
               >
                 Download
-              </button>
+              </Button>
             </div>
           ) : data ? (
             <p className="font-code-sm text-code-sm text-on-surface-variant">
@@ -819,30 +821,22 @@ function NotificationsPanel() {
               : "Off — everything stays in the in-app bell, tray and banners."}
           </div>
         </div>
-        <button
-          type="button"
+        <Button
+          variant={enabled ? "primary" : "secondary"}
+          size="md"
           role="switch"
           aria-checked={enabled}
           onClick={toggle}
-          className={cn(
-            "inline-flex shrink-0 items-center rounded border px-3 py-1.5 font-code-sm text-code-sm transition-colors",
-            enabled
-              ? "border-primary bg-primary text-on-primary hover:bg-primary-fixed"
-              : "border-outline-variant text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
-          )}
+          className="shrink-0"
         >
           {enabled ? "On" : "Off"}
-        </button>
+        </Button>
       </div>
 
       <div className="mt-4 flex items-center gap-3">
-        <button
-          type="button"
-          onClick={() => void sendTest()}
-          className="inline-flex items-center rounded border border-outline-variant px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-        >
+        <Button variant="secondary" size="md" onClick={() => void sendTest()}>
           Send test notification
-        </button>
+        </Button>
         {testState === "sent" && (
           <span className="font-code-sm text-code-sm text-on-surface-variant">
             Sent — if nothing appeared, check this app&rsquo;s permission in
@@ -911,13 +905,9 @@ function DiagnosticsPanel() {
         (hashes, never text), app version + OS, and error classes to an
         endpoint operated by the bot-hq author on Cloudflare — never code,
         prompts, or session content.{" "}
-        <button
-          type="button"
-          onClick={() => void openUrl(PRIVACY_URL)}
-          className="underline decoration-outline-variant underline-offset-2 hover:text-primary"
-        >
+        <Button variant="link" tone="inherit" onClick={() => void openUrl(PRIVACY_URL)}>
           Full privacy note
-        </button>
+        </Button>
       </p>
 
       <div className="mt-6 flex items-center justify-between gap-4 rounded-lg border border-outline-variant bg-surface-container p-5">
@@ -931,21 +921,17 @@ function DiagnosticsPanel() {
               : "Off — nothing is collected or sent."}
           </div>
         </div>
-        <button
-          type="button"
+        <Button
+          variant={s?.enabled ? "primary" : "secondary"}
+          size="md"
           role="switch"
           aria-checked={s?.enabled ?? false}
           disabled={!s}
           onClick={() => void call("set_telemetry_enabled", { enabled: !s?.enabled })}
-          className={cn(
-            "inline-flex shrink-0 items-center rounded border px-3 py-1.5 font-code-sm text-code-sm transition-colors",
-            s?.enabled
-              ? "border-primary bg-primary text-on-primary hover:bg-primary-fixed"
-              : "border-outline-variant text-on-surface-variant hover:bg-surface-container-high hover:text-on-surface",
-          )}
+          className="shrink-0"
         >
           {s?.enabled ? "On" : "Off"}
-        </button>
+        </Button>
       </div>
 
       <div className="mt-4 rounded-lg border border-outline-variant bg-surface-container p-5">
@@ -974,17 +960,18 @@ function DiagnosticsPanel() {
               spellCheck={false}
               className="min-w-0 flex-1 rounded border border-outline-variant bg-surface-container-lowest px-3 py-1.5 font-code-sm text-code-sm text-on-surface caret-primary placeholder:text-on-surface-variant focus:border-primary focus:outline-none"
             />
-            <button
-              type="button"
+            <Button
+              variant="secondary"
+              size="md"
               disabled={endpointDraft === null}
               onClick={() => {
                 void call("set_telemetry_endpoint", { endpoint: endpointDraft ?? "" });
                 setEndpointDraft(null);
               }}
-              className="inline-flex shrink-0 items-center rounded border border-outline-variant px-3 py-1.5 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
+              className="shrink-0"
             >
               Save
-            </button>
+            </Button>
           </div>
           <span className="mt-1 block max-w-prose font-code-sm text-code-sm text-on-surface-variant">
             Deploy your own sink from{" "}

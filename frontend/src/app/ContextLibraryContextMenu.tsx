@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
+import { Button } from "../components/ui/Button";
 import { terminalInputClass } from "./contextLibraryShared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
@@ -154,26 +155,17 @@ export function ActionModal({
           <p className="mt-2 font-code-sm text-code-sm text-error">{error}</p>
         )}
         <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-outline-variant bg-transparent px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-          >
+          <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant={danger ? "danger" : "primary"}
+            size="sm"
             disabled={!canConfirm}
             onClick={submit}
-            className={cn(
-              "rounded border px-3 py-1 font-code-sm text-code-sm transition-colors disabled:opacity-50",
-              danger
-                ? "border-error/50 bg-error/10 text-error hover:bg-error/20"
-                : "border-primary bg-primary text-on-primary hover:bg-primary-fixed",
-            )}
           >
             {busy ? "Working…" : confirmLabel}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

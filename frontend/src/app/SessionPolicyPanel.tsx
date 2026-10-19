@@ -136,14 +136,14 @@ export function SessionPolicyPanel({
             <SaveIcon />
             {save.isPending ? "Saving…" : "Save"}
           </Button>
-          <button
-            type="button"
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={requestClose}
             aria-label="Close session settings"
-            className="rounded p-1 text-on-surface-variant transition-colors hover:text-on-surface"
           >
             <CloseIcon />
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -359,13 +359,9 @@ function SessionToolGateSection({
             }
             footer={(addRow) => (
               <div className="mt-3">
-                <button
-                  type="button"
-                  onClick={addRow}
-                  className="rounded border border-outline-variant bg-transparent px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-                >
+                <Button variant="secondary" size="sm" onClick={addRow}>
                   + Add keyword
-                </button>
+                </Button>
               </div>
             )}
           />

@@ -3,6 +3,7 @@ import { cn } from "../lib/cn";
 import type { RetrievalStatsView } from "../lib/bindings";
 import type { ReactNode } from "react";
 import { WarnIcon } from "../components/icons";
+import { Button } from "../components/ui/Button";
 
 // ============================================================================
 // MeasurementView — Stage-4b CL retrieval telemetry (tokens-per-task et al.).
@@ -71,13 +72,9 @@ export function MeasurementView({ project }: { project: string }) {
           cl_retrieve telemetry · all time
         </span>
         {/* Retrieval events emit no frontend event (deferred) — manual refresh. */}
-        <button
-          type="button"
-          onClick={() => refetch()}
-          className="rounded border border-outline-variant px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant hover:text-on-surface"
-        >
+        <Button variant="secondary" size="sm" onClick={() => refetch()}>
           Refresh
-        </button>
+        </Button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-4 py-4">

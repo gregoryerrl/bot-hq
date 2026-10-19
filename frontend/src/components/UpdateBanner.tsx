@@ -2,6 +2,7 @@ import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTauriQuery } from "../hooks/useInvoke";
 import type { UpdateInfo } from "../lib/bindings";
+import { Button } from "./ui/Button";
 
 const DISMISS_KEY = "bot-hq:update-dismissed-version";
 
@@ -40,20 +41,12 @@ export function UpdateBannerView({
         bot-hq <span className="text-primary">{info.latest_version}</span> is
         available — you&rsquo;re on {info.current_version}.
       </span>
-      <button
-        type="button"
-        onClick={onDownload}
-        className="inline-flex shrink-0 items-center rounded border border-primary bg-primary px-3 py-1 font-code-sm text-code-sm text-on-primary transition-colors hover:bg-primary-fixed"
-      >
+      <Button variant="primary" size="sm" onClick={onDownload} className="shrink-0">
         Download
-      </button>
-      <button
-        type="button"
-        onClick={onDismiss}
-        className="shrink-0 rounded border border-outline-variant px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-      >
+      </Button>
+      <Button variant="secondary" size="sm" onClick={onDismiss} className="shrink-0">
         Dismiss
-      </button>
+      </Button>
     </div>
   );
 }

@@ -113,13 +113,14 @@ export function FeedbackPanel() {
             {FILTER_LABELS[f]}
           </Button>
         ))}
-        <button
-          type="button"
+        <Button
+          variant="secondary"
+          size="sm"
           onClick={() => refetch()}
-          className="ml-auto shrink-0 rounded border border-outline-variant px-2.5 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+          className="ml-auto shrink-0"
         >
           {isFetching ? "Refreshing…" : "Refresh"}
-        </button>
+        </Button>
       </div>
 
       {loadError ? (

@@ -6,6 +6,7 @@ import {
   shouldShowDiagnosticsAsk,
   type TelemetryStatus,
 } from "../lib/telemetry";
+import { Button } from "./ui/Button";
 
 /**
  * The one-time diagnostics ask. Equal-weight buttons — both answers mark the
@@ -30,27 +31,19 @@ export function DiagnosticsAskCardView({
         Share anonymous crash reports and usage counts (never code or prompts)
         with the bot-hq author?
       </span>
-      <button
-        type="button"
+      <Button
+        variant="link"
         onClick={() => void openUrl(PRIVACY_URL)}
-        className="shrink-0 underline decoration-outline-variant underline-offset-2 hover:text-primary"
+        className="shrink-0"
       >
         What is sent
-      </button>
-      <button
-        type="button"
-        onClick={onEnable}
-        className="inline-flex shrink-0 items-center rounded border border-outline-variant px-3 py-1 font-code-sm text-code-sm text-on-surface transition-colors hover:bg-surface-container-high"
-      >
+      </Button>
+      <Button variant="secondary" size="sm" onClick={onEnable} className="shrink-0">
         Enable
-      </button>
-      <button
-        type="button"
-        onClick={onDecline}
-        className="inline-flex shrink-0 items-center rounded border border-outline-variant px-3 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
-      >
+      </Button>
+      <Button variant="secondary" size="sm" onClick={onDecline} className="shrink-0">
         No thanks
-      </button>
+      </Button>
     </div>
   );
 }

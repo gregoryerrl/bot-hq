@@ -275,16 +275,17 @@ export function ClaudeConfigPanel() {
           </span>
           <div className="flex gap-2">
             {activeSessions.length > 0 && (
-              <button
-                type="button"
+              <Button
+                variant="secondary"
+                size="md"
                 onClick={onRestartAgents}
                 disabled={respawn.isPending}
-                className="inline-flex items-center gap-2 rounded border border-success/50 bg-success/15 px-3 py-1.5 font-code-sm text-code-sm text-success hover:bg-success/25 disabled:opacity-50"
+                tone="success"
               >
                 {respawn.isPending
                   ? "Restarting…"
                   : `Restart ${activeSessions.length} agent session(s)`}
-              </button>
+              </Button>
             )}
             <Button variant="ghost" size="sm" onClick={() => setShowRestart(false)}>
               Dismiss
