@@ -114,6 +114,10 @@ interface ParsedResult {
   images: string[];
 }
 
+/** A call's line in the chat wraps rather than clips, so it holds a real
+ *  command (round 8: a truncated command was the "under the hood" complaint). */
+const CALL_LABEL_MAX = 200;
+
 /** The image types a result's picture may be drawn from. */
 const RASTER = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -170,7 +174,9 @@ function readUse(m: AgentMessage): ToolCall {
     kept = {
       id: typeof row.tool_use_id === "string" ? row.tool_use_id : null,
       tool: shortName(name),
-      label: describeToolCall(name, input),
+      // A chat line can afford a long label (it wraps); the composer's
+      // status line keeps describeToolCall's one-line default.
+      label: describeToolCall(name, input, CALL_LABEL_MAX),
       input,
       use: m,
       result: null,

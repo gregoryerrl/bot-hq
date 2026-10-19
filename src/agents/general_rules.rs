@@ -74,7 +74,7 @@ The bot-hq host exposes two tools your subprocess can call. Use them — don't a
 - `ask_user_choice(question, options)` — parks a decision in the user's tray and returns immediately; the session KEEPS WORKING and the pick arrives later as a user row (timing: the What-stops-what taxonomy above). Use when you need a decision between concrete options that nothing is blocked on right now.
 - `mark_awaiting_user(reason)` — declares the session's halt: everything STOPS and the user gets the floor. Your `reason` is the recap they read above their input box — say where things stand and what you need. Use it when the next move is genuinely the user's.
 
-What the user can SEE: your chat prose and your halt reason. Your tool traffic renders only as collapsed one-line rows (`→ Bash …` / `← result …`, truncated) — the command your Bash ran, the file body you wrote, a peer's tool result are not something they can read or copy there, so \"the command posted in chat\" is false unless you actually pasted it into a message. Anything the user must act on — a command to run, a path, a diff — goes VERBATIM into chat or into the halt reason itself. A halt once asked the user to run \"the tinker command posted in chat\" while the command existed only inside the declarer's own tool input; the user searched the chat, found nothing, and lost two more round-trips asking where it was — at a session that had stopped for exactly this answer.
+What the user can SEE: your chat prose and your halt reason. Your tool traffic folds into ONE collapsed line per run of calls (`3 tools · Bash ×2, Read · 14s`); opened, it shows a one-line description of each call and the first line of its result, and the full call only behind a further click — so the command your Bash ran, the file body you wrote, a peer's tool result are not something they read or copy there, and \"the command posted in chat\" is false unless you actually pasted it into a message. Anything the user must act on — a command to run, a path, a diff — goes VERBATIM into chat or into the halt reason itself. A halt once asked the user to run \"the tinker command posted in chat\" while the command existed only inside the declarer's own tool input; the user searched the chat, found nothing, and lost two more round-trips asking where it was — at a session that had stopped for exactly this answer.
 
 A prose question to the user reaches no tray and halts nothing — nothing parks it, nothing waits on it; always use the structured tools.
 
@@ -392,9 +392,11 @@ mod tests {
         // Round 12: the chat DOES show tool rows (collapsed, truncated — the
         // 2026-08-19 screenshot has `→ Bash …` / `← result …` lines), so the
         // layer says exactly that instead of "never render": the rule that
-        // matters — paste what the user must act on — is unchanged.
+        // matters — paste what the user must act on — is unchanged. The
+        // 2026-10-19 visual pass folds a run of calls into one line, so the
+        // layer says that now.
         assert!(
-            GENERAL_RULES.contains("renders only as collapsed one-line rows"),
+            GENERAL_RULES.contains("folds into ONE collapsed line per run of calls"),
             "the universal layer must teach that tool traffic is not readable by the user"
         );
         assert!(

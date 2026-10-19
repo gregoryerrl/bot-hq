@@ -670,10 +670,11 @@ without polling.
 | `frontend/src/app/SessionContextTab.tsx` | session-scoped CL tree + lean editor | M |
 | `frontend/src/app/SessionTerminalTab.tsx` | xterm.js over the session PTY | S |
 | `frontend/src/components/ChatPane.tsx` | virtualised message list; owns `agent:messages:batch`; renders the compacted rows (a run of passes = one `PassLine`) | M |
-| `frontend/src/lib/chatRows.ts` | `compactRows`: hides `pass_turn` call/result rows and folds consecutive pass lines (`PASS_NOTICE`, mirrored from `pump.rs`) into one row (feedback #13) | S |
+| `frontend/src/lib/chatRows.ts` | `compactRows`: hides `pass_turn` call/result rows and folds consecutive pass lines (`PASS_NOTICE`, mirrored from `pump.rs`) into one row (feedback #13); `chatRows` (what the chat renders) also folds one participant's consecutive tool rows into a BURST of calls paired with their results (the 2026-10-19 visual pass) — each row parsed once, MCP text blocks joined, raster images as `data:` URLs | S |
 | `frontend/src/lib/runningTool.ts` | `runningTool`: the busy participant's newest unanswered `tool_use` row, as one line (`describeToolCall`: the call's own `description`, else tool + main argument) — the composer's worker line shows it (feedback #79/#91) | S |
 | `frontend/src/components/ChatInput.tsx` | compose / Stage / Send / Pause / Resume, `@`-mention picker | L |
-| `frontend/src/components/ChatMessage.tsx` | one row incl. tool_use/tool_result pills | M |
+| `frontend/src/components/ChatMessage.tsx` | one text / phase / notice row, and `MessageHeader` (the byline) — tool rows never reach it | M |
+| `frontend/src/components/ToolBurst.tsx` | a burst as ONE line (`3 tools · Bash ×2, Read · 14s · 1 failed`, or a single call itself) with every named file's View link; opened, one line per call with its result's first line, a passed/failed/running mark, thumbnails for image results and the raw call behind "raw" | M |
 | `frontend/src/components/DocumentPane.tsx` | Tray tab + I/P/A/V doc tabs + custom-document tabs (untagged docs, round 11) + Apply-tab colored diff (memoised `groupDiffByFile`); `DocArticle` shared by phase and custom docs | L |
 | `frontend/src/components/HaltBanner.tsx` | HALT state + the SOLE `isApproval`/`isTrayItem` predicates; its tray pointer calls `onOpenTray` (SessionView → DocumentPane's `openTraySignal`) | M |
 | `frontend/src/components/ClosedSessionBar.tsx` | what a CLOSED session shows in place of its composer: read-only history + the **Reopen** button (`reopen_session`) — the only path that revives an archived roster (round 10) | S |

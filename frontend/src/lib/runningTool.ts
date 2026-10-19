@@ -20,9 +20,9 @@ export interface RunningTool {
 
 const MAX_LABEL = 90;
 
-function clip(text: string): string {
+function clip(text: string, max = MAX_LABEL): string {
   const oneLine = text.replace(/\s+/g, " ").trim();
-  return oneLine.length > MAX_LABEL ? `${oneLine.slice(0, MAX_LABEL - 1)}…` : oneLine;
+  return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
 /** `mcp__bot-hq-signaling__session_doc_write` → `session_doc_write`. */
@@ -37,19 +37,19 @@ const MAIN_ARGS = ["file_path", "pattern", "query", "path", "slug", "url", "comm
 /** One line for a tool call: its own `description` when it wrote one (Bash and
  *  Agent calls do, for the user), otherwise the tool's name and its main
  *  argument. A path is shown by its last two segments. */
-export function describeToolCall(name: string, input: unknown): string {
+export function describeToolCall(name: string, input: unknown, max = MAX_LABEL): string {
   const args = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
   const described = args.description;
-  if (typeof described === "string" && described.trim() !== "") return clip(described);
+  if (typeof described === "string" && described.trim() !== "") return clip(described, max);
   const tool = shortName(name);
   for (const key of MAIN_ARGS) {
     const value = args[key];
     if (typeof value === "string" && value.trim() !== "") {
       const shown = key === "file_path" || key === "path" ? value.split("/").slice(-2).join("/") : value;
-      return clip(`${tool} ${shown}`);
+      return clip(`${tool} ${shown}`, max);
     }
   }
-  return clip(tool);
+  return clip(tool, max);
 }
 
 // A tool row's content is JSON whose LAST key is `tool_use_id` (the pump

@@ -11,10 +11,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery } from "../hooks/useInvoke";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { useChatStore } from "../stores/chat";
-import { ChatMessage } from "./ChatMessage";
+import { ChatMessage, MessageHeader } from "./ChatMessage";
+import { ToolBurst } from "./ToolBurst";
 import { cn } from "../lib/cn";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
-import { compactRows } from "../lib/chatRows";
+import { chatRows } from "../lib/chatRows";
 import type { AgentMessage } from "../lib/bindings";
 import { SkipIcon } from "./icons";
 import { Button } from "./ui/Button";
@@ -22,7 +23,6 @@ import { Button } from "./ui/Button";
 // Stable reference so the zustand selector doesn't return a fresh array per
 // call (would trigger infinite re-renders via Object.is).
 const EMPTY_MESSAGES: AgentMessage[] = [];
-const EMPTY_RESOLVED: ReadonlySet<string> = new Set();
 /** Rows per history page — the mount read and each "load older" step. */
 export const CHAT_PAGE = 300;
 
@@ -41,9 +41,9 @@ const STICKY_THRESHOLD_PX = 80;
  *
  * Preserved behaviors: auto-follow when the user is at the bottom, the
  * "↓ Jump to latest" pill when they've scrolled up, author-grouping of
- * consecutive messages, and tool-pill expansion — expand state lives HERE
- * (keyed by message id) because virtualized rows unmount when scrolled away,
- * which would reset ChatMessage-local state.
+ * consecutive messages, and tool-burst expansion — expand state lives HERE
+ * (keyed by the burst's first row id, which a growing burst keeps) because
+ * virtualized rows unmount when scrolled away, which would reset local state.
  */
 export function ChatPane({
   sessionId,
@@ -125,7 +125,7 @@ export function ChatPane({
     [sessionId, applyBatch],
   );
 
-  // Lifted tool-pill expand state (see doc comment).
+  // Lifted tool-burst expand state (see doc comment).
   const [expandedIds, setExpandedIds] = useState<Set<number>>(() => new Set());
   const onToggleExpand = useCallback((id: number) => {
     setExpandedIds((prev) => {
@@ -137,9 +137,10 @@ export function ChatPane({
   }, []);
 
   // Passes compacted (feedback #13): `pass_turn` call/result rows hidden and a
-  // run of pass lines folded into one "passed — A · B" row. The virtualizer
-  // counts the ROWS it renders, not the raw messages.
-  const rows = useMemo(() => compactRows(messages), [messages]);
+  // run of pass lines folded into one "passed — A · B" row. Tool rows folded
+  // into one burst per participant's run (the visual pass, S3). The
+  // virtualizer counts the ROWS it renders, not the raw messages.
+  const rows = useMemo(() => chatRows(messages), [messages]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -187,16 +188,6 @@ export function ChatPane({
 
   const items = virtualizer.getVirtualItems();
 
-  // Which tool calls have already come back. A `tool_use` whose id isn't in
-  // here is STILL RUNNING — without this a five-minute `cargo build --release`
-  // and a 20ms `Read` render identically and nothing on screen moves while the
-  // build runs. Covers the whole retained list (not just the virtual window) so
-  // scrolling can't turn a finished call back into a running one, and lives in
-  // the store, maintained incrementally as rows arrive (round 9: a memo here
-  // re-parsed every result row on every 50 ms batch).
-  const resolvedToolIds = useChatStore(
-    (s) => s.resolvedToolIds[sessionId] ?? EMPTY_RESOLVED,
-  );
 
   return (
     <div
@@ -243,8 +234,42 @@ export function ChatPane({
                 </div>
               );
             }
+            // The byline shows once per run of one author's rows: a burst
+            // after that author's prose (or prose after its burst) reads as
+            // the same turn. A phase change always breaks the run.
+            const prevAuthor =
+              prevRow === null
+                ? null
+                : prevRow.kind === "burst"
+                  ? prevRow.author
+                  : prevRow.kind === "message" && prevRow.message.kind !== "phase_change"
+                    ? prevRow.message.author
+                    : null;
+            if (row.kind === "burst") {
+              const grouped = prevAuthor === row.author;
+              return (
+                <div
+                  key={vi.key}
+                  data-index={vi.index}
+                  ref={virtualizer.measureElement}
+                  className="absolute left-0 top-0 w-full"
+                  style={{ transform: `translateY(${vi.start}px)` }}
+                >
+                  <article className={grouped ? "mt-0" : "mt-3"}>
+                    {!grouped && (
+                      <MessageHeader label={authorLabel(row.author, labels)} createdAt={row.firstAt} hues={hues} />
+                    )}
+                    <ToolBurst
+                      burst={row}
+                      expanded={expandedIds.has(row.key)}
+                      onToggle={() => onToggleExpand(row.key)}
+                      onViewFile={onViewFile}
+                    />
+                  </article>
+                </div>
+              );
+            }
             const m = row.message;
-            const prev = prevRow && prevRow.kind === "message" ? prevRow.message : null;
             return (
               <div
                 key={vi.key}
@@ -257,16 +282,7 @@ export function ChatPane({
                   message={m}
                   authorLabel={authorLabel(m.author, labels)}
                   authorHues={hues}
-                  groupedWithPrev={
-                    prev !== null &&
-                    m.kind !== "phase_change" &&
-                    prev.kind !== "phase_change" &&
-                    prev.author === m.author
-                  }
-                  expanded={expandedIds.has(m.id)}
-                  onToggleExpand={onToggleExpand}
-                  resolvedToolIds={resolvedToolIds}
-                  onViewFile={onViewFile}
+                  groupedWithPrev={m.kind !== "phase_change" && prevAuthor === m.author}
                 />
               </div>
             );

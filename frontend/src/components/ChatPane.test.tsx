@@ -395,27 +395,25 @@ describe("ChatPane", () => {
         ],
       });
     });
-    // Running: the ⟳ glyph replaces →, and an elapsed counter appears.
-    expect(await screen.findByText(/⟳ Bash/)).toBeInTheDocument();
-    expect(screen.getByText(/^\d+s$/)).toBeInTheDocument();
+    // Running: the burst's line says so, with an elapsed counter.
+    const running = await screen.findByText(/^running/);
+    expect(running).toHaveTextContent(/running \d+s/);
 
     act(() => {
       eventHandlers["agent:messages:batch"]?.({
         payload: [
           msg(
             11,
-            JSON.stringify({ tool_use_id: "t-run", output: "Finished" }),
+            JSON.stringify({ content: "Finished", is_error: false, tool_use_id: "t-run" }),
             "tool_result",
           ),
         ],
       });
     });
-    // Resolved: the running marker is gone and the row joins the seeded Bash
-    // call in the plain → form (hence findAll — two Bash rows by now).
-    await waitFor(() =>
-      expect(screen.queryByText(/⟳ Bash/)).not.toBeInTheDocument(),
-    );
-    expect(screen.getAllByText(/→ Bash/).length).toBe(2);
+    // Resolved: the running marker is gone; the seeded `ls -la` call and this
+    // one are one burst of two Bash calls.
+    await waitFor(() => expect(screen.queryByText(/^running/)).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: /2 tools · Bash ×2/ })).toBeInTheDocument();
   });
 
   it("does not claim a tool is running when it carries no tool_use_id", async () => {
@@ -423,11 +421,11 @@ describe("ChatPane", () => {
     // Guessing "running" there would be a fresh lie, not a fix.
     renderPane();
     await screen.findByText("hello one");
-    expect(await screen.findByText(/→ Bash/)).toBeInTheDocument();
-    expect(screen.queryByText(/⟳/)).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Bash · ls -la/ })).toBeInTheDocument();
+    expect(screen.queryByText(/^running/)).not.toBeInTheDocument();
   });
 
-  it("shows the full command in the collapsed pill, not an 80-char clip", async () => {
+  it("shows the full command when the burst is opened, not an 80-char clip", async () => {
     renderPane();
     await screen.findByText("hello one");
     const long =
@@ -447,17 +445,22 @@ describe("ChatPane", () => {
         ],
       });
     });
-    expect(await screen.findByText(long)).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: /2 tools/ }));
+    const lines = await screen.findAllByRole("listitem");
+    expect(lines.some((li) => li.textContent?.includes(long))).toBe(true);
   });
 
-  it("expands and collapses a tool pill via the lifted state", async () => {
+  it("opens and closes a burst via the lifted state, and its raw call behind 'raw'", async () => {
     renderPane();
     await screen.findByText("hello one");
-    const pill = screen.getByRole("button", { expanded: false });
-    fireEvent.click(pill);
-    // Expanded body renders the pretty-printed JSON payload.
-    expect(await screen.findByText(/"ls -la"/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { expanded: true }));
-    expect(screen.queryByText(/"ls -la"/)).not.toBeInTheDocument();
+    const burst = screen.getByRole("button", { name: /Bash · ls -la/ });
+    expect(burst).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(burst);
+    expect(await screen.findByRole("listitem")).toHaveTextContent("Bash · ls -la");
+    fireEvent.click(screen.getByRole("button", { name: "raw" }));
+    // The raw view is the call as it ran: its arguments, pretty-printed.
+    expect(await screen.findByText(/"command": "ls -la"/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Bash · ls -la/ }));
+    expect(screen.queryByRole("listitem")).not.toBeInTheDocument();
   });
 });
