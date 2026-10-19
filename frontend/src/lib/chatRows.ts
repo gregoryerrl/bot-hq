@@ -114,6 +114,9 @@ interface ParsedResult {
   images: string[];
 }
 
+/** The image types a result's picture may be drawn from. */
+const RASTER = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
 // Rows are immutable and the store keeps their objects, so each is parsed once
 // — a result can be hundreds of kilobytes (a screenshot, a long file).
 const results = new WeakMap<AgentMessage, ParsedResult>();
@@ -133,7 +136,11 @@ function readResult(m: AgentMessage): ParsedResult {
       const source = b.source as Row | undefined;
       if (b.type === "image" && source && typeof source.data === "string") {
         const media = typeof source.media_type === "string" ? source.media_type : "image/png";
-        images.push(`data:${media};base64,${source.data}`);
+        // Only a raster image becomes a picture. The media type is the
+        // tool's own output; an `image/svg+xml` (a document that can carry
+        // script) or anything unknown is named in the text instead (EYES).
+        if (RASTER.has(media)) images.push(`data:${media};base64,${source.data}`);
+        else texts.push(`[${media} image not shown]`);
       }
     }
   } else if (typeof raw === "string") {

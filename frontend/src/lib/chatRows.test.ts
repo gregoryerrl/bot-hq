@@ -156,6 +156,24 @@ describe("chatRows — tool bursts (visual pass S3)", () => {
     expect(burst.calls[0].text).not.toContain(data);
   });
 
+  it("draws only a raster image, and names any other image type", () => {
+    const msgs = [
+      use("hands", "s1", "some_tool", {}),
+      result(
+        "hands",
+        "s1",
+        JSON.stringify([
+          { source: { data: "PHN2Zz48L3N2Zz4=", media_type: "image/svg+xml", type: "base64" }, type: "image" },
+          { source: { data: "R0lGODlhAQABAAAAACw=", media_type: "image/gif", type: "base64" }, type: "image" },
+        ]),
+      ),
+    ];
+    const burst = chatRows(msgs)[0];
+    if (burst.kind !== "burst") throw new Error("not a burst");
+    expect(burst.calls[0].images).toEqual(["data:image/gif;base64,R0lGODlhAQABAAAAACw="]);
+    expect(burst.calls[0].text).toBe("[image/svg+xml image not shown]");
+  });
+
   it("gives a result whose call is not on screen a call of its own", () => {
     const msgs = [result("hands", "zz", "late output"), use("hands", "k", "Bash", { command: "ls" })];
     const burst = chatRows(msgs)[0];
