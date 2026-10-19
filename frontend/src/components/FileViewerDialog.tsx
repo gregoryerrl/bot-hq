@@ -223,6 +223,17 @@ const BARE_FILE_EXTS =
  * incident). Flag-looking tokens (`-…`) and URLs (`…://…`) are skipped;
  * duplicates collapse.
  */
+/**
+ * A word that is a pattern or shell syntax, not a file: a glob (`*.test.tsx`,
+ * quoted or not — git does its own matching, so `git show -- '*.test.tsx'`
+ * named a "file" the viewer could only refuse; EYES, the opened tool bursts),
+ * a brace list, or a word still holding quotes, `=`, `$`, a backtick or a
+ * redirect (`p='CODEBASE.md'` inside a heredoc script). A bracket is kept —
+ * `app/[id]/page.tsx` is a real path — unless it holds a range (`[0-9]`).
+ */
+const NOT_A_PATH = /[*?{}'"`=$<>|;()]/;
+const RANGE_CLASS = /\[[!^]?[^\]]*-[^\]]*\]/;
+
 export function fileArgsInCommand(command: string): string[] {
   const out: string[] = [];
   const flagRe = /(?:--body-file|--file|-F)[=\s]+("[^"]+"|'[^']+'|\S+)/g;
@@ -243,6 +254,7 @@ export function fileArgsInCommand(command: string): string[] {
     const token = stripQuotes(m[0]);
     if (token.startsWith("-")) continue;
     if (token.includes("://")) continue;
+    if (NOT_A_PATH.test(token) || RANGE_CLASS.test(token)) continue;
     if (!pathRe.test(token)) continue;
     out.push(token);
   }

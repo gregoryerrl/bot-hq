@@ -101,6 +101,19 @@ describe("fileArgsInCommand", () => {
     expect(fileArgsInCommand("grep -n pattern notes.md")).toEqual(["notes.md"]);
   });
 
+  it("skips globs and shell syntax, keeps a bracketed path", () => {
+    // EYES: an opened tool burst linked "View *.test.tsx" from a pathspec.
+    expect(fileArgsInCommand("git show e27c798 --stat -- '*.test.tsx'")).toEqual([]);
+    expect(fileArgsInCommand("ls src/**/*.ts src/lib/?.ts")).toEqual([]);
+    expect(fileArgsInCommand("cat {a,b}.md")).toEqual([]);
+    expect(fileArgsInCommand("ls shot[0-9].png")).toEqual([]);
+    // Shell syntax inside a heredoc script is not a path.
+    expect(fileArgsInCommand("python3 - <<'EOF'\np='CODEBASE.md'\nEOF")).toEqual([]);
+    expect(fileArgsInCommand('echo "$HOME/notes.md"')).toEqual([]);
+    // A dynamic-route segment is a real path.
+    expect(fileArgsInCommand("cat app/[id]/page.tsx")).toEqual(["app/[id]/page.tsx"]);
+  });
+
   it("keeps the single-slot wrapper on the first candidate", () => {
     expect(fileArgInCommand("php -d x=y foo.ini run.php")).toBe("foo.ini");
     expect(fileArgInCommand("git push origin main")).toBeNull();
