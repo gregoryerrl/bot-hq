@@ -26,7 +26,7 @@ function clip(text: string): string {
 }
 
 /** `mcp__bot-hq-signaling__session_doc_write` → `session_doc_write`. */
-function shortName(name: string): string {
+export function shortName(name: string): string {
   const cut = name.lastIndexOf("__");
   return name.startsWith("mcp__") && cut > 4 ? name.slice(cut + 2) : name;
 }
