@@ -166,3 +166,15 @@ A single vertical stream. User messages are right-aligned with Blue accents; Age
 
 ### Inputs
 Command-line style inputs. No background, just a bottom border that illuminates with the active role color when focused. Use a block cursor character `█` to reinforce the terminal aesthetic.
+## Amendments — 2026-10-19 (the visual pass; the user's picks on tray 41aa6ff8)
+
+These four amendments take precedence over the sections above where they differ.
+
+1. **Message prose is Inter (`body-md`); mono is for activity and data.** Agent and user message text renders in Inter for long-form legibility. JetBrains Mono (`code-sm`, `label-caps`) stays for tool activity, code, ids, model names, timestamps and every other kind of metadata. The "Chat Chronology" rule's *mono for all message content* and the Typography section's *`code-sm` for all chronological chat logs* are superseded.
+2. **Fields are boxed.** Input, select and textarea share one style: a 1px outline (`outline-variant`) that lights in the role colour on focus, with a 2px radius. This supersedes the "Inputs" rule's *no background, just a bottom border*, which cannot carry a select or a multi-line field.
+3. **Hint and help text is a neutral muted slate (`muted`).** `on-surface-variant` (the warm beige #e0c0af) is kept for labels and captions only, so long explanatory text stops reading as warm and loud.
+4. **Document tabs wrap; the app scrolls sideways nowhere.** The document pane's tab row wraps onto a second line instead of scrolling. That retires the one sanctioned horizontal scroller, so the no-horizontal-scroll rule now has no exceptions.
+
+Also settled with these amendments:
+- **`label-caps` is set as typed.** Uppercase is applied only to label *words* (TRAY, QUESTION, phase names), never to identifiers such as emails, ids, slugs or model names.
+- **The participant palette keeps its eight colour names.** Only the hex values are tuned to the navy theme, because a participant's colour override is stored by name.
