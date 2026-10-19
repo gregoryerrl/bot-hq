@@ -41,10 +41,11 @@ export function ToolBurst({
   const running = calls.filter(isRunning);
   const single = calls.length === 1 ? calls[0] : null;
   const span = formatSpan(parseUtcMs(burst.lastAt) - parseUtcMs(burst.firstAt));
-  // Folded, the burst still offers every file its calls name (round 8: the
-  // viewer is one click from the call, never behind the fold); open, each
-  // call carries its own link.
-  const folded = expanded ? [] : [...new Set(calls.map(viewablePath).filter((p): p is string => p !== null))];
+  // Folded, a single call keeps its own View link (round 8), and a run of
+  // calls offers the files it WROTE — what the user most wants to open —
+  // rather than every path its reads and commands touched; open, every call
+  // carries its own link.
+  const folded = expanded ? [] : single ? [viewablePath(single)].filter(isPath) : writtenFiles(calls);
 
   return (
     <div className="mb-1 mt-1">
@@ -83,10 +84,13 @@ export function ToolBurst({
         )}
       </button>
       {folded.length > 0 && onViewFile && (
-        <div className="flex flex-wrap gap-x-3">
-          {folded.map((path) => (
+        <div className="flex flex-wrap items-baseline gap-x-3">
+          {folded.slice(0, FOLDED_FILES).map((path) => (
             <ViewFile key={path} path={path} onViewFile={onViewFile} />
           ))}
+          {folded.length > FOLDED_FILES && (
+            <span className="font-code-sm text-code-sm text-subtle">+{folded.length - FOLDED_FILES} more</span>
+          )}
         </div>
       )}
       {expanded && (
@@ -98,6 +102,16 @@ export function ToolBurst({
       )}
     </div>
   );
+}
+
+const FOLDED_FILES = 3;
+const WRITERS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+
+const isPath = (p: string | null): p is string => p !== null;
+
+/** The files a run of calls wrote or edited, once each, in order. */
+function writtenFiles(calls: readonly ToolCall[]): string[] {
+  return [...new Set(calls.filter((c) => WRITERS.has(c.tool)).map(viewablePath).filter(isPath))];
 }
 
 /** A call is running while its result has not landed — claimed only for a

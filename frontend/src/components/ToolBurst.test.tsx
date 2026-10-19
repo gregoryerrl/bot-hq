@@ -82,6 +82,27 @@ describe("ToolBurst", () => {
     expect(onViewFile).toHaveBeenCalledWith("/p/src/components/ChatPane.tsx");
   });
 
+  it("offers the files a folded run wrote, not every path it read", () => {
+    const onViewFile = vi.fn();
+    const burst = burstOf([
+      use("a", "Read", { file_path: "/p/src/a.ts" }, 0),
+      result("a", "1\ta", 1),
+      use("b", "Edit", { file_path: "/p/src/b.ts", old_string: "x", new_string: "y" }, 2),
+      result("b", "The file has been updated.", 3),
+      use("c", "Bash", { command: "cat --file /tmp/notes.md" }, 4),
+      result("c", "notes", 5),
+    ]);
+    render(<Harness burst={burst} onViewFile={onViewFile} />);
+    expect(screen.getAllByRole("button", { name: /^View / }).map((b) => b.textContent)).toEqual(["View b.ts"]);
+    // Opened, every call that names a file has its own link.
+    fireEvent.click(screen.getByRole("button", { name: /3 tools/ }));
+    expect(screen.getAllByRole("button", { name: /^View / }).map((b) => b.textContent)).toEqual([
+      "View a.ts",
+      "View b.ts",
+      "View notes.md",
+    ]);
+  });
+
   it("says a call is running, with its elapsed time, until its result lands", () => {
     const burst = burstOf([use("a", "Bash", { command: "cargo build --release" }, 0)]);
     render(<Harness burst={burst} />);

@@ -29,6 +29,9 @@ export const CHAT_PAGE = 300;
 /** How close to the bottom (px) still counts as "at the bottom" for
  * auto-follow — same threshold the old useStickyScroll hook used. */
 const STICKY_THRESHOLD_PX = 80;
+/** How long after a burst is opened or closed its resize counts as the
+ *  user's own (it is measured within a frame or two). */
+const TOGGLE_SETTLE_MS = 1000;
 
 /**
  * The session chat: message history + live batches, virtualized.
@@ -125,9 +128,18 @@ export function ChatPane({
     [sessionId, applyBatch],
   );
 
+  // The burst the user just opened or closed, and when: its own growth must
+  // not scroll the chat (see the virtualizer's size-change rule below).
+  const toggled = useRef<{ key: number; at: number } | null>(null);
   // Lifted tool-burst expand state (see doc comment).
   const [expandedIds, setExpandedIds] = useState<Set<number>>(() => new Set());
   const onToggleExpand = useCallback((id: number) => {
+    // Opening a burst is the user reading it: the chat stops following the
+    // bottom, so the burst's line stays where it was clicked and its calls
+    // open below it. Pinned, the growth scrolled the opened list up and out
+    // of view (seen in the rig).
+    setStuck(false);
+    toggled.current = { key: id, at: Date.now() };
     setExpandedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -151,16 +163,34 @@ export function ChatPane({
     overscan: 8,
     getItemKey: (i) => rows[i].key,
   });
+  // The virtualizer keeps the view steady when a row ABOVE it changes size by
+  // scrolling the same amount. A burst the user just clicked sits at the top
+  // edge, which counted as above: opening it scrolled its own line out of
+  // view. Its growth now runs downward from where it was clicked.
+  // Only for a moment after a click; the library's own rule (which also spares
+  // re-measurements while scrolling up) applies the rest of the time.
+  const fresh = toggled.current !== null && Date.now() - toggled.current.at < TOGGLE_SETTLE_MS;
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = fresh
+    ? (item, _delta, instance) => item.key !== toggled.current?.key && item.start < (instance.scrollOffset ?? 0)
+    : undefined;
   const totalSize = virtualizer.getTotalSize();
 
   // Sticky-bottom tracking (inlined from the retired useStickyScroll hook —
   // the pin effect below additionally needs `totalSize`, which only exists
   // after the virtualizer is constructed on this component's own ref).
   const [stuck, setStuck] = useState(true);
+  // The position our own pin last set. Its scroll event arrives after rows
+  // that measured taller in between have moved the bottom away; read as the
+  // user's scroll, it unstuck a chat that had just opened (seen in the visual
+  // pass's rig with a page of tool bursts). Only a scroll AWAY from the pinned
+  // position is the user's.
+  const pinnedTop = useRef<number | null>(null);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
+      if (pinnedTop.current !== null && Math.abs(el.scrollTop - pinnedTop.current) < 1) return;
+      pinnedTop.current = null;
       const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
       setStuck(distance < STICKY_THRESHOLD_PX);
     };
@@ -177,12 +207,14 @@ export function ChatPane({
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    pinnedTop.current = el.scrollTop;
   }, [messages.length, totalSize, stuck]);
 
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
+    pinnedTop.current = el.scrollTop;
     setStuck(true);
   }, []);
 

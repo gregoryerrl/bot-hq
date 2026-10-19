@@ -361,6 +361,8 @@ describe("ChatPane", () => {
         ],
       });
     });
+    // The three calls are one burst; opened, each call carries its own link.
+    fireEvent.click(await screen.findByRole("button", { name: /3 tools/ }));
     const readBtn = await screen.findByRole("button", { name: "View lib.rs" });
     fireEvent.click(readBtn);
     expect(onViewFile).toHaveBeenCalledWith("/repo/src/lib.rs");
