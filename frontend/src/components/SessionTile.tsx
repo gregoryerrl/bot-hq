@@ -19,6 +19,7 @@ import { authorColorClass } from "./authorColor";
 import { WarnIcon } from "./icons";
 import { authorLabel } from "../lib/participants";
 import { Chip } from "./ui/Chip";
+import { shortSessionId } from "../lib/sessionId";
 
 interface SessionTileProps {
   session: SessionInfo;
@@ -113,8 +114,11 @@ function SessionTileImpl({
           {/* Wraps at three columns: id + phase + NEEDS DIRECTION + SOLO run
               past ~330 px, and the tile is overflow-hidden. */}
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <code className="font-label-caps text-label-caps text-on-surface-variant">
-              {formatSessionId(session.id)}
+            {/* The one session-id form the app shows everywhere (the visual
+                pass, S4): `s-69ef19`, as typed — label-caps never uppercases
+                an identifier (DESIGN.md amendments). It was `S-69EF` here. */}
+            <code className="font-code-sm text-code-sm text-muted" title={session.id}>
+              {shortSessionId(session.id)}
             </code>
             <SessionPhaseChip phase={phase} closed={closed} />
             {!closed && (
@@ -219,11 +223,6 @@ function SessionTileImpl({
 // change.
 export const SessionTile = memo(SessionTileImpl);
 
-function formatSessionId(id: string): string {
-  // sessions are spawned as `s-<8 hex>`; show `S-XXXX` to mirror the design.
-  const cleaned = id.replace(/^s-/i, "");
-  return `S-${cleaned.slice(0, 4).toUpperCase() || "????"}`;
-}
 
 // The age sits in the header row (once); this line is the repo.
 function describe(session: SessionInfo): string {

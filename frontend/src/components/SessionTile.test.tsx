@@ -38,9 +38,9 @@ describe("SessionTile", () => {
     expect(screen.getByText(/Refactor auth flow/i)).toBeInTheDocument();
   });
 
-  it("shows the session id chip in S-XXXX form", () => {
+  it("shows the session id in the app's one short form, as typed", () => {
     renderTile();
-    expect(screen.getByText("S-ABCD")).toBeInTheDocument();
+    expect(screen.getByText("s-abcd12")).toHaveAttribute("title", "s-abcd1234");
   });
 
   it("renders the needs-you indicator when the session waits on the user", () => {
