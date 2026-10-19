@@ -193,7 +193,7 @@ function Field({
       </span>
       {children}
       {hint && (
-        <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant/70">
+        <span className="mt-1 block font-body-md text-body-md text-muted">
           {hint}
         </span>
       )}

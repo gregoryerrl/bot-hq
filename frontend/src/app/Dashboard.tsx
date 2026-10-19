@@ -734,7 +734,7 @@ export function Dashboard() {
                   </option>
                 ))}
               </select>
-              <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+              <span className="mt-1 block font-body-md text-body-md text-muted">
                 Drives git diff in the Apply tab + project-specific
                 policy. Leave blank for ad-hoc scopes.
               </span>

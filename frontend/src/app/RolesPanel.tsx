@@ -645,7 +645,7 @@ function RoleForm({
               </option>
             ))}
           </select>
-          <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+          <span className="mt-1 block font-body-md text-body-md text-muted">
             {models.length === 0
               ? "No saved models yet — add them in the Models tab."
               : "The New-session dialog can override this per participant."}
@@ -685,7 +685,7 @@ function RoleForm({
                 {ULTRACODE}
               </option>
             </select>
-            <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+            <span className="mt-1 block font-body-md text-body-md text-muted">
               What this role's participants spawn with unless the New-session
               dialog picks otherwise. New roles start at {DEFAULT_EFFORT};
               sessions record the resolved value on their spawn badge.
@@ -707,7 +707,7 @@ function RoleForm({
           placeholder="Markdown. The role's identity, voice and priorities — injected into every session this role joins."
           className="min-h-[22rem] w-full resize-y whitespace-pre-wrap break-words rounded border border-outline-variant bg-surface-container-lowest px-3 py-2 font-code-sm text-code-sm leading-relaxed text-on-surface caret-primary placeholder:text-on-surface-variant focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
         />
-        <span className="mt-1 block max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+        <span className="mt-1 block max-w-prose font-body-md text-body-md text-muted">
           Markdown, injected into every session this role joins. It is the
           role&rsquo;s identity layer only — bot-hq&rsquo;s core rules and the
           rules derived from the capabilities below are composed after it at
@@ -845,7 +845,7 @@ function RoleForm({
                           <span className="block font-body-md text-body-md text-on-surface">
                             {cap.label}
                           </span>
-                          <span className="block font-code-sm text-code-sm text-on-surface-variant">
+                          <span className="block font-body-md text-body-md text-muted">
                             {cap.description}
                           </span>
                           {missing.length > 0 && (

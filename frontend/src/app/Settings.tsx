@@ -972,7 +972,7 @@ function DiagnosticsPanel() {
               Save
             </Button>
           </div>
-          <span className="mt-1 block max-w-prose font-code-sm text-code-sm text-on-surface-variant">
+          <span className="mt-1 block max-w-prose font-body-md text-body-md text-muted">
             Deploy your own sink from{" "}
             <span className="text-on-surface">packaging/telemetry-worker/</span>{" "}
             and paste its URL to keep diagnostics entirely yours. Empty = the
