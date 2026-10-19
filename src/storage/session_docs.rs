@@ -133,6 +133,23 @@ impl Storage {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Undo a dismiss (the document's own "Mark done" → Undo): the action item
+    /// is listed again. Returns whether a row changed — false for a doc that
+    /// is not an action item or was not dismissed.
+    pub async fn undismiss_user_action_item(&self, session_id: &str, slug: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_documents SET dismissed_at = NULL \
+             WHERE session_id = ? AND slug = ? AND kind = ? AND dismissed_at IS NOT NULL",
+        )
+        .bind(session_id)
+        .bind(slug)
+        .bind(DOC_KIND_USER_ACTION)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("undoing the dismiss of action item {session_id}/{slug}"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// The user's open action items across EVERY session, open or closed,
     /// newest first (0099, feedback #89): `user_action` docs not dismissed.
     pub async fn user_action_items(&self) -> Result<Vec<UserActionItem>> {

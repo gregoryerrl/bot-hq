@@ -7,6 +7,14 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+### Added
+
+- **A document waiting on you can be marked done where you read it.** A
+  FOR YOU document (one an agent wrote for you to act on) could only be put
+  away from the dashboard's "Your action items" list. Its own header now has
+  **Mark done**; once done it says when, and **Undo** puts it back on the
+  list. The dashboard's list follows either way.
+
 ## [1.0.9] — 2026-10-18
 
 A second Claude account beside the first, gates that run inside a time window

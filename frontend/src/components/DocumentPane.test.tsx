@@ -437,6 +437,64 @@ describe("custom document tabs", () => {
     expect(tab).toHaveAttribute("aria-selected", "true");
   });
 
+  // The user, 2026-10-19: a FOR YOU document could only be marked done from the
+  // dashboard. Its own header now has Mark done, and Undo once it is done;
+  // both refresh the dashboard's list.
+  it("marks an action item done from the document itself, and undoes it", async () => {
+    const eod = {
+      id: 4,
+      session_id: "s1",
+      slug: "eod-draft",
+      body: "Today we shipped the thing.",
+      phase: null,
+      kind: "user_action",
+      dismissed_at: null as string | null,
+      created_at: "2026-08-18T10:03:00Z",
+      updated_at: "2026-08-18T10:03:00Z",
+    };
+    mockInvoke.mockImplementation((cmd: string) => {
+      if (cmd === "session_doc_search") return Promise.resolve([...docs, { ...eod }]);
+      if (cmd === "compute_apply_diff") return Promise.resolve({ lines: [], note: null });
+      if (cmd === "dismiss_user_action_item") {
+        eod.dismissed_at = "2026-08-18T11:00:00Z";
+        return Promise.resolve(true);
+      }
+      if (cmd === "undismiss_user_action_item") {
+        eod.dismissed_at = null;
+        return Promise.resolve(true);
+      }
+      return Promise.resolve([]);
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidate = vi.spyOn(qc, "invalidateQueries");
+    render(
+      <QueryClientProvider client={qc}>
+        <DocumentPane sessionId="s1" sessionPhase="apply" openDocSlug="eod-draft" />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Mark done" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("dismiss_user_action_item", { sessionId: "s1", slug: "eod-draft" }),
+    );
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["list_user_action_items"] });
+    expect(await screen.findByText(/^Done · /)).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /eod-draft/ })).toHaveTextContent("DONE");
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("undismiss_user_action_item", { sessionId: "s1", slug: "eod-draft" }),
+    );
+    expect(await screen.findByRole("button", { name: "Mark done" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /eod-draft/ })).toHaveTextContent("FOR YOU");
+  });
+
+  it("offers Mark done only on an action item", async () => {
+    renderDocs();
+    fireEvent.click(await screen.findByRole("tab", { name: "tasks.md" }));
+    expect(await screen.findByText("first task")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Mark done" })).toBeNull();
+  });
+
   // Round 12 — the user's ideas.md: custom documents are the user's to edit,
   // delete and create; the I/P/A/V documents stay the participants'.
   it("lets the user edit a custom document, and offers no editor on a phase doc", async () => {

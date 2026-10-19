@@ -1277,6 +1277,18 @@ async dismissUserActionItem(sessionId: string, slug: string) : Promise<Result<bo
 }
 },
 /**
+ * Undo a dismiss: the action item is listed again (the document's own
+ * "Mark done" → Undo). Returns whether a dismissed item was restored.
+ */
+async undismissUserActionItem(sessionId: string, slug: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("undismiss_user_action_item", { sessionId, slug }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Run `git diff --no-color <session_start_sha>` (falling back to
  * `git diff HEAD` if the anchor was never captured) inside the session's
  * `working_repo_path`, then classify each line via [`parse_diff_lines`].

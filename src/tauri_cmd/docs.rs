@@ -101,6 +101,25 @@ pub async fn dismiss_user_action_item(
     Ok(dismissed)
 }
 
+/// Undo a dismiss: the action item is listed again (the document's own
+/// "Mark done" → Undo). Returns whether a dismissed item was restored.
+#[tauri::command]
+#[specta::specta]
+pub async fn undismiss_user_action_item(
+    bridge: tauri::State<'_, Arc<SignalingBridge>>,
+    session_id: String,
+    slug: String,
+) -> Result<bool, AppError> {
+    let Some(storage) = bridge.storage_handle().await else {
+        return Ok(false);
+    };
+    let restored = storage.undismiss_user_action_item(&session_id, &slug).await?;
+    if restored {
+        bridge.notify_doc_changed(&session_id);
+    }
+    Ok(restored)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn session_doc_search(

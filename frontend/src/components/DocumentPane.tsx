@@ -471,6 +471,32 @@ function DocArticle({
   const [draft, setDraft] = useState(doc.body);
   const [saving, setSaving] = useState(false);
   const editable = !!onSave;
+  // A document the user must act on (FOR YOU) is marked done from its own
+  // header — it used to take a trip to the dashboard's action-items list —
+  // and the mark can be undone here too.
+  const queryClient = useQueryClient();
+  const actionItem = doc.kind === "user_action";
+  const done = doc.dismissed_at != null;
+  const [marking, setMarking] = useState(false);
+  const [markError, setMarkError] = useState<string | null>(null);
+  const setDone = async (next: boolean) => {
+    setMarking(true);
+    setMarkError(null);
+    try {
+      await invoke<boolean>(next ? "dismiss_user_action_item" : "undismiss_user_action_item", {
+        sessionId: doc.session_id,
+        slug: doc.slug,
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["list_user_action_items"] }),
+        queryClient.invalidateQueries({ queryKey: ["session_doc_search"] }),
+      ]);
+    } catch (e) {
+      setMarkError(errorMessage(e));
+    } finally {
+      setMarking(false);
+    }
+  };
   const pill =
     "rounded border border-outline-variant bg-transparent px-2 py-0.5 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50";
   return (
@@ -480,6 +506,36 @@ function DocArticle({
           {doc.slug}
         </h4>
         <div className="flex shrink-0 items-center gap-2">
+          {actionItem &&
+            (done ? (
+              <>
+                <span
+                  className="font-label-caps text-label-caps text-on-surface-variant"
+                  title={doc.dismissed_at ?? undefined}
+                >
+                  Done · {formatTimestamp(doc.dismissed_at ?? "")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setDone(false)}
+                  disabled={marking}
+                  title="Put this back on your action items"
+                  className={pill}
+                >
+                  Undo
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setDone(true)}
+                disabled={marking}
+                title="Done with it — takes it off your action items"
+                className={cn(pill, "border-tertiary/60 text-tertiary")}
+              >
+                Mark done
+              </button>
+            ))}
           <button
             type="button"
             onClick={() => onSummarize(doc.slug)}
@@ -521,6 +577,11 @@ function DocArticle({
           </span>
         </div>
       </header>
+      {markError && (
+        <p role="alert" className="mb-2 font-code-sm text-code-sm text-error">
+          Couldn&rsquo;t update the action item: {markError}
+        </p>
+      )}
       {editing && onSave ? (
         <div className="flex flex-col gap-2">
           <textarea

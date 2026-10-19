@@ -150,6 +150,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         docs::session_doc_delete,
         docs::list_user_action_items,
         docs::dismiss_user_action_item,
+        docs::undismiss_user_action_item,
         docs::compute_apply_diff,
         docs::summarize_session_doc,
         docs::validate_model,

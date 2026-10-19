@@ -5263,12 +5263,20 @@ mod tests {
         assert!(!storage.dismiss_user_action_item("s1", "eod-draft").await.unwrap());
         assert!(storage.user_action_items().await.unwrap().is_empty());
         assert!(storage.session_document_by_slug("s1", "eod-draft").await.unwrap().unwrap().dismissed_at.is_some());
+        // Undo from the document's own header: listed again; a second undo,
+        // and an undo on a doc that is no action item, change nothing.
+        assert!(storage.undismiss_user_action_item("s1", "eod-draft").await.unwrap());
+        assert!(!storage.undismiss_user_action_item("s1", "eod-draft").await.unwrap());
+        assert_eq!(storage.user_action_items().await.unwrap().len(), 1);
+        assert!(storage.session_document_by_slug("s1", "eod-draft").await.unwrap().unwrap().dismissed_at.is_none());
+        assert!(storage.dismiss_user_action_item("s1", "eod-draft").await.unwrap());
         // Rewritten as an action item again: listed again (the agent changed
         // what the user had put away). A plain doc is never listed.
         write(json!({"slug": "eod-draft", "body": "# EOD v2", "kind": "user_action"})).await.unwrap();
         assert_eq!(storage.user_action_items().await.unwrap().len(), 1);
         write(json!({"slug": "notes", "body": "scratch"})).await.unwrap();
         assert_eq!(storage.user_action_items().await.unwrap().len(), 1);
+        assert!(!storage.undismiss_user_action_item("s1", "notes").await.unwrap(), "a plain doc has nothing to undo");
         // Refusals: a phase, and an unknown kind.
         let err = write(json!({"slug": "plan", "body": "x", "phase": "plan", "kind": "user_action"})).await.unwrap_err();
         assert_eq!(err.code, JsonRpcError::INVALID_PARAMS);
