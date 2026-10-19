@@ -55,7 +55,7 @@ export const Markdown = memo(function Markdown({
   className,
 }: MarkdownProps) {
   return (
-    <div className={cn("prose-tight break-words text-sm text-on-surface", className)}>
+    <div className={cn("prose-tight break-words font-body-md text-body-md text-on-surface", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
         {children}
       </ReactMarkdown>
@@ -128,12 +128,12 @@ const markdownComponents: Components = {
     </blockquote>
   ),
   h1: ({ children }) => (
-    <h1 className="my-2 text-base font-semibold">{children}</h1>
+    <h1 className="my-2 font-headline-md text-headline-md">{children}</h1>
   ),
   h2: ({ children }) => (
-    <h2 className="my-2 text-sm font-semibold">{children}</h2>
+    <h2 className="my-2 font-semibold">{children}</h2>
   ),
   h3: ({ children }) => (
-    <h3 className="my-2 text-sm font-semibold">{children}</h3>
+    <h3 className="my-2 font-semibold">{children}</h3>
   ),
 };

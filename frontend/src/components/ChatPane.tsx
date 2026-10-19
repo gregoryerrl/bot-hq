@@ -29,6 +29,8 @@ export const CHAT_PAGE = 300;
 /** How close to the bottom (px) still counts as "at the bottom" for
  * auto-follow — same threshold the old useStickyScroll hook used. */
 const STICKY_THRESHOLD_PX = 80;
+/** Rows bot-hq writes itself; they never continue an author's run. */
+const HOST_ROWS = new Set(["phase_change", "system_notice"]);
 /** How long after a burst is opened or closed its resize counts as the
  *  user's own (it is measured within a frame or two). */
 const TOGGLE_SETTLE_MS = 1000;
@@ -268,13 +270,15 @@ export function ChatPane({
             }
             // The byline shows once per run of one author's rows: a burst
             // after that author's prose (or prose after its burst) reads as
-            // the same turn. A phase change always breaks the run.
+            // the same turn. A phase change or a host notice always breaks the
+            // run — a notice is stored with the synthetic author "user", and
+            // the user's next message must still get its own byline.
             const prevAuthor =
               prevRow === null
                 ? null
                 : prevRow.kind === "burst"
                   ? prevRow.author
-                  : prevRow.kind === "message" && prevRow.message.kind !== "phase_change"
+                  : prevRow.kind === "message" && !HOST_ROWS.has(prevRow.message.kind)
                     ? prevRow.message.author
                     : null;
             if (row.kind === "burst") {
@@ -314,7 +318,7 @@ export function ChatPane({
                   message={m}
                   authorLabel={authorLabel(m.author, labels)}
                   authorHues={hues}
-                  groupedWithPrev={m.kind !== "phase_change" && prevAuthor === m.author}
+                  groupedWithPrev={!HOST_ROWS.has(m.kind) && prevAuthor === m.author}
                 />
               </div>
             );

@@ -133,6 +133,23 @@ describe("ChatPane", () => {
     expect(screen.getByText(/Bash/)).toBeInTheDocument();
   });
 
+  it("gives the user's message its own byline after a host notice", async () => {
+    // A notice is stored with the synthetic author "user"; it must not swallow
+    // the byline of the user's next message.
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_session_messages")
+        return Promise.resolve([
+          msg(1, "⚠ hands hit a provider limit and is paused", "system_notice", "user"),
+          msg(2, "proceed please", "text", "user"),
+        ]);
+      if (cmd === "list_session_participants") return Promise.resolve(PARTICIPANTS);
+      return Promise.resolve([]);
+    });
+    renderPane();
+    const mine = await screen.findByText("proceed please");
+    expect(mine.closest("article")?.querySelector("header")).not.toBeNull();
+  });
+
   it("renders a run of passes as one compact line and hides the pass tool rows", async () => {
     // Feedback #13: one pass was up to four rows. The call and its result go,
     // and consecutive pass lines fold into one "passed — A · B" row.
