@@ -104,7 +104,9 @@ export default {
           rose: "#ff8fa3",
           lime: "#bce57a",
           amber: "#ffd27a",
-          sky: "#86c8ff",
+          // Darker than the user's #adc6ff (contrast 1.35) and cyan (1.44):
+          // at #86c8ff a seventh participant read as you (1.05, EYES).
+          sky: "#5fb0ff",
           pink: "#ffa3d4",
           // You — the theme's tertiary blue, not Tailwind's blue-500.
           user: "#adc6ff",
@@ -187,7 +189,10 @@ export default {
         // least-important metadata, `hairline` for quiet dividers. Use these
         // instead of opacity variants of `on-surface-variant`.
         muted: "#a3adc4",
-        subtle: "#7a849c",
+        // >= 4.5:1 up to surface-container-high (5.47 on -container, 4.77
+        // on -high; #7a849c was 4.38 / 3.82, EYES fb236827). It reads 4.12
+        // on surface-container-highest: keep `subtle` off that surface.
+        subtle: "#8b95ad",
         hairline: "#262f45",
       },
       borderColor: {
