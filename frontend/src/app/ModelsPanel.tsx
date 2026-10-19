@@ -3,16 +3,14 @@ import { keepPreviousData } from "@tanstack/react-query";
 import { useTauriQuery, useTauriMutation, errorMessage } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { useFocusTrap } from "../hooks/useFocusTrap";
-import { useEscapeKey } from "../hooks/useEscapeKey";
 import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { accountLabelOf, formatLimitMark, markIsLive, marksFor } from "../lib/accounts";
 import { FieldLabel } from "./contextLibraryShared";
-import { CheckIcon, CloseIcon, CrossIcon, SaveIcon } from "../components/icons";
+import { CheckIcon, CrossIcon, SaveIcon } from "../components/icons";
 import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
-import { wideDialogClass } from "../components/ui/Dialog";
+import { Dialog } from "../components/ui/Dialog";
 import { Skeleton } from "../components/ui/Skeleton";
 import { fieldClass } from "../components/ui/field";
 
@@ -354,9 +352,6 @@ function ModelDialog({
   const [tokenVisible, setTokenVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const upsert = useTauriMutation<void, { model: ModelView }>("upsert_model");
-  const trapRef = useFocusTrap<HTMLDivElement>();
-  // Escape closes, mirroring ConfirmDialog (conditionally mounted — no guard).
-  useEscapeKey(onClose);
 
   const title = initial ? "Edit model" : "Add model";
   const providerIsCustom = !PROVIDERS.includes(
@@ -392,283 +387,25 @@ function ModelDialog({
     }
   };
 
+  // The `lg` Dialog — the New session frame (see `ui/Dialog`'s `lg`). Its scrim
+  // is the frame's SIBLING, not its parent: a drag-select across the setup
+  // commands that is released out there must not count as a click that closes
+  // the dialog and drops the draft. Its body is a flex column so the
+  // two-column block can take the body's height.
   return (
-    <>
-      {/* Scrim — the frame's SIBLING, not its parent (see `wideDialogClass`):
-          a drag-select across the setup commands that is released out here
-          must not count as a click that closes the dialog and drops the
-          draft. */}
-      <div
-        className="fixed inset-0 z-40 bg-black/60"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        ref={trapRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className={wideDialogClass}
-      >
-        <div className="mb-4 flex shrink-0 items-center justify-between">
-          <h2 className="font-headline-md text-headline-md text-on-surface">
-            {title}
-          </h2>
-          <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
-            <CloseIcon />
-          </Button>
-        </div>
-
-        {/* Two columns, as New session: the model — its id and context
-            window — and the endpoint it is reached at on the left; the
-            account it bills and the claude CLI settings on the right. Each
-            column scrolls itself on md+; below md the whole body scrolls as
-            one stack. The error line and the actions sit outside the body,
-            so a refusal is never below the fold. */}
-        <div
-          data-testid="model-dialog-body"
-          className="min-h-0 flex-1 gap-x-6 overflow-x-hidden max-md:space-y-4 max-md:overflow-y-auto md:flex"
-        >
-          <div className="min-h-0 space-y-4 overflow-x-hidden md:w-[340px] md:shrink-0 md:overflow-y-auto md:pr-1">
-            <label className="block">
-              <FieldLabel>Display name</FieldLabel>
-              <input
-                type="text"
-                value={draft.display_name}
-                onChange={(e) =>
-                  setDraft({ ...draft, display_name: e.target.value })
-                }
-                placeholder="e.g. Opus (Anthropic)"
-                autoFocus
-                className={fieldClass}
-              />
-            </label>
-
-            <label className="block">
-              <FieldLabel>Provider</FieldLabel>
-              <select
-                value={providerIsCustom ? "other" : draft.provider}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    provider: e.target.value === "other" ? "" : e.target.value,
-                  })
-                }
-                className={fieldClass}
-              >
-                <option value="anthropic">Anthropic</option>
-                <option value="openai">OpenAI</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="local">Local (llama.cpp)</option>
-                <option value="other">Other (custom)</option>
-              </select>
-              {providerIsCustom && (
-                <input
-                  type="text"
-                  value={draft.provider}
-                  onChange={(e) =>
-                    setDraft({ ...draft, provider: e.target.value })
-                  }
-                  placeholder="Custom provider"
-                  className={cn("mt-2", fieldClass)}
-                />
-              )}
-            </label>
-
-            <label className="block">
-              <FieldLabel>Model id</FieldLabel>
-              <input
-                type="text"
-                value={draft.model_name}
-                onChange={(e) =>
-                  setDraft({ ...draft, model_name: e.target.value })
-                }
-                placeholder="claude-opus-5"
-                className={fieldClass}
-              />
-            </label>
-
-            <label className="block">
-              <FieldLabel>Context window</FieldLabel>
-              <input
-                type="number"
-                min={1}
-                value={draft.context_window ?? ""}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    context_window: e.target.value
-                      ? Number(e.target.value)
-                      : null,
-                  })
-                }
-                placeholder="(unknown — meter shows a gap)"
-                className={fieldClass}
-              />
-              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
-                The provider&apos;s published limit for this model, in tokens. For a
-                model id that is not Claude&apos;s own (OpenRouter, DeepSeek, …) this
-                IS the window the claude CLI runs it at — bot-hq hands it over as{" "}
-                <code>CLAUDE_CODE_MAX_CONTEXT_TOKENS</code>; leave it blank and the
-                CLI uses its own default. For a Claude id the CLI keeps its own
-                catalog and this value is only checked against what it reports:
-                when the two disagree, the session gets a notice naming both
-                numbers.
-              </span>
-            </label>
-
-            <label className="block">
-              <FieldLabel>Base URL</FieldLabel>
-              <input
-                type="text"
-                value={draft.base_url ?? ""}
-                onChange={(e) =>
-                  setDraft({ ...draft, base_url: e.target.value || null })
-                }
-                placeholder="(provider default)"
-                className={fieldClass}
-              />
-            </label>
-
-            <label className="block">
-              <FieldLabel>Auth token</FieldLabel>
-              <div className="relative">
-                <input
-                  type={tokenVisible ? "text" : "password"}
-                  value={draft.auth_token ?? ""}
-                  onChange={(e) =>
-                    setDraft({ ...draft, auth_token: e.target.value || null })
-                  }
-                  placeholder="(unset — uses provider env vars)"
-                  className={cn(fieldClass, "pr-12")}
-                />
-                <button
-                  type="button"
-                  onClick={() => setTokenVisible((v) => !v)}
-                  className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
-                >
-                  {tokenVisible ? "Hide" : "Show"}
-                </button>
-              </div>
-            </label>
-
-            {/* The "Native loop" checkbox lived here until rc3 D9. bot-hq now has
-                one connector, so there is no runtime to choose — but the choice it
-                used to make still has a consequence the user has to be able to
-                see, which is what this says. Test lives on the saved row:
-                `validate_model` checks a stored row, never this draft. */}
-            <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-on-surface-variant">
-              Every saved model is spawned through the <strong>claude CLI</strong>,
-              so its endpoint has to speak the Anthropic Messages API. A gateway
-              that does not will fail at spawn — save it, then press{" "}
-              <strong>Test</strong> on its row to find out now instead of
-              mid-session.
+    <Dialog
+      open
+      onClose={onClose}
+      title={title}
+      size="lg"
+      bodyClassName="flex flex-col"
+      footer={
+        <>
+          {error && (
+            <p className="w-full min-w-0 break-words font-code-sm text-code-sm text-error">
+              {error}
             </p>
-          </div>
-
-          <div className="min-h-0 min-w-0 space-y-4 overflow-x-hidden md:flex-1 md:overflow-y-auto md:pr-1">
-            <label className="block">
-              <FieldLabel>Claude config dir (second account)</FieldLabel>
-              <input
-                type="text"
-                value={draft.claude_config_dir ?? ""}
-                onChange={(e) =>
-                  setDraft({ ...draft, claude_config_dir: e.target.value || null })
-                }
-                placeholder="(blank = the default ~/.claude)"
-                spellCheck={false}
-                className={fieldClass}
-              />
-              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
-                Which Claude subscription a participant on this model bills. Leave
-                it blank for the account signed in to <code>~/.claude</code>. To run
-                a second subscription beside it, give it its own absolute path (one
-                signed-in account per dir); a participant is spawned into that dir
-                and stays there for its whole life. Ignored for a gateway model —
-                its token bills the gateway.
-              </span>
-            </label>
-
-            {wantsSetup && setup.isError && (
-              <p
-                data-testid="account-setup-refusal"
-                className="break-words font-code-sm text-code-sm text-error"
-              >
-                {errorMessage(setup.error)}
-              </p>
-            )}
-            {wantsSetup && !setup.isError && setup.data && (
-              <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
-                <p className="mb-1 break-words font-body-md text-body-md text-on-surface-variant">
-                  One-time setup, in {powershell ? "PowerShell" : "your own terminal"} —
-                  sign the second account in to this dir (bot-hq never runs it), then
-                  press <strong>Test</strong> on the saved row to confirm:
-                </p>
-                <pre
-                  data-testid="account-setup-command"
-                  className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
-                >
-                  {setup.data.setup}
-                </pre>
-                <p className="mb-1 mt-2 break-words font-body-md text-body-md text-on-surface-variant">
-                  Optional: share the default dir&apos;s CLAUDE.md, settings
-                  (plugins, model overrides), skills and commands with it. Session
-                  history and memory stay per account, and a re-run skips what is
-                  already linked.
-                  {powershell && (
-                    <>
-                      {" "}The folders link as junctions; CLAUDE.md and settings.json
-                      need Developer Mode (search “For developers” in Settings) or an
-                      administrator PowerShell.
-                    </>
-                  )}
-                </p>
-                <pre
-                  data-testid="account-share-command"
-                  className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
-                >
-                  {setup.data.share}
-                </pre>
-              </div>
-            )}
-
-            <label className="block">
-              <FieldLabel>Claude CLI settings (JSON)</FieldLabel>
-              <textarea
-                value={draft.cli_settings ?? ""}
-                onChange={(e) =>
-                  setDraft({ ...draft, cli_settings: e.target.value || null })
-                }
-                placeholder='{"modelOverrides":{"claude-fable-5":"claude-fable-5-1"}}'
-                rows={3}
-                spellCheck={false}
-                className={cn(fieldClass, "resize-y whitespace-pre-wrap break-all")}
-              />
-              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
-                Merged into every participant&apos;s <code>--settings</code> at
-                spawn, executor and reviewer alike. Use it for a <em>Claude</em> id
-                the installed claude CLI does not know yet: under{" "}
-                <code>modelOverrides</code>, map a Claude id the CLI does know
-                (ideally the same family) to this one, and the CLI applies that
-                model&apos;s window. Not for a gateway model — the CLI would send the
-                mapped Claude model&apos;s request profile, which the gateway rejects
-                (OpenRouter: <code>400 configuration_update is not supported</code>);
-                a non-Claude model gets its window from the row&apos;s own limit
-                field instead (the number on the left). Must be a JSON object; a
-                role&apos;s own Claude-config override wins on any key both set.
-              </span>
-            </label>
-          </div>
-        </div>
-
-        {error && (
-          <p className="mt-3 shrink-0 break-words font-code-sm text-code-sm text-error">
-            {error}
-          </p>
-        )}
-
-        <div className="mt-5 flex shrink-0 items-center justify-end gap-2">
+          )}
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
@@ -681,8 +418,250 @@ function ModelDialog({
             <SaveIcon />
             {upsert.isPending ? "Saving…" : "Save"}
           </Button>
+        </>
+      }
+    >
+      {/* Two columns, as New session: the model — its id and context
+          window — and the endpoint it is reached at on the left; the
+          account it bills and the claude CLI settings on the right. Each
+          column scrolls itself on md+; below md the whole body scrolls as
+          one stack. The error line and the actions sit in the footer,
+          outside the body, so a refusal is never below the fold. */}
+      <div
+        data-testid="model-dialog-body"
+        className="min-h-0 flex-1 gap-x-6 overflow-x-hidden max-md:space-y-4 max-md:overflow-y-auto md:flex"
+      >
+        <div className="min-h-0 space-y-4 overflow-x-hidden md:w-[340px] md:shrink-0 md:overflow-y-auto md:pr-1">
+          <label className="block">
+            <FieldLabel>Display name</FieldLabel>
+            <input
+              type="text"
+              value={draft.display_name}
+              onChange={(e) =>
+                setDraft({ ...draft, display_name: e.target.value })
+              }
+              placeholder="e.g. Opus (Anthropic)"
+              autoFocus
+              className={fieldClass}
+            />
+          </label>
+
+          <label className="block">
+            <FieldLabel>Provider</FieldLabel>
+            <select
+              value={providerIsCustom ? "other" : draft.provider}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  provider: e.target.value === "other" ? "" : e.target.value,
+                })
+              }
+              className={fieldClass}
+            >
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="local">Local (llama.cpp)</option>
+              <option value="other">Other (custom)</option>
+            </select>
+            {providerIsCustom && (
+              <input
+                type="text"
+                value={draft.provider}
+                onChange={(e) =>
+                  setDraft({ ...draft, provider: e.target.value })
+                }
+                placeholder="Custom provider"
+                className={cn("mt-2", fieldClass)}
+              />
+            )}
+          </label>
+
+          <label className="block">
+            <FieldLabel>Model id</FieldLabel>
+            <input
+              type="text"
+              value={draft.model_name}
+              onChange={(e) =>
+                setDraft({ ...draft, model_name: e.target.value })
+              }
+              placeholder="claude-opus-5"
+              className={fieldClass}
+            />
+          </label>
+
+          <label className="block">
+            <FieldLabel>Context window</FieldLabel>
+            <input
+              type="number"
+              min={1}
+              value={draft.context_window ?? ""}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  context_window: e.target.value
+                    ? Number(e.target.value)
+                    : null,
+                })
+              }
+              placeholder="(unknown — meter shows a gap)"
+              className={fieldClass}
+            />
+            <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+              The provider&apos;s published limit for this model, in tokens. For a
+              model id that is not Claude&apos;s own (OpenRouter, DeepSeek, …) this
+              IS the window the claude CLI runs it at — bot-hq hands it over as{" "}
+              <code>CLAUDE_CODE_MAX_CONTEXT_TOKENS</code>; leave it blank and the
+              CLI uses its own default. For a Claude id the CLI keeps its own
+              catalog and this value is only checked against what it reports:
+              when the two disagree, the session gets a notice naming both
+              numbers.
+            </span>
+          </label>
+
+          <label className="block">
+            <FieldLabel>Base URL</FieldLabel>
+            <input
+              type="text"
+              value={draft.base_url ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, base_url: e.target.value || null })
+              }
+              placeholder="(provider default)"
+              className={fieldClass}
+            />
+          </label>
+
+          <label className="block">
+            <FieldLabel>Auth token</FieldLabel>
+            <div className="relative">
+              <input
+                type={tokenVisible ? "text" : "password"}
+                value={draft.auth_token ?? ""}
+                onChange={(e) =>
+                  setDraft({ ...draft, auth_token: e.target.value || null })
+                }
+                placeholder="(unset — uses provider env vars)"
+                className={cn(fieldClass, "pr-12")}
+              />
+              <button
+                type="button"
+                onClick={() => setTokenVisible((v) => !v)}
+                className="absolute inset-y-0 right-0 px-2 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:text-on-surface"
+              >
+                {tokenVisible ? "Hide" : "Show"}
+              </button>
+            </div>
+          </label>
+
+          {/* The "Native loop" checkbox lived here until rc3 D9. bot-hq now has
+              one connector, so there is no runtime to choose — but the choice it
+              used to make still has a consequence the user has to be able to
+              see, which is what this says. Test lives on the saved row:
+              `validate_model` checks a stored row, never this draft. */}
+          <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-on-surface-variant">
+            Every saved model is spawned through the <strong>claude CLI</strong>,
+            so its endpoint has to speak the Anthropic Messages API. A gateway
+            that does not will fail at spawn — save it, then press{" "}
+            <strong>Test</strong> on its row to find out now instead of
+            mid-session.
+          </p>
+        </div>
+
+        <div className="min-h-0 min-w-0 space-y-4 overflow-x-hidden md:flex-1 md:overflow-y-auto md:pr-1">
+          <label className="block">
+            <FieldLabel>Claude config dir (second account)</FieldLabel>
+            <input
+              type="text"
+              value={draft.claude_config_dir ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, claude_config_dir: e.target.value || null })
+              }
+              placeholder="(blank = the default ~/.claude)"
+              spellCheck={false}
+              className={fieldClass}
+            />
+            <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+              Which Claude subscription a participant on this model bills. Leave
+              it blank for the account signed in to <code>~/.claude</code>. To run
+              a second subscription beside it, give it its own absolute path (one
+              signed-in account per dir); a participant is spawned into that dir
+              and stays there for its whole life. Ignored for a gateway model —
+              its token bills the gateway.
+            </span>
+          </label>
+
+          {wantsSetup && setup.isError && (
+            <p
+              data-testid="account-setup-refusal"
+              className="break-words font-code-sm text-code-sm text-error"
+            >
+              {errorMessage(setup.error)}
+            </p>
+          )}
+          {wantsSetup && !setup.isError && setup.data && (
+            <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
+              <p className="mb-1 break-words font-body-md text-body-md text-on-surface-variant">
+                One-time setup, in {powershell ? "PowerShell" : "your own terminal"} —
+                sign the second account in to this dir (bot-hq never runs it), then
+                press <strong>Test</strong> on the saved row to confirm:
+              </p>
+              <pre
+                data-testid="account-setup-command"
+                className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
+              >
+                {setup.data.setup}
+              </pre>
+              <p className="mb-1 mt-2 break-words font-body-md text-body-md text-on-surface-variant">
+                Optional: share the default dir&apos;s CLAUDE.md, settings
+                (plugins, model overrides), skills and commands with it. Session
+                history and memory stay per account, and a re-run skips what is
+                already linked.
+                {powershell && (
+                  <>
+                    {" "}The folders link as junctions; CLAUDE.md and settings.json
+                    need Developer Mode (search “For developers” in Settings) or an
+                    administrator PowerShell.
+                  </>
+                )}
+              </p>
+              <pre
+                data-testid="account-share-command"
+                className="select-all overflow-x-hidden whitespace-pre-wrap break-all rounded bg-surface-container p-2 font-code-sm text-code-sm text-on-surface"
+              >
+                {setup.data.share}
+              </pre>
+            </div>
+          )}
+
+          <label className="block">
+            <FieldLabel>Claude CLI settings (JSON)</FieldLabel>
+            <textarea
+              value={draft.cli_settings ?? ""}
+              onChange={(e) =>
+                setDraft({ ...draft, cli_settings: e.target.value || null })
+              }
+              placeholder='{"modelOverrides":{"claude-fable-5":"claude-fable-5-1"}}'
+              rows={3}
+              spellCheck={false}
+              className={cn(fieldClass, "resize-y whitespace-pre-wrap break-all")}
+            />
+            <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+              Merged into every participant&apos;s <code>--settings</code> at
+              spawn, executor and reviewer alike. Use it for a <em>Claude</em> id
+              the installed claude CLI does not know yet: under{" "}
+              <code>modelOverrides</code>, map a Claude id the CLI does know
+              (ideally the same family) to this one, and the CLI applies that
+              model&apos;s window. Not for a gateway model — the CLI would send the
+              mapped Claude model&apos;s request profile, which the gateway rejects
+              (OpenRouter: <code>400 configuration_update is not supported</code>);
+              a non-Claude model gets its window from the row&apos;s own limit
+              field instead (the number on the left). Must be a JSON object; a
+              role&apos;s own Claude-config override wins on any key both set.
+            </span>
+          </label>
         </div>
       </div>
-    </>
+    </Dialog>
   );
 }

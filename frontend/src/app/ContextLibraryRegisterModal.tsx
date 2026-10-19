@@ -2,10 +2,9 @@ import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { errorMessage } from "../hooks/useInvoke";
 import { baseName, pickFolder } from "./contextLibraryShared";
-import { useFocusTrap } from "../hooks/useFocusTrap";
-import { useEscapeKey } from "../hooks/useEscapeKey";
 import { ChevronRightIcon } from "../components/icons";
 import { Button } from "../components/ui/Button";
+import { Dialog } from "../components/ui/Dialog";
 import { fieldClass } from "../components/ui/field";
 
 // ============================================================================
@@ -37,13 +36,6 @@ export function RegisterProjectModal({
   const [clPath, setClPath] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const trapRef = useFocusTrap<HTMLDivElement>(open);
-
-  // Escape closes, mirroring ConfirmDialog. Guarded on `open` because this
-  // modal stays mounted while hidden.
-  useEscapeKey(onClose, open);
-
-  if (!open) return null;
 
   // Suggest a name from whichever path the user filled (repo, then advanced
   // cl_path) so the common case is one field.
@@ -111,133 +103,16 @@ export function RegisterProjectModal({
     }
   };
 
+  // The one Dialog (S2f): Escape, the scrim and the close button all call
+  // `onClose`. Its scrim is the frame's sibling — this one used to be the
+  // frame's parent, so a drag-select released over it closed the modal.
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="New project"
-      onClick={onClose}
-    >
-      <div
-        ref={trapRef}
-        tabIndex={-1}
-        className="w-full max-w-md rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="font-headline-md text-headline-md text-on-surface">
-          New project
-        </h2>
-        <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-          Creates a Context Library project at the managed location. The working
-          repo is bound for sessions — its files are <strong>not</strong>{" "}
-          indexed.
-        </p>
-
-        <label className="mt-4 block">
-          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-            Name
-          </span>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={suggestedName || "project-name"}
-            autoFocus
-            className={fieldClass}
-          />
-        </label>
-
-        <label className="mt-3 block">
-          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-            Working repo <span className="opacity-60">(optional)</span>
-          </span>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={workingRepo}
-              onChange={(e) => setWorkingRepo(e.target.value)}
-              placeholder="(where sessions run — leave blank for none)"
-              className={fieldClass}
-            />
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                browse("Choose working repo", workingRepo, setWorkingRepo)
-              }
-              className="shrink-0"
-            >
-              Browse…
-            </Button>
-          </div>
-        </label>
-
-        <label className="mt-3 block">
-          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-            Description <span className="opacity-60">(optional)</span>
-          </span>
-          <input
-            type="text"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="one-line summary"
-            className={fieldClass}
-          />
-        </label>
-
-        <div className="mt-4 border-t border-outline-variant pt-3">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            aria-expanded={advancedOpen}
-            className="flex items-center gap-1 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:text-on-surface"
-          >
-            <span
-              aria-hidden
-              className={`inline-block w-3 transition-transform ${advancedOpen ? "rotate-90" : ""}`}
-            >
-              <ChevronRightIcon className="size-3" />
-            </span>
-            Advanced
-          </button>
-          {advancedOpen && (
-            <label className="mt-2 block">
-              <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                Use an existing folder as CL content
-              </span>
-              <div className="flex items-center gap-2">
-                <input
-                  type="text"
-                  value={clPath}
-                  onChange={(e) => setClPath(e.target.value)}
-                  placeholder="(advanced — for a docs folder, not a code repo)"
-                  className={fieldClass}
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={() =>
-                    browse("Choose CL content folder", clPath, setClPath)
-                  }
-                  className="shrink-0"
-                >
-                  Browse…
-                </Button>
-              </div>
-              <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-                Indexes that folder's docs as this project's Context Library.
-                Leave empty to use the managed default (recommended).
-              </p>
-            </label>
-          )}
-        </div>
-
-        {error && (
-          <p className="mt-3 font-code-sm text-code-sm text-error">{error}</p>
-        )}
-
-        <div className="mt-4 flex items-center justify-end gap-2">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title="New project"
+      footer={
+        <>
           <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
           </Button>
@@ -249,8 +124,117 @@ export function RegisterProjectModal({
           >
             {busy ? "Creating…" : useClPath ? "Index folder" : "Create"}
           </Button>
+        </>
+      }
+    >
+      <p className="font-code-sm text-code-sm text-on-surface-variant">
+        Creates a Context Library project at the managed location. The working
+        repo is bound for sessions — its files are <strong>not</strong>{" "}
+        indexed.
+      </p>
+
+      <label className="mt-4 block">
+        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+          Name
+        </span>
+        <input
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={suggestedName || "project-name"}
+          autoFocus
+          className={fieldClass}
+        />
+      </label>
+
+      <label className="mt-3 block">
+        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+          Working repo <span className="opacity-60">(optional)</span>
+        </span>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={workingRepo}
+            onChange={(e) => setWorkingRepo(e.target.value)}
+            placeholder="(where sessions run — leave blank for none)"
+            className={fieldClass}
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() =>
+              browse("Choose working repo", workingRepo, setWorkingRepo)
+            }
+            className="shrink-0"
+          >
+            Browse…
+          </Button>
         </div>
+      </label>
+
+      <label className="mt-3 block">
+        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+          Description <span className="opacity-60">(optional)</span>
+        </span>
+        <input
+          type="text"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          placeholder="one-line summary"
+          className={fieldClass}
+        />
+      </label>
+
+      <div className="mt-4 border-t border-outline-variant pt-3">
+        <button
+          type="button"
+          onClick={() => setAdvancedOpen((v) => !v)}
+          aria-expanded={advancedOpen}
+          className="flex items-center gap-1 font-label-caps text-label-caps text-on-surface-variant transition-colors hover:text-on-surface"
+        >
+          <span
+            aria-hidden
+            className={`inline-block w-3 transition-transform ${advancedOpen ? "rotate-90" : ""}`}
+          >
+            <ChevronRightIcon className="size-3" />
+          </span>
+          Advanced
+        </button>
+        {advancedOpen && (
+          <label className="mt-2 block">
+            <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+              Use an existing folder as CL content
+            </span>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={clPath}
+                onChange={(e) => setClPath(e.target.value)}
+                placeholder="(advanced — for a docs folder, not a code repo)"
+                className={fieldClass}
+              />
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  browse("Choose CL content folder", clPath, setClPath)
+                }
+                className="shrink-0"
+              >
+                Browse…
+              </Button>
+            </div>
+            <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+              Indexes that folder's docs as this project's Context Library.
+              Leave empty to use the managed default (recommended).
+            </p>
+          </label>
+        )}
       </div>
-    </div>
+
+      {error && (
+        <p className="mt-3 font-code-sm text-code-sm text-error">{error}</p>
+      )}
+    </Dialog>
   );
 }

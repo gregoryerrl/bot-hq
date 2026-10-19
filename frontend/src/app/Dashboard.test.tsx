@@ -12,7 +12,6 @@ import {
 } from "./Dashboard";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountMark, ClaudeOverrides, ModelView, RoleView } from "../lib/bindings";
-import { wideDialogClass } from "../components/ui/Dialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 // The dashboard subscribes to `agent:messages:batch` for Quickview liveness.
@@ -742,11 +741,16 @@ describe("New session dialog — the frame", () => {
   beforeEach(() => mockInvoke.mockReset());
 
   // The Add/Edit model dialog was made "wide like the New session dialog" by
-  // sharing this one frame; this keeps the two from drifting apart.
+  // sharing this one frame — both are the kit's `lg` Dialog now, its fixed,
+  // viewport-clamped size; this keeps the two from drifting apart
+  // (`ModelsPanel.test.tsx` pins the same size).
   it("is the shared wide frame", async () => {
     mockBackend();
     await openDialog();
-    expect(screen.getByRole("dialog", { name: /new session/i }).className).toBe(wideDialogClass);
+    expect(screen.getByRole("dialog", { name: /new session/i })).toHaveClass(
+      "h-[min(760px,90vh)]",
+      "w-[min(1100px,92vw)]",
+    );
   });
 });
 

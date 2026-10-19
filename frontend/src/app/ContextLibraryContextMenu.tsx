@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { Button } from "../components/ui/Button";
-import { useFocusTrap } from "../hooks/useFocusTrap";
-import { useEscapeKey } from "../hooks/useEscapeKey";
+import { Dialog } from "../components/ui/Dialog";
 import { fieldClass } from "../components/ui/field";
 
 // ============================================================================
@@ -101,10 +100,6 @@ export function ActionModal({
   onClose: () => void;
 }) {
   const [value, setValue] = useState(initialValue ?? "");
-  const trapRef = useFocusTrap<HTMLDivElement>();
-  // Escape closes, mirroring ConfirmDialog (the modal is conditionally
-  // mounted by its parent, so no `open` guard is needed).
-  useEscapeKey(onClose);
   const hasInput = inputLabel != null;
   const canConfirm = !busy && (!hasInput || value.trim().length > 0);
   const submit = () => {
@@ -112,49 +107,17 @@ export function ActionModal({
     onConfirm(hasInput ? value.trim() : "");
   };
 
+  // The one Dialog (S2f), always open — the parent mounts this only while an
+  // action is pending. Escape, the scrim and the close button all call
+  // `onClose`. Its scrim is the frame's sibling: this modal's used to be the
+  // frame's parent, so a drag-select released over it closed the modal.
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      onClick={onClose}
-    >
-      <div
-        ref={trapRef}
-        tabIndex={-1}
-        className="w-full max-w-sm rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="font-headline-md text-headline-md text-on-surface">
-          {title}
-        </h2>
-        {message && (
-          <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-            {message}
-          </p>
-        )}
-        {hasInput && (
-          <label className="mt-3 block">
-            <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-              {inputLabel}
-            </span>
-            <input
-              type="text"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
-              autoFocus
-              className={fieldClass}
-            />
-          </label>
-        )}
-        {error && (
-          <p className="mt-2 font-code-sm text-code-sm text-error">{error}</p>
-        )}
-        <div className="mt-4 flex justify-end gap-2">
+    <Dialog
+      open
+      onClose={onClose}
+      title={title}
+      footer={
+        <>
           <Button variant="secondary" size="sm" onClick={onClose}>
             Cancel
           </Button>
@@ -166,8 +129,34 @@ export function ActionModal({
           >
             {busy ? "Working…" : confirmLabel}
           </Button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      {message && (
+        <p className="font-code-sm text-code-sm text-on-surface-variant">
+          {message}
+        </p>
+      )}
+      {hasInput && (
+        <label className="mt-3 block first:mt-0">
+          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+            {inputLabel}
+          </span>
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            autoFocus
+            className={fieldClass}
+          />
+        </label>
+      )}
+      {error && (
+        <p className="mt-2 font-code-sm text-code-sm text-error">{error}</p>
+      )}
+    </Dialog>
   );
 }

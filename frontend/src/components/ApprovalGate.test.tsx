@@ -451,6 +451,7 @@ describe("ApprovalGate", () => {
     expect(dialog).toHaveTextContent("Approve / Reject");
     expect(dialog).toHaveTextContent("Context the card never shows.");
     expect(dialog).toHaveTextContent("closes the guard gap the suite proved");
+    // One Close since the one Dialog (S2f): the title row's.
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
     expect(screen.queryByRole("dialog")).toBeNull();
   });

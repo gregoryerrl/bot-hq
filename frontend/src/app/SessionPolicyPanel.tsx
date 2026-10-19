@@ -92,9 +92,11 @@ export function SessionPolicyPanel({
   return (
     <>
     {/* The scrim: the drawer is modal (aria-modal), so the page behind it is
-        dimmed and a click on it closes the drawer — through the same guard. */}
+        dimmed and a click on it closes the drawer — through the same guard.
+        The theme's `scrim`, lighter than a dialog's /60: a drawer leaves the
+        page in view. */}
     <div
-      className="fixed inset-0 z-30 bg-black/40"
+      className="fixed inset-0 z-30 bg-scrim/40"
       onClick={requestClose}
       aria-hidden
       data-testid="session-settings-scrim"
@@ -105,9 +107,11 @@ export function SessionPolicyPanel({
       role="dialog"
       aria-modal="true"
       aria-label="Session settings"
+      // DESIGN.md's Right-Pane Overlay: a 12px backdrop blur (`backdrop-blur-md`)
+      // under a 95% fill — an opaque fill would leave nothing to blur.
       className={cn(
         "fixed inset-y-0 right-0 z-30 flex w-full flex-col",
-        "border-l border-outline-variant bg-background shadow-2xl md:w-1/2",
+        "border-l border-outline-variant bg-background/95 shadow-2xl backdrop-blur-md md:w-1/2",
       )}
     >
       <header className="flex h-12 flex-shrink-0 items-center justify-between border-b border-outline-variant bg-surface-container px-4">

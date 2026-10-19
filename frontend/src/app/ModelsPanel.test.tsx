@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ModelsPanel, accountLabelOf, limitLine, marksFor } from "./ModelsPanel";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountMark, AccountSetupCommands, ModelView } from "../lib/bindings";
-import { wideDialogClass } from "../components/ui/Dialog";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const mockInvoke = vi.mocked(invoke);
@@ -163,9 +162,16 @@ describe("Settings → Models — the dialog fits the window", () => {
     renderPanel();
     fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
     const dialog = await screen.findByRole("dialog", { name: /add model/i });
-    expect(dialog.className).toBe(wideDialogClass);
+    // The kit's `lg` Dialog — the New session frame (`Dashboard.test.tsx` pins
+    // the same size).
     expect(tokens(dialog)).toEqual(
-      expect.arrayContaining(["flex", "flex-col", "overflow-hidden", "h-[min(760px,90vh)]"]),
+      expect.arrayContaining([
+        "flex",
+        "flex-col",
+        "overflow-hidden",
+        "h-[min(760px,90vh)]",
+        "w-[min(1100px,92vw)]",
+      ]),
     );
 
     // Below md the body is the one scroller; on md+ each column scrolls itself.

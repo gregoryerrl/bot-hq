@@ -1,11 +1,10 @@
 import { useState } from "react";
 import { Button } from "./ui/Button";
+import { Dialog } from "./ui/Dialog";
 import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
 import { formatRelative, formatTimestamp } from "../lib/time";
-import { useFocusTrap } from "../hooks/useFocusTrap";
-import { useEscapeKey } from "../hooks/useEscapeKey";
 import type { TrayRow } from "./HaltBanner";
 import { fileArgsInCommand } from "./FileViewerDialog";
 import { clampOverflows, useMeasuredClampOverflow } from "../hooks/useClampOverflow";
@@ -376,82 +375,56 @@ function GateDetailsDialog({
   onClose: () => void;
   onViewFile?: (path: string) => void;
 }) {
-  const trapRef = useFocusTrap<HTMLDivElement>(true);
-  useEscapeKey(onClose, true);
+  // The one Dialog (S2f), mounted only while Details is open: Escape, the
+  // scrim and the title row's Close dismiss it, and its body scrolls on its
+  // own. No footer Close beside the title row's: two buttons of one name in
+  // one dialog is one too many for a screen reader.
   return (
-    <>
-      <div
-        className="fixed inset-0 z-40 bg-black/60"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        ref={trapRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Approval details"
-        className={cn(
-          "fixed left-1/2 top-1/2 z-50 flex max-h-[85vh] w-[min(760px,94vw)]",
-          "-translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border",
-          "border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
-        )}
-      >
-        <h2 className="mb-3 font-headline-md text-headline-md text-on-surface">
-          Approval details
-        </h2>
-        <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-            <dt className="text-on-surface-variant">Requested by</dt>
-            <dd className={cn("font-semibold", authorColorClass(who, hues))}>
-              {who}
-            </dd>
-            <dt className="text-on-surface-variant">Asked</dt>
-            <dd className="text-on-surface">
-              {formatRelative(row.asked_at)}{" "}
-              <span className="text-on-surface-variant" title={row.asked_at}>
-                ({formatTimestamp(row.asked_at)})
-              </span>
-            </dd>
-            <dt className="text-on-surface-variant">Kind</dt>
-            <dd className="text-on-surface">
-              {row.command_text ? "gated command (Tool Gate)" : row.kind}
-            </dd>
-            <dt className="text-on-surface-variant">Options</dt>
-            <dd className="text-on-surface">{row.options.join(" / ")}</dd>
-            <dt className="text-on-surface-variant">Gate id</dt>
-            <dd className="font-code-sm text-on-surface-variant">{row.choice_id}</dd>
-          </dl>
+    <Dialog open onClose={onClose} title="Approval details" size="md">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+        <dt className="text-on-surface-variant">Requested by</dt>
+        <dd className={cn("font-semibold", authorColorClass(who, hues))}>
+          {who}
+        </dd>
+        <dt className="text-on-surface-variant">Asked</dt>
+        <dd className="text-on-surface">
+          {formatRelative(row.asked_at)}{" "}
+          <span className="text-on-surface-variant" title={row.asked_at}>
+            ({formatTimestamp(row.asked_at)})
+          </span>
+        </dd>
+        <dt className="text-on-surface-variant">Kind</dt>
+        <dd className="text-on-surface">
+          {row.command_text ? "gated command (Tool Gate)" : row.kind}
+        </dd>
+        <dt className="text-on-surface-variant">Options</dt>
+        <dd className="text-on-surface">{row.options.join(" / ")}</dd>
+        <dt className="text-on-surface-variant">Gate id</dt>
+        <dd className="font-code-sm text-on-surface-variant">{row.choice_id}</dd>
+      </dl>
 
+      <p className="mt-3 text-xs font-medium text-on-surface-variant">
+        Full request
+      </p>
+      <p className="mt-1 whitespace-pre-wrap rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 text-sm text-on-surface">
+        {row.prompt}
+      </p>
+
+      {row.command_text && (
+        <>
           <p className="mt-3 text-xs font-medium text-on-surface-variant">
-            Full request
+            Exact command — runs verbatim on Approve
           </p>
-          <p className="mt-1 whitespace-pre-wrap rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 text-sm text-on-surface">
-            {row.prompt}
-          </p>
-
-          {row.command_text && (
-            <>
-              <p className="mt-3 text-xs font-medium text-on-surface-variant">
-                Exact command — runs verbatim on Approve
-              </p>
-              {/* Same pair as the box above, and this one matters more: it is
-                  the stale-gate confirm, where the user is being asked to
-                  re-approve a command against a repo that may have moved. */}
-              <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-code-sm text-xs text-on-surface">
-                {row.command_text}
-              </pre>
-              <ViewFileButton command={row.command_text} onViewFile={onViewFile} />
-            </>
-          )}
-        </div>
-        <div className="mt-4 flex justify-end">
-          <Button variant="secondary" onClick={onClose}>
-            Close
-          </Button>
-        </div>
-      </div>
-    </>
+          {/* Same pair as the Dialog's own body, and this one matters more:
+              it is the stale-gate confirm, where the user is being asked to
+              re-approve a command against a repo that may have moved. */}
+          <pre className="mt-1 overflow-y-auto overflow-x-hidden whitespace-pre-wrap break-all rounded border border-outline-variant bg-surface-container-low px-2 py-1.5 font-code-sm text-xs text-on-surface">
+            {row.command_text}
+          </pre>
+          <ViewFileButton command={row.command_text} onViewFile={onViewFile} />
+        </>
+      )}
+    </Dialog>
   );
 }
 

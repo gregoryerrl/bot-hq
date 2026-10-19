@@ -36,11 +36,10 @@ import { PARTICIPANT_COLORS } from "../components/authorColor";
 import { CheckIcon, CloseIcon, RescanIcon, WarnIcon } from "../components/icons";
 import { PresetOfferBanner } from "./PresetOfferCard";
 import { ActionItemsPanel } from "../components/ActionItemsPanel";
-import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useTauriEvent } from "../hooks/useTauriEvent";
 import { pickFolder } from "./contextLibraryShared";
 import { Skeleton } from "../components/ui/Skeleton";
-import { wideDialogClass } from "../components/ui/Dialog";
+import { Dialog } from "../components/ui/Dialog";
 import {
   rosterAdvisory,
   EDIT_FILES,
@@ -429,7 +428,9 @@ export function Dashboard() {
   // Inline create-session error so a rejected mutation doesn't leave the dialog
   // silently stuck on "Creating…" (the dialog stays open on failure to show it).
   const [createError, setCreateError] = useState<string | null>(null);
-  const dialogRef = useFocusTrap<HTMLDivElement>(creating);
+  // Every way out of the dialog — Escape, the scrim, the close button, Cancel.
+  // Stable, so the Dialog's Escape listener is not re-bound on every render.
+  const closeCreate = useCallback(() => setCreating(false), []);
 
   // ⌘/Ctrl-N lands here as `/?new=1` (see Shell) — open the dialog and eat
   // the param so refresh/back doesn't re-open it.
@@ -622,19 +623,14 @@ export function Dashboard() {
     }
   };
 
-  // Escape-to-dismiss + first-input focus when the dialog opens.
+  // First-input focus when the dialog opens. (Escape-to-dismiss and the focus
+  // trap are the Dialog's own; a child's effects run first, so this lands
+  // after the trap has moved focus into the frame, and the title field is
+  // where the cursor ends up.)
   const dialogTitleRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!creating) return;
     dialogTitleRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setCreating(false);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
   }, [creating]);
 
   return (
@@ -656,505 +652,26 @@ export function Dashboard() {
       {/* Feedback #89: the documents agents left for the user to act on, from
           every session, until dismissed. */}
       <ActionItemsPanel />
+      {/* The `lg` Dialog: the FIXED frame (user 2026-08-25), shared with the
+          model dialog — adding participants scrolls the roster list instead of
+          growing the dialog; the full rationale sits on `ui/Dialog`'s `lg`. Its
+          body is a flex column so the two-column block can take the body's
+          height, and the error line and the actions ride in the pinned footer,
+          outside every scroller. */}
       {creating && (
-        <>
-          {/* Scrim — click anywhere outside the dialog to dismiss */}
-          <div
-            className="fixed inset-0 z-40 bg-black/60"
-            onClick={() => setCreating(false)}
-            aria-hidden
-          />
-          {/* FIXED frame (user 2026-08-25), shared with the model dialog:
-              adding participants scrolls the roster list instead of growing
-              the dialog — the full rationale sits on `wideDialogClass`. */}
-          <div
-            ref={dialogRef}
-            tabIndex={-1}
-            role="dialog"
-            aria-modal="true"
-            aria-label="New session"
-            className={wideDialogClass}
-          >
-            <div className="mb-4 flex shrink-0 items-center justify-between">
-              <h2 className="font-headline-md text-headline-md text-on-surface">
-                New session
-              </h2>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setCreating(false)}
-                aria-label="Close"
-              >
-                <CloseIcon />
-              </Button>
-            </div>
-            {/* Two columns (ideas.md 2026-08-24): the session's SCOPE — title,
-                project, repo, worktree — on the left; the ROSTER on the right.
-                Inside the fixed frame the body is the flexible middle: each
-                column scrolls itself on md+, and below md the whole body
-                scrolls as one stack (a per-list scroller inside an
-                auto-height column would constrain nothing there). */}
-            <div className="min-h-0 flex-1 gap-x-6 overflow-x-hidden max-md:space-y-4 max-md:overflow-y-auto md:flex">
-              <div className="min-h-0 space-y-4 overflow-x-hidden md:w-[340px] md:shrink-0 md:overflow-y-auto md:pr-1">
-              <label className="block">
-                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                  Title
-                </span>
-                <Input
-                  ref={dialogTitleRef}
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="e.g., refactor auth flow"
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") handleCreate();
-                  }}
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                  Project
-                </span>
-                <select
-                  value={selectedProject}
-                  onChange={(e) => {
-                    setSelectedProject(e.target.value);
-                    if (e.target.value) setAdHocRepo("");
-                  }}
-                  className={fieldClass}
-                >
-                  <option value="">(none — no working repo)</option>
-                  {projects.map((p) => (
-                    <option key={p.name} value={p.name}>
-                      {p.display_name || p.name}
-                    </option>
-                  ))}
-                </select>
-                <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
-                  Drives git diff in the Apply tab + project-specific
-                  policy. Leave blank for ad-hoc scopes.
-                </span>
-              </label>
-              {/* Ad-hoc repo: pick a folder that isn't a registered project. */}
-              {adHocRepo ? (
-                <div className="flex items-center justify-between gap-2 rounded border border-outline-variant bg-surface-container-lowest px-3 py-1.5">
-                  <span
-                    className="truncate font-code-sm text-code-sm text-on-surface"
-                    title={adHocRepo}
-                  >
-                    {adHocRepo}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setAdHocRepo("")}
-                    aria-label="Clear picked folder"
-                  >
-                    <CloseIcon />
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  variant="link"
-                  onClick={async () => {
-                    try {
-                      const picked = await pickFolder("Choose a working repo");
-                      if (picked) {
-                        setAdHocRepo(picked);
-                        setSelectedProject("");
-                      }
-                    } catch (e) {
-                      setCreateError(errorMessage(e));
-                    }
-                  }}
-                  className="font-code-sm text-code-sm"
-                >
-                  or pick a folder not listed…
-                </Button>
-              )}
-              {adHocRepo && (
-                <p className="font-code-sm text-code-sm text-on-surface-variant">
-                  Ad-hoc repo — not a registered project, so this session uses
-                  the general policy tier.
+        <Dialog
+          open
+          onClose={closeCreate}
+          title="New session"
+          size="lg"
+          bodyClassName="flex flex-col"
+          footer={
+            <>
+              {createError && (
+                <p className="w-full min-w-0 break-words rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
+                  Create failed: {createError}
                 </p>
               )}
-              {(projects.find((p) => p.name === selectedProject)
-                ?.working_repo_path ||
-                adHocRepo.trim()) && (
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={useWorktree}
-                    onChange={(e) => setUseWorktree(e.target.checked)}
-                    className="size-4 accent-primary"
-                  />
-                  <span className="font-body-md text-body-md text-on-surface">
-                    Isolated git worktree (parallel-safe, branch{" "}
-                    <code className="font-code-sm text-code-sm">bothq/…</code>)
-                  </span>
-                </label>
-              )}
-              </div>
-              <div className="flex min-h-0 min-w-0 flex-col md:flex-1">
-                <div className="mb-1 flex shrink-0 items-center justify-between gap-2">
-                  <span className="font-label-caps text-label-caps text-on-surface-variant">
-                    Participants
-                  </span>
-                  {/* 0090: which Claude account the session bills, as a
-                      quick-select over the saved subscription rows — it
-                      swaps every row to the same model on that account where
-                      one is saved, and names the rows it could not move. It
-                      never shows a limit: switching accounts is not the answer
-                      to a limit (spec §8), so no limit text sits beside it. */}
-                  {accountChoices(models).length > 1 && (
-                    <label className="flex min-w-0 items-center gap-1 font-code-sm text-code-sm text-on-surface-variant">
-                      <span className="shrink-0">Account</span>
-                      <select
-                        aria-label="Account for every participant"
-                        value=""
-                        onChange={(e) => {
-                          if (!e.target.value) return;
-                          const dir = e.target.value === "default" ? "" : e.target.value;
-                          const { rows, missing } = remapRowsToAccount(
-                            participants,
-                            dir,
-                            roles,
-                            models,
-                          );
-                          setParticipants(rows);
-                          setAccountMissing(missing.map((i) => i + 1));
-                        }}
-                        className={cn(fieldClass, "min-w-0 max-w-[12rem]")}
-                      >
-                        <option value="">(pick for all rows)</option>
-                        {accountChoices(models).map((a) => (
-                          <option key={a.dir || "default"} value={a.dir || "default"}>
-                            {a.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-                  <span className="font-code-sm text-code-sm text-on-surface-variant">
-                    {participants.length} of {MAX_PARTICIPANTS}
-                  </span>
-                </div>
-                {accountMissing.length > 0 && (
-                  <p
-                    role="status"
-                    className="mb-1 break-words font-code-sm text-code-sm text-on-surface-variant"
-                  >
-                    No saved model on that account for participant{" "}
-                    {accountMissing.join(", ")} — add one in Settings → Models or
-                    pick a model by hand.
-                  </p>
-                )}
-                {/* The one scroller on md+: overflow lands here, never on the
-                    frame — the footer stays reachable at any roster size. No
-                    flex-1: the list takes its natural height and SHRINKS
-                    (min-h-0) when the column runs out, so the add-button and
-                    hints sit right under the cards instead of pinned to the
-                    column floor. */}
-                <div className="flex min-h-0 flex-col gap-2 overflow-x-hidden md:overflow-y-auto md:pr-1">
-                  {participants.map((row, index) => (
-                    <div
-                      key={row.key}
-                      className="rounded-md border border-outline-variant bg-surface p-2"
-                    >
-                      <div className="mb-1 flex items-center justify-between gap-2">
-                        <span className="shrink-0 font-code-sm text-code-sm text-on-surface-variant">
-                          Participant {index + 1}
-                        </span>
-                        {/* rc3 D20: the colour this participant's byline takes,
-                            folded into the header line so the controls fit one
-                            row. "Rotate" is the DEFAULT rather than an absence
-                            — the rotation already guarantees no two
-                            participants of one session share a hue, so a pick
-                            is a preference, not a fix. Swatches rather than a
-                            select: the thing being chosen is a colour, and its
-                            name is the label of last resort. */}
-                        <span className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            aria-label={`Participant ${index + 1} colour: rotate`}
-                            aria-pressed={row.color === null}
-                            title="Rotate — a distinct hue by turn order"
-                            onClick={() => patchParticipant(index, { color: null })}
-                            className={cn(
-                              "size-5 rounded-full border font-code-sm text-code-sm leading-none text-on-surface-variant",
-                              row.color === null
-                                ? "border-primary ring-1 ring-primary"
-                                : "border-outline-variant",
-                            )}
-                          >
-                            <RescanIcon className="mx-auto size-2.5" />
-                          </button>
-                          {PARTICIPANT_COLORS.map((c) => {
-                            // Feedback #11/#12 leftover: a hue another row
-                            // picked is taken — two picks of one colour are
-                            // the collision the rotation exists to prevent.
-                            const takenBy = takenColors(participants, index).get(c.name);
-                            return (
-                              <button
-                                key={c.name}
-                                type="button"
-                                aria-label={`Participant ${index + 1} colour: ${c.name}`}
-                                aria-pressed={row.color === c.name}
-                                disabled={takenBy !== undefined}
-                                title={
-                                  takenBy !== undefined
-                                    ? `${c.name} — taken by participant ${takenBy}`
-                                    : c.name
-                                }
-                                onClick={() => patchParticipant(index, { color: c.name })}
-                                className={cn(
-                                  "size-5 rounded-full border",
-                                  c.swatch,
-                                  row.color === c.name
-                                    ? "border-primary ring-1 ring-primary"
-                                    : "border-outline-variant",
-                                  takenBy !== undefined && "cursor-not-allowed opacity-25",
-                                )}
-                              />
-                            );
-                          })}
-                          {participants.length > 1 && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              aria-label={`Remove participant ${index + 1}`}
-                              onClick={() =>
-                                setParticipants((rows) =>
-                                  rows.filter((_, i) => i !== index),
-                                )
-                              }
-                              className="ml-1"
-                            >
-                              <CloseIcon />
-                            </Button>
-                          )}
-                        </span>
-                      </div>
-                      {/* One line for the dropdowns (user 2026-08-25) — the
-                          fixed frame is wide enough that stacking them read as
-                          wasted space. Collapses to 2×2 below md. */}
-                      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                        <label className="block">
-                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                            Role
-                          </span>
-                          <select
-                            aria-label={`Participant ${index + 1} role`}
-                            value={row.roleId ?? ""}
-                            onChange={(e) => {
-                              const roleId = e.target.value
-                                ? Number(e.target.value)
-                                : null;
-                              const incoming = roles.find(
-                                (r) => r.id === roleId,
-                              );
-                              // An ultracode pick cannot follow the row to a
-                              // role that can't take it (no edit_files): the
-                              // option would grey out while the row still
-                              // shipped {effort:"xhigh", ultracode:true} — a
-                              // posture the user never picked for THAT role.
-                              // Reset the whole pick to Default, not just the
-                              // flag, so no phantom xhigh survives either.
-                              const dropUltracode =
-                                row.ultracode === true &&
-                                !incoming?.capabilities.includes(EDIT_FILES);
-                              patchParticipant(index, {
-                                roleId,
-                                ...(dropUltracode
-                                  ? { effort: null, ultracode: null }
-                                  : {}),
-                              });
-                            }}
-                            className={fieldClass}
-                          >
-                            <option value="">(choose a role)</option>
-                            {invitableRoles.map((r) => (
-                              <option key={r.id} value={r.id}>
-                                {r.display_name}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <label className="block">
-                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                            Model
-                          </span>
-                          <select
-                            aria-label={`Participant ${index + 1} model`}
-                            value={row.modelId}
-                            onChange={(e) => {
-                              setAccountMissing([]);
-                              patchParticipant(index, { modelId: e.target.value });
-                            }}
-                            className={fieldClass}
-                          >
-                            <option value="">(role default)</option>
-                            {models.map((m) => (
-                              <option key={m.id} value={m.id}>
-                                {m.display_name}
-                              </option>
-                            ))}
-                          </select>
-                          {/* 0090: the account this row bills — the model's
-                              config dir (`default` = ~/.claude), or the
-                              provider for a gateway row. The model name alone
-                              cannot say: the same model id runs on both. */}
-                          <span
-                            data-testid={`participant-${index + 1}-account`}
-                            className="mt-0.5 block truncate font-code-sm text-code-sm text-on-surface-variant"
-                            title="Which account this participant bills"
-                          >
-                            bills: {accountLabelFor(row, roles, models)}
-                          </span>
-                          {rowLimit(row, roles, models, accountMarks) && (
-                            <span
-                              data-testid={`participant-${index + 1}-limit`}
-                              className="mt-0.5 block break-words font-code-sm text-code-sm text-warning"
-                            >
-                              {rowLimit(row, roles, models, accountMarks)}
-                            </span>
-                          )}
-                        </label>
-                        {/* rc3 D12: effort belongs to the PARTICIPANT, next to
-                            the role and model it applies to. One select since
-                            no-inherit (2026-08-25): ultracode is a choice in
-                            it, not a sibling checkbox — a pick decomposes to
-                            the stored pair via `pickToFields`, and picking any
-                            concrete level explicitly clears a role-default
-                            ultracode. */}
-                        <label className="block">
-                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                            Effort
-                          </span>
-                          <select
-                            aria-label={`Participant ${index + 1} effort`}
-                            value={
-                              row.ultracode === true
-                                ? ULTRACODE
-                                : row.effort ?? ""
-                            }
-                            onChange={(e) =>
-                              patchParticipant(index, pickToFields(e.target.value))
-                            }
-                            className={fieldClass}
-                          >
-                            <option value="">
-                              Default ({defaultEffortFor(row.roleId)})
-                            </option>
-                            {EFFORT_LEVELS.map((v) => (
-                              <option key={v} value={v}>
-                                {v}
-                              </option>
-                            ))}
-                            {/* Ultracode rides in on `--settings`, which spawn
-                                injects only for a role holding `edit_files` —
-                                offering it to any other role would be a choice
-                                that changes nothing. Capability, not role name:
-                                bot-hq does not know what a role means. */}
-                            <option
-                              value={ULTRACODE}
-                              disabled={
-                                !roleAt(row)?.capabilities.includes(EDIT_FILES)
-                              }
-                            >
-                              {ULTRACODE}
-                            </option>
-                          </select>
-                        </label>
-                        {/* rc3 D20's other half (migration 0053): the NAME
-                            this participant goes by. Empty takes the ordinal,
-                            which is what the placeholder shows — so the field
-                            reads as an override of something that already
-                            works, not as a blank that has to be filled. */}
-                        <label className="block">
-                          <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
-                            Name
-                          </span>
-                          <input
-                            type="text"
-                            value={row.label}
-                            placeholder={ordinalNameFor(index)}
-                            aria-label={`Participant ${index + 1} name`}
-                            onChange={(e) =>
-                              patchParticipant(index, { label: e.target.value })
-                            }
-                            className="w-full rounded border border-outline-variant bg-surface px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
-                          />
-                        </label>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="shrink-0">
-                {participants.length < MAX_PARTICIPANTS && (
-                  <Button
-                    variant="link"
-                    onClick={() =>
-                      setParticipants((rows) => [
-                        ...rows,
-                        { ...emptyParticipant(), roleId: nextUnusedRoleId(rows) },
-                      ])
-                    }
-                    className="mt-2 font-code-sm text-code-sm"
-                  >
-                    + Add participant
-                  </Button>
-                )}
-                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-                  Row order sets each participant's turn slot. Effort applies to
-                  this session only — Default uses the role's configured effort
-                  (Settings → Roles).
-                </p>
-                {/* rc3 D11. Advisory, never blocking: it names a gap in what
-                    the roster's ticked boxes allow, and the user decides
-                    whether that is what they meant. */}
-                {rosterWarning && (
-                  <p
-                    role="status"
-                    className="mt-2 rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
-                  >
-                    <WarnIcon className="mr-1 inline-block size-3 align-middle" />
-                    {rosterWarning}
-                  </p>
-                )}
-                {invitableRoles.length === 0 && (
-                  <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-                    No roles yet — add one in <b>Settings → Roles</b> before
-                    starting a session.
-                  </p>
-                )}
-                {models.length === 0 && invitableRoles.length > 0 && (
-                  <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-                    No saved models yet — each participant uses its role's
-                    configured default. Add models in <b>Settings → Models</b> to
-                    pick per session (and to run a pre-flight connection test).
-                  </p>
-                )}
-                {/* rc3 D9: one connector, so the picker no longer distinguishes
-                    runtimes — which means the list can offer a model whose
-                    gateway the CLI cannot talk to. Say so here, where the choice
-                    is made, rather than letting it surface as a spawn error. */}
-                {models.length > 0 && (
-                  <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
-                    Every model spawns through the claude CLI, so its endpoint
-                    must speak the Anthropic Messages API. Use <b>Test</b> in{" "}
-                    <b>Settings → Models</b> to check one before a session
-                    depends on it.
-                  </p>
-                )}
-                </div>
-              </div>
-            </div>
-            {createError && (
-              <p className="mt-4 shrink-0 rounded border border-error/40 bg-error-container/20 px-3 py-2 font-code-sm text-code-sm text-on-error-container">
-                Create failed: {createError}
-              </p>
-            )}
-            <div className="mt-5 flex shrink-0 flex-wrap items-center justify-end gap-2">
               {createBlockedBy && !createSession.isPending && (
                 <span
                   data-testid="create-blocked-by"
@@ -1163,7 +680,7 @@ export function Dashboard() {
                   {createBlockedBy}
                 </span>
               )}
-              <Button variant="ghost" onClick={() => setCreating(false)}>
+              <Button variant="ghost" onClick={closeCreate}>
                 Cancel
               </Button>
               <Button
@@ -1173,9 +690,471 @@ export function Dashboard() {
               >
                 {createSession.isPending ? "Creating…" : "Create session"}
               </Button>
+            </>
+          }
+        >
+          {/* Two columns (ideas.md 2026-08-24): the session's SCOPE — title,
+              project, repo, worktree — on the left; the ROSTER on the right.
+              Inside the fixed frame the body is the flexible middle: each
+              column scrolls itself on md+, and below md the whole body
+              scrolls as one stack (a per-list scroller inside an
+              auto-height column would constrain nothing there). */}
+          <div className="min-h-0 flex-1 gap-x-6 overflow-x-hidden max-md:space-y-4 max-md:overflow-y-auto md:flex">
+            <div className="min-h-0 space-y-4 overflow-x-hidden md:w-[340px] md:shrink-0 md:overflow-y-auto md:pr-1">
+            <label className="block">
+              <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                Title
+              </span>
+              <Input
+                ref={dialogTitleRef}
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder="e.g., refactor auth flow"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleCreate();
+                }}
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                Project
+              </span>
+              <select
+                value={selectedProject}
+                onChange={(e) => {
+                  setSelectedProject(e.target.value);
+                  if (e.target.value) setAdHocRepo("");
+                }}
+                className={fieldClass}
+              >
+                <option value="">(none — no working repo)</option>
+                {projects.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.display_name || p.name}
+                  </option>
+                ))}
+              </select>
+              <span className="mt-1 block font-code-sm text-code-sm text-on-surface-variant">
+                Drives git diff in the Apply tab + project-specific
+                policy. Leave blank for ad-hoc scopes.
+              </span>
+            </label>
+            {/* Ad-hoc repo: pick a folder that isn't a registered project. */}
+            {adHocRepo ? (
+              <div className="flex items-center justify-between gap-2 rounded border border-outline-variant bg-surface-container-lowest px-3 py-1.5">
+                <span
+                  className="truncate font-code-sm text-code-sm text-on-surface"
+                  title={adHocRepo}
+                >
+                  {adHocRepo}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setAdHocRepo("")}
+                  aria-label="Clear picked folder"
+                >
+                  <CloseIcon />
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="link"
+                onClick={async () => {
+                  try {
+                    const picked = await pickFolder("Choose a working repo");
+                    if (picked) {
+                      setAdHocRepo(picked);
+                      setSelectedProject("");
+                    }
+                  } catch (e) {
+                    setCreateError(errorMessage(e));
+                  }
+                }}
+                className="font-code-sm text-code-sm"
+              >
+                or pick a folder not listed…
+              </Button>
+            )}
+            {adHocRepo && (
+              <p className="font-code-sm text-code-sm text-on-surface-variant">
+                Ad-hoc repo — not a registered project, so this session uses
+                the general policy tier.
+              </p>
+            )}
+            {(projects.find((p) => p.name === selectedProject)
+              ?.working_repo_path ||
+              adHocRepo.trim()) && (
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={useWorktree}
+                  onChange={(e) => setUseWorktree(e.target.checked)}
+                  className="size-4 accent-primary"
+                />
+                <span className="font-body-md text-body-md text-on-surface">
+                  Isolated git worktree (parallel-safe, branch{" "}
+                  <code className="font-code-sm text-code-sm">bothq/…</code>)
+                </span>
+              </label>
+            )}
+            </div>
+            <div className="flex min-h-0 min-w-0 flex-col md:flex-1">
+              <div className="mb-1 flex shrink-0 items-center justify-between gap-2">
+                <span className="font-label-caps text-label-caps text-on-surface-variant">
+                  Participants
+                </span>
+                {/* 0090: which Claude account the session bills, as a
+                    quick-select over the saved subscription rows — it
+                    swaps every row to the same model on that account where
+                    one is saved, and names the rows it could not move. It
+                    never shows a limit: switching accounts is not the answer
+                    to a limit (spec §8), so no limit text sits beside it. */}
+                {accountChoices(models).length > 1 && (
+                  <label className="flex min-w-0 items-center gap-1 font-code-sm text-code-sm text-on-surface-variant">
+                    <span className="shrink-0">Account</span>
+                    <select
+                      aria-label="Account for every participant"
+                      value=""
+                      onChange={(e) => {
+                        if (!e.target.value) return;
+                        const dir = e.target.value === "default" ? "" : e.target.value;
+                        const { rows, missing } = remapRowsToAccount(
+                          participants,
+                          dir,
+                          roles,
+                          models,
+                        );
+                        setParticipants(rows);
+                        setAccountMissing(missing.map((i) => i + 1));
+                      }}
+                      className={cn(fieldClass, "min-w-0 max-w-[12rem]")}
+                    >
+                      <option value="">(pick for all rows)</option>
+                      {accountChoices(models).map((a) => (
+                        <option key={a.dir || "default"} value={a.dir || "default"}>
+                          {a.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <span className="font-code-sm text-code-sm text-on-surface-variant">
+                  {participants.length} of {MAX_PARTICIPANTS}
+                </span>
+              </div>
+              {accountMissing.length > 0 && (
+                <p
+                  role="status"
+                  className="mb-1 break-words font-code-sm text-code-sm text-on-surface-variant"
+                >
+                  No saved model on that account for participant{" "}
+                  {accountMissing.join(", ")} — add one in Settings → Models or
+                  pick a model by hand.
+                </p>
+              )}
+              {/* The one scroller on md+: overflow lands here, never on the
+                  frame — the footer stays reachable at any roster size. No
+                  flex-1: the list takes its natural height and SHRINKS
+                  (min-h-0) when the column runs out, so the add-button and
+                  hints sit right under the cards instead of pinned to the
+                  column floor. */}
+              <div className="flex min-h-0 flex-col gap-2 overflow-x-hidden md:overflow-y-auto md:pr-1">
+                {participants.map((row, index) => (
+                  <div
+                    key={row.key}
+                    className="rounded-md border border-outline-variant bg-surface p-2"
+                  >
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="shrink-0 font-code-sm text-code-sm text-on-surface-variant">
+                        Participant {index + 1}
+                      </span>
+                      {/* rc3 D20: the colour this participant's byline takes,
+                          folded into the header line so the controls fit one
+                          row. "Rotate" is the DEFAULT rather than an absence
+                          — the rotation already guarantees no two
+                          participants of one session share a hue, so a pick
+                          is a preference, not a fix. Swatches rather than a
+                          select: the thing being chosen is a colour, and its
+                          name is the label of last resort. */}
+                      <span className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          aria-label={`Participant ${index + 1} colour: rotate`}
+                          aria-pressed={row.color === null}
+                          title="Rotate — a distinct hue by turn order"
+                          onClick={() => patchParticipant(index, { color: null })}
+                          className={cn(
+                            "size-5 rounded-full border font-code-sm text-code-sm leading-none text-on-surface-variant",
+                            row.color === null
+                              ? "border-primary ring-1 ring-primary"
+                              : "border-outline-variant",
+                          )}
+                        >
+                          <RescanIcon className="mx-auto size-2.5" />
+                        </button>
+                        {PARTICIPANT_COLORS.map((c) => {
+                          // Feedback #11/#12 leftover: a hue another row
+                          // picked is taken — two picks of one colour are
+                          // the collision the rotation exists to prevent.
+                          const takenBy = takenColors(participants, index).get(c.name);
+                          return (
+                            <button
+                              key={c.name}
+                              type="button"
+                              aria-label={`Participant ${index + 1} colour: ${c.name}`}
+                              aria-pressed={row.color === c.name}
+                              disabled={takenBy !== undefined}
+                              title={
+                                takenBy !== undefined
+                                  ? `${c.name} — taken by participant ${takenBy}`
+                                  : c.name
+                              }
+                              onClick={() => patchParticipant(index, { color: c.name })}
+                              className={cn(
+                                "size-5 rounded-full border",
+                                c.swatch,
+                                row.color === c.name
+                                  ? "border-primary ring-1 ring-primary"
+                                  : "border-outline-variant",
+                                takenBy !== undefined && "cursor-not-allowed opacity-25",
+                              )}
+                            />
+                          );
+                        })}
+                        {participants.length > 1 && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            aria-label={`Remove participant ${index + 1}`}
+                            onClick={() =>
+                              setParticipants((rows) =>
+                                rows.filter((_, i) => i !== index),
+                              )
+                            }
+                            className="ml-1"
+                          >
+                            <CloseIcon />
+                          </Button>
+                        )}
+                      </span>
+                    </div>
+                    {/* One line for the dropdowns (user 2026-08-25) — the
+                        fixed frame is wide enough that stacking them read as
+                        wasted space. Collapses to 2×2 below md. */}
+                    <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                      <label className="block">
+                        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                          Role
+                        </span>
+                        <select
+                          aria-label={`Participant ${index + 1} role`}
+                          value={row.roleId ?? ""}
+                          onChange={(e) => {
+                            const roleId = e.target.value
+                              ? Number(e.target.value)
+                              : null;
+                            const incoming = roles.find(
+                              (r) => r.id === roleId,
+                            );
+                            // An ultracode pick cannot follow the row to a
+                            // role that can't take it (no edit_files): the
+                            // option would grey out while the row still
+                            // shipped {effort:"xhigh", ultracode:true} — a
+                            // posture the user never picked for THAT role.
+                            // Reset the whole pick to Default, not just the
+                            // flag, so no phantom xhigh survives either.
+                            const dropUltracode =
+                              row.ultracode === true &&
+                              !incoming?.capabilities.includes(EDIT_FILES);
+                            patchParticipant(index, {
+                              roleId,
+                              ...(dropUltracode
+                                ? { effort: null, ultracode: null }
+                                : {}),
+                            });
+                          }}
+                          className={fieldClass}
+                        >
+                          <option value="">(choose a role)</option>
+                          {invitableRoles.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.display_name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="block">
+                        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                          Model
+                        </span>
+                        <select
+                          aria-label={`Participant ${index + 1} model`}
+                          value={row.modelId}
+                          onChange={(e) => {
+                            setAccountMissing([]);
+                            patchParticipant(index, { modelId: e.target.value });
+                          }}
+                          className={fieldClass}
+                        >
+                          <option value="">(role default)</option>
+                          {models.map((m) => (
+                            <option key={m.id} value={m.id}>
+                              {m.display_name}
+                            </option>
+                          ))}
+                        </select>
+                        {/* 0090: the account this row bills — the model's
+                            config dir (`default` = ~/.claude), or the
+                            provider for a gateway row. The model name alone
+                            cannot say: the same model id runs on both. */}
+                        <span
+                          data-testid={`participant-${index + 1}-account`}
+                          className="mt-0.5 block truncate font-code-sm text-code-sm text-on-surface-variant"
+                          title="Which account this participant bills"
+                        >
+                          bills: {accountLabelFor(row, roles, models)}
+                        </span>
+                        {rowLimit(row, roles, models, accountMarks) && (
+                          <span
+                            data-testid={`participant-${index + 1}-limit`}
+                            className="mt-0.5 block break-words font-code-sm text-code-sm text-warning"
+                          >
+                            {rowLimit(row, roles, models, accountMarks)}
+                          </span>
+                        )}
+                      </label>
+                      {/* rc3 D12: effort belongs to the PARTICIPANT, next to
+                          the role and model it applies to. One select since
+                          no-inherit (2026-08-25): ultracode is a choice in
+                          it, not a sibling checkbox — a pick decomposes to
+                          the stored pair via `pickToFields`, and picking any
+                          concrete level explicitly clears a role-default
+                          ultracode. */}
+                      <label className="block">
+                        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                          Effort
+                        </span>
+                        <select
+                          aria-label={`Participant ${index + 1} effort`}
+                          value={
+                            row.ultracode === true
+                              ? ULTRACODE
+                              : row.effort ?? ""
+                          }
+                          onChange={(e) =>
+                            patchParticipant(index, pickToFields(e.target.value))
+                          }
+                          className={fieldClass}
+                        >
+                          <option value="">
+                            Default ({defaultEffortFor(row.roleId)})
+                          </option>
+                          {EFFORT_LEVELS.map((v) => (
+                            <option key={v} value={v}>
+                              {v}
+                            </option>
+                          ))}
+                          {/* Ultracode rides in on `--settings`, which spawn
+                              injects only for a role holding `edit_files` —
+                              offering it to any other role would be a choice
+                              that changes nothing. Capability, not role name:
+                              bot-hq does not know what a role means. */}
+                          <option
+                            value={ULTRACODE}
+                            disabled={
+                              !roleAt(row)?.capabilities.includes(EDIT_FILES)
+                            }
+                          >
+                            {ULTRACODE}
+                          </option>
+                        </select>
+                      </label>
+                      {/* rc3 D20's other half (migration 0053): the NAME
+                          this participant goes by. Empty takes the ordinal,
+                          which is what the placeholder shows — so the field
+                          reads as an override of something that already
+                          works, not as a blank that has to be filled. */}
+                      <label className="block">
+                        <span className="mb-1 block font-label-caps text-label-caps text-on-surface-variant">
+                          Name
+                        </span>
+                        <input
+                          type="text"
+                          value={row.label}
+                          placeholder={ordinalNameFor(index)}
+                          aria-label={`Participant ${index + 1} name`}
+                          onChange={(e) =>
+                            patchParticipant(index, { label: e.target.value })
+                          }
+                          className="w-full rounded border border-outline-variant bg-surface px-2 py-1 font-code-sm text-code-sm text-on-surface placeholder:text-on-surface-variant"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="shrink-0">
+              {participants.length < MAX_PARTICIPANTS && (
+                <Button
+                  variant="link"
+                  onClick={() =>
+                    setParticipants((rows) => [
+                      ...rows,
+                      { ...emptyParticipant(), roleId: nextUnusedRoleId(rows) },
+                    ])
+                  }
+                  className="mt-2 font-code-sm text-code-sm"
+                >
+                  + Add participant
+                </Button>
+              )}
+              <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                Row order sets each participant's turn slot. Effort applies to
+                this session only — Default uses the role's configured effort
+                (Settings → Roles).
+              </p>
+              {/* rc3 D11. Advisory, never blocking: it names a gap in what
+                  the roster's ticked boxes allow, and the user decides
+                  whether that is what they meant. */}
+              {rosterWarning && (
+                <p
+                  role="status"
+                  className="mt-2 rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
+                >
+                  <WarnIcon className="mr-1 inline-block size-3 align-middle" />
+                  {rosterWarning}
+                </p>
+              )}
+              {invitableRoles.length === 0 && (
+                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                  No roles yet — add one in <b>Settings → Roles</b> before
+                  starting a session.
+                </p>
+              )}
+              {models.length === 0 && invitableRoles.length > 0 && (
+                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                  No saved models yet — each participant uses its role's
+                  configured default. Add models in <b>Settings → Models</b> to
+                  pick per session (and to run a pre-flight connection test).
+                </p>
+              )}
+              {/* rc3 D9: one connector, so the picker no longer distinguishes
+                  runtimes — which means the list can offer a model whose
+                  gateway the CLI cannot talk to. Say so here, where the choice
+                  is made, rather than letting it surface as a spawn error. */}
+              {models.length > 0 && (
+                <p className="mt-1 font-code-sm text-code-sm text-on-surface-variant">
+                  Every model spawns through the claude CLI, so its endpoint
+                  must speak the Anthropic Messages API. Use <b>Test</b> in{" "}
+                  <b>Settings → Models</b> to check one before a session
+                  depends on it.
+                </p>
+              )}
+              </div>
             </div>
           </div>
-        </>
+        </Dialog>
       )}
       {sessions.length > 0 && (
         <div className="relative mb-4">

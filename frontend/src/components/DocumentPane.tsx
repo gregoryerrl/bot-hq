@@ -2,8 +2,6 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { useTauriQuery, errorMessage } from "../hooks/useInvoke";
-import { useFocusTrap } from "../hooks/useFocusTrap";
-import { useEscapeKey } from "../hooks/useEscapeKey";
 import { PhasePillRow, type Phase } from "./PhasePill";
 import { docSlugsIn, docTabTarget } from "../lib/docLinks";
 import { isTrayItem } from "./HaltBanner";
@@ -15,6 +13,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { FileViewerDialog, fileArgsInCommand } from "./FileViewerDialog";
 import { CheckIcon, ChevronRightIcon, TrashIcon, WarnIcon } from "./icons";
 import { Button } from "./ui/Button";
+import { Dialog } from "./ui/Dialog";
 import { cn } from "../lib/cn";
 import { formatRelative, formatTimestamp } from "../lib/time";
 import { groupDiffByFile, type DiffLine } from "../lib/diffGroups";
@@ -681,9 +680,9 @@ function CustomDocPill({
   );
 }
 
-// One-shot TL;DR modal: a scrim + focus-trapped panel mirroring ConfirmDialog,
-// but display-only (single Close). Backdrop click and Escape both dismiss; the
-// caller clears its state on close, disposing the summary.
+// One-shot TL;DR modal on the one Dialog (S2f), display-only (a single
+// Close). The scrim, the close button and Escape all dismiss; the caller
+// clears its state on close, disposing the summary.
 function SummaryDialog({
   open,
   slug,
@@ -697,55 +696,37 @@ function SummaryDialog({
   text: string;
   onClose: () => void;
 }) {
-  const trapRef = useFocusTrap<HTMLDivElement>(open);
-  useEscapeKey(onClose, open);
-
-  if (!open) return null;
-
   return (
-    <>
-      <div
-        className="fixed inset-0 z-40 bg-black/60"
-        onClick={onClose}
-        aria-hidden
-      />
-      <div
-        ref={trapRef}
-        tabIndex={-1}
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Summary of ${slug}`}
-        className={cn(
-          "fixed left-1/2 top-1/2 z-50 max-h-[80vh] w-[min(560px,90vw)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto overflow-x-hidden",
-          "rounded-lg border border-outline-variant bg-surface-container p-5 shadow-2xl focus:outline-none",
-        )}
-      >
-        <div className="mb-3 flex items-center justify-between gap-2">
-          <h2 className="min-w-0 truncate text-base font-semibold text-on-surface">
-            TL;DR — {slug}
-          </h2>
-          <span className="shrink-0 font-label-caps text-label-caps text-on-surface-variant">
+    <Dialog
+      open={open}
+      onClose={onClose}
+      title={
+        <>
+          TL;DR — {slug}{" "}
+          <span className="ml-1 font-label-caps text-label-caps text-on-surface-variant">
             summary
           </span>
-        </div>
-        <div className="mb-5 min-h-[3rem] text-sm text-on-surface-variant">
-          {status === "loading" ? (
-            <p className="animate-pulse">Summarizing…</p>
-          ) : status === "error" ? (
-            <p className="text-on-error-container">
-              Couldn't summarize: {text}
-            </p>
-          ) : (
-            <Markdown>{text}</Markdown>
-          )}
-        </div>
-        <div className="flex justify-end">
-          <Button variant="secondary" size="md" onClick={onClose}>
-            Close
-          </Button>
-        </div>
+        </>
+      }
+      size="md"
+      footer={
+        <Button variant="secondary" size="md" onClick={onClose}>
+          Close
+        </Button>
+      }
+    >
+      <div className="min-h-[3rem] text-sm text-on-surface-variant">
+        {status === "loading" ? (
+          <p className="animate-pulse">Summarizing…</p>
+        ) : status === "error" ? (
+          <p className="text-on-error-container">
+            Couldn't summarize: {text}
+          </p>
+        ) : (
+          <Markdown>{text}</Markdown>
+        )}
       </div>
-    </>
+    </Dialog>
   );
 }
 

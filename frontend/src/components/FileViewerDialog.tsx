@@ -6,6 +6,7 @@ import { useEscapeKey } from "../hooks/useEscapeKey";
 import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
 import { Button } from "./ui/Button";
+import { scrimClass } from "./ui/Dialog";
 
 /** Mirror of the Rust `WorkspaceFile` — raw invoke, so no binding needed. */
 interface WorkspaceFile {
@@ -110,11 +111,8 @@ export function FileViewerDialog({
 
   return (
     <>
-      <div
-        className="fixed inset-0 z-40 bg-black/70"
-        onClick={onClose}
-        aria-hidden
-      />
+      {/* The kit's one scrim; the frame stays this viewer's own, full-screen. */}
+      <div className={scrimClass} onClick={onClose} aria-hidden />
       <div
         ref={trapRef}
         tabIndex={-1}
