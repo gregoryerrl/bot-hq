@@ -230,8 +230,12 @@ const BARE_FILE_EXTS =
  * a brace list, or a word still holding quotes, `=`, `$`, a backtick or a
  * redirect (`p='CODEBASE.md'` inside a heredoc script). A bracket is kept —
  * `app/[id]/page.tsx` is a real path — unless it holds a range (`[0-9]`).
+ * Parentheses are shell syntax only in an UNQUOTED word: quoted, they are a
+ * real path's, such as a Next.js route group (`'app/(auth)/login/page.tsx'`;
+ * EYES).
  */
-const NOT_A_PATH = /[*?{}'"`=$<>|;()]/;
+const NOT_A_PATH = /[*?{}'"`=$<>|;]/;
+const UNQUOTED_SYNTAX = /[()]/;
 const RANGE_CLASS = /\[[!^]?[^\]]*-[^\]]*\]/;
 
 export function fileArgsInCommand(command: string): string[] {
@@ -252,9 +256,11 @@ export function fileArgsInCommand(command: string): string[] {
   const pathRe = new RegExp(`^\\S+\\.(?:${BARE_FILE_EXTS})$`, "i");
   for (const m of command.matchAll(wordRe)) {
     const token = stripQuotes(m[0]);
+    const quoted = token !== m[0];
     if (token.startsWith("-")) continue;
     if (token.includes("://")) continue;
     if (NOT_A_PATH.test(token) || RANGE_CLASS.test(token)) continue;
+    if (!quoted && UNQUOTED_SYNTAX.test(token)) continue;
     if (!pathRe.test(token)) continue;
     out.push(token);
   }

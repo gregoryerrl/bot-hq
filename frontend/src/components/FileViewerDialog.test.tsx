@@ -112,6 +112,10 @@ describe("fileArgsInCommand", () => {
     expect(fileArgsInCommand('echo "$HOME/notes.md"')).toEqual([]);
     // A dynamic-route segment is a real path.
     expect(fileArgsInCommand("cat app/[id]/page.tsx")).toEqual(["app/[id]/page.tsx"]);
+    // So is a quoted route group; unquoted, the parentheses are shell syntax.
+    expect(fileArgsInCommand("cat 'app/(auth)/login/page.tsx'")).toEqual(["app/(auth)/login/page.tsx"]);
+    expect(fileArgsInCommand('cat "app/(auth)/x.tsx"')).toEqual(["app/(auth)/x.tsx"]);
+    expect(fileArgsInCommand("(cd src && cat main.rs)")).toEqual([]);
   });
 
   it("keeps the single-slot wrapper on the first candidate", () => {
