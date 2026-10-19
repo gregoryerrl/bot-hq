@@ -46,11 +46,11 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2d2d2d;
-  border-radius: 4px;
+  background: theme("colors.surface-container-highest");
+  border-radius: theme("borderRadius.DEFAULT");
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #404040;
+  background: theme("colors.subtle");
 }
 
 /* Native UA controls — `<select>` popups, scrollbars, spinners, date pickers —
@@ -74,8 +74,8 @@ html,
 body,
 #root {
   height: 100%;
-  background: #0b1326;
-  color: #e5e5e5;
+  background: theme("colors.background");
+  color: theme("colors.on-surface");
   /* Hard backstop for the app-wide no-horizontal-scroll rule: nothing may
      widen the page itself, whatever a descendant does. */
   overflow-x: hidden;

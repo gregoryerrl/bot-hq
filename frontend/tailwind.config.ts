@@ -69,6 +69,11 @@ export default {
       spacing: {
         "grid-margin": "1rem",
         gutter: "0.75rem",
+        // DESIGN.md's stack and panel tokens (present in the spec since the
+        // start, absent here until the 2026-10-19 visual pass).
+        "stack-tight": "0.25rem",
+        "stack-md": "0.5rem",
+        "panel-padding": "1rem",
       },
       colors: {
         surface: "#0b1326",
@@ -86,15 +91,23 @@ export default {
           // Chosen for separation on the dark surface (#0b1326) — adjacent
           // entries are far apart in hue, so the default rotation looks
           // deliberate at any roster size.
-          orange: "#f97316",
-          violet: "#a855f7",
-          cyan: "#22d3ee",
-          rose: "#f43f5e",
-          lime: "#a3e635",
-          amber: "#fbbf24",
-          sky: "#38bdf8",
-          pink: "#f472b6",
-          user: "#3b82f6",
+          //
+          // **Tuned 2026-10-19 (the visual pass): the hexes, never the names.**
+          // They were stock Tailwind 400/500 colours, louder than the role
+          // tokens beside them. Now they sit at the theme's pastel lightness
+          // (primary #ffb68b, secondary #ddb7ff, tertiary #adc6ff). A
+          // participant's override is STORED BY NAME (migration 0052), so a
+          // renamed entry would silently fall back to the rotation.
+          orange: "#ffa66e",
+          violet: "#cfa8ff",
+          cyan: "#6fdcec",
+          rose: "#ff8fa3",
+          lime: "#bce57a",
+          amber: "#ffd27a",
+          sky: "#86c8ff",
+          pink: "#ffa3d4",
+          // You — the theme's tertiary blue, not Tailwind's blue-500.
+          user: "#adc6ff",
         },
         // Industrial Terminal — surface hierarchy
         background: "#0b1326",
@@ -167,9 +180,19 @@ export default {
         // Inverse
         "inverse-surface": "#dae2fd",
         "inverse-on-surface": "#283044",
+
+        // Secondary text levels (DESIGN.md amendment 3, 2026-10-19): `muted`
+        // for hint and help text (a neutral slate — the beige
+        // `on-surface-variant` stays for labels), `subtle` for the
+        // least-important metadata, `hairline` for quiet dividers. Use these
+        // instead of opacity variants of `on-surface-variant`.
+        muted: "#a3adc4",
+        subtle: "#7a849c",
+        hairline: "#262f45",
       },
       borderColor: {
-        DEFAULT: "#262626",
+        // A border with no colour class: the theme's hairline, not neutral grey.
+        DEFAULT: "#262f45",
       },
     },
   },
