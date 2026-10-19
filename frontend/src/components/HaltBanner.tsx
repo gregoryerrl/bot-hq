@@ -359,7 +359,7 @@ export function HaltBanner({
           {`${choices.length} question${choices.length > 1 ? "s" : ""} in the tray →`}
         </button>
       )}
-      <p className="mt-1 font-body-md text-body-md text-on-surface-variant">
+      <p className="mt-1 font-code-sm text-code-sm text-muted">
         {/* An approval has TAKEN the input box (rc3 D33), so "answer here"
             would point at a textarea that is not on screen. Both can be
             pending at once: one participant can park an approval while
