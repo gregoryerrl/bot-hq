@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Dialog } from "../components/ui/Dialog";
 import { Skeleton } from "../components/ui/Skeleton";
 import { fieldClass } from "../components/ui/field";
+import { SettingsPage } from "../components/ui/SettingsPage";
 
 const PROVIDERS = ["anthropic", "openai", "deepseek", "local"] as const;
 
@@ -86,13 +87,13 @@ export function ModelsPanel() {
   };
 
   return (
-    <div className="mx-auto h-full max-w-7xl overflow-y-auto overflow-x-hidden px-6 py-6">
+    <SettingsPage>
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h2 className="font-headline-lg text-headline-lg text-on-surface">
             Models
           </h2>
-          <p className="mt-1 max-w-prose font-body-md text-body-md text-on-surface-variant">
+          <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
             Saved LLM endpoints. Name one as a role's default on the Roles
             tab, or pick per participant when you create a session.
           </p>
@@ -303,7 +304,7 @@ export function ModelsPanel() {
           setDeleteTarget(null);
         }}
       />
-    </div>
+    </SettingsPage>
   );
 }
 
