@@ -15,6 +15,53 @@ and in `docs/rebuild-archive/`.
   **Mark done**; once done it says when, and **Undo** puts it back on the
   list. The dashboard's list follows either way.
 
+### Changed
+
+- **The chat reads as a conversation.** Each run of an agent's tool calls
+  is one quiet line — "3 tools · Bash ×2, Read · 14s · 1 failed", or the
+  call itself when there is one — instead of a pill of raw JSON per call
+  and per result. Open it for one line per call with the first line of its
+  result, a mark for passed, failed or running, the files it wrote, a
+  thumbnail for a screenshot (never its base64), and the raw call behind
+  "raw". A failure is never hidden by the fold. Your own messages sit on
+  the right in your blue; the agents' stay on the left under their colour.
+  bot-hq's notices are upright and show their warning once.
+- **The session header is two rows that never break a participant.** The
+  first holds Dashboard, the title, the phase and the actions; the second,
+  the session id, the worktree, the account and one chip per participant
+  (its colour, ROLE · Model, health, context and backlog), wrapping between
+  chips. The account you bill shows once when everyone bills the same one;
+  when they differ, each chip carries a short tag (`default`, `acct-2`).
+- **The document tabs wrap** onto a second line instead of scrolling
+  sideways, so nothing in the app scrolls sideways any more.
+- **One look for the parts every screen shares.** Buttons, fields, chips,
+  tabs and dialogs each have one style now:
+  - buttons are outlined with mono labels, and never submit a form by
+    accident;
+  - every input, select and text box is one boxed field;
+  - status chips share one shape and one set of tints;
+  - every modal has the same frame — a close button, a body that scrolls on
+    its own and actions that stay in view — and Escape closes only the
+    topmost one;
+  - every Settings page is one width, with its scrollbar at the window's
+    edge.
+- **One type scale and one icon set.** The app uses the design's five type
+  sizes and nothing else, message prose is set in Inter and data in
+  JetBrains Mono, help text is a quiet slate instead of beige, and the text
+  glyphs (✕ ▸ ⚠ ✓ ⏸ …) and emoji that stood in for icons are drawn from one
+  icon set. The participant colours are tuned to the navy theme, keeping
+  their names.
+
+### Fixed
+
+- **A chat opened on a long session starts at its newest message** instead
+  of somewhere above it, and opening a run of tool calls keeps its line
+  where you clicked.
+- **A text selection dragged out of a Context Library dialog no longer
+  closes it** when released over the dimmed background.
+- **A command's glob or shell syntax is no longer offered as a file to
+  view** ("View *.test.tsx").
+
 ## [1.0.9] — 2026-10-18
 
 A second Claude account beside the first, gates that run inside a time window
