@@ -7,6 +7,15 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+## [1.0.10] — 2026-10-19
+
+One look across the app: the chat reads as a conversation, the session header
+is two rows, the document tabs wrap, and buttons, fields, chips, dialogs, type
+and icons each have one style. A FOR YOU document can be marked done where you
+read it. No database migrations: a 1.0.9 database opens unchanged. 1.0.9
+stayed a draft, so from 1.0.8 this release carries 1.0.9's changes too, and
+migrations 0087–0101 apply on first launch.
+
 ### Added
 
 - **A document waiting on you can be marked done where you read it.** A
@@ -61,6 +70,16 @@ and in `docs/rebuild-archive/`.
   closes it** when released over the dimmed background.
 - **A command's glob or shell syntax is no longer offered as a file to
   view** ("View *.test.tsx").
+
+### Deferred
+
+- **Tailwind CSS 4** (Dependabot #8), as in 1.0.9.
+- **The chat composer** keeps its own field metrics; every other input is the
+  boxed field.
+- **The new look on Windows** is checked by CI's Windows suite, not yet by eye
+  on a Windows machine.
+- The rest of 1.0.9's Deferred list stands: the review-notes notice, the
+  Windows gaps and glib 0.18.
 
 ## [1.0.9] — 2026-10-18
 

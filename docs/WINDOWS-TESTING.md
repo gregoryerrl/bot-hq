@@ -1,4 +1,4 @@
-# bot-hq on Windows — Tester Guide (v1.0.9)
+# bot-hq on Windows — Tester Guide (v1.0.10)
 
 Thanks for helping test bot-hq on Windows! Windows support compiles, bundles
 and carries the platform plumbing (per-user install, process reaping,
@@ -6,7 +6,7 @@ Git-for-Windows hooks), and every release runs the full test suite on Windows
 — but it has seen far less live runtime than macOS, so expect a rough edge or
 two. Your feedback is exactly what we need.
 
-**New in v1.0.9:** bot-hq no longer opens a console window beside the app.
+**New since v1.0.8:** bot-hq no longer opens a console window beside the app.
 Until 1.0.8 a black console window came up with it, and closing that window
 quit bot-hq and every running agent. The app, and every program it starts
 (claude, git, gh), now runs without one — §3 lists what to check.
@@ -63,7 +63,7 @@ window on launch, install the Evergreen runtime from Microsoft:
 
 ## 2. Install bot-hq
 
-1. Download `bot-hq_1.0.9_x64-setup.exe` from the
+1. Download `bot-hq_1.0.10_x64-setup.exe` from the
    [GitHub release](https://github.com/gregoryerrl/bot-hq/releases).
 2. Run it. The installer is **unsigned**, so Windows SmartScreen will warn
    *"Windows protected your PC."* Click **More info → Run anyway**. (This is
@@ -79,7 +79,7 @@ Tick these off and tell us where it breaks:
 - [ ] **App launches** — you see the dashboard (not a blank window). *(WebView2 OK)*
 - [ ] **No console window** — only the bot-hq window opens: no black console
       beside it at launch, and none flashing up while agents work (they run
-      claude, git and gh constantly). *(New in 1.0.9.)*
+      claude, git and gh constantly). *(New since 1.0.8.)*
 - [ ] **Add a model** — Settings → Models → add your model + token, click **Test**.
       It should say reachable. *(If claude-code isn't installed right, the Test
       button surfaces a clear message — that's the check working.)*
