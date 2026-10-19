@@ -8,7 +8,7 @@ import type {
 } from "../lib/bindings";
 import { PolicyForm } from "../components/PolicyForm";
 import { GatedKeywordList } from "../components/GatedKeywordList";
-import { CloseIcon, SaveIcon } from "../components/icons";
+import { CheckIcon, CloseIcon, SaveIcon } from "../components/icons";
 import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -122,7 +122,7 @@ export function SessionPolicyPanel({
           )}
           {saved && !dirty && (
             <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
-              Saved ✓
+              Saved <CheckIcon className="inline-block size-3 align-middle" />
             </span>
           )}
         </div>
@@ -326,7 +326,7 @@ function SessionToolGateSection({
         <div className="flex shrink-0 items-center gap-2">
           {saved && !dirty && (
             <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
-              Saved ✓
+              Saved <CheckIcon className="inline-block size-3 align-middle" />
             </span>
           )}
           {dirty && (

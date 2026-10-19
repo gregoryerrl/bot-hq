@@ -127,7 +127,7 @@ export function MeasurementView({ project }: { project: string }) {
                 hint={
                   <>
                     {num(stats.stale_hits)}{" "}
-                    <WarnIcon size={10} className="inline-block align-[-1px]" /> atoms
+                    <WarnIcon className="inline-block size-2.5 align-middle" /> atoms
                   </>
                 }
                 warn={stats.stale_hit_rate > 0}

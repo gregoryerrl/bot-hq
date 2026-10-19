@@ -4,6 +4,7 @@ import { terminalInputClass } from "../app/contextLibraryShared";
 import { Button } from "./ui/Button";
 import { SegToggle } from "./ui/SegToggle";
 import { useListEditor } from "../hooks/useListEditor";
+import { CloseIcon } from "./icons";
 
 /**
  * Controlled, presentational editor for a {@link Policy}. Shared across all
@@ -240,7 +241,7 @@ function StringList({
             aria-label="Remove entry"
             className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface disabled:opacity-50"
           >
-            ✕
+            <CloseIcon className="size-3.5" />
           </button>
         </div>
       ))}

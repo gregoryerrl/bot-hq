@@ -52,7 +52,7 @@ import { SpawnBadge } from "../components/SpawnBadge";
 import type { AppError, ResolveResult, SessionInfo } from "../lib/bindings";
 import { Button } from "../components/ui/Button";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { GearIcon, WarnIcon } from "../components/icons";
+import { BranchIcon, EditIcon, GearIcon, WarnIcon } from "../components/icons";
 import { SubTabButton } from "../components/SubTabButton";
 import { Skeleton } from "../components/ui/Skeleton";
 import { SessionContextTab } from "./SessionContextTab";
@@ -635,7 +635,7 @@ export function SessionView() {
                 }}
                 className="shrink-0 px-1 font-code-sm text-code-sm text-on-surface-variant opacity-0 transition-opacity hover:text-on-surface focus:opacity-100 group-hover:opacity-100"
               >
-                ✎
+                <EditIcon className="size-3.5" />
               </button>
             </h2>
           ) : (
@@ -725,7 +725,8 @@ export function SessionView() {
                   className="font-code-sm text-code-sm text-on-surface-variant"
                   title={`Isolated worktree of ${session.base_repo_path} — work lands on branch bothq/${sessionId}`}
                 >
-                  ⎇ bothq/{sessionId}
+                  <BranchIcon className="mr-1 inline-block size-3 align-middle" />
+                  bothq/{sessionId}
                 </span>
               </>
             )}
@@ -858,7 +859,7 @@ export function SessionView() {
             <code className="text-on-surface">--resume</code>.
             {dirtyCount > 0 && (
               <span className="mt-2 block text-warning">
-                <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+                <WarnIcon className="mr-1 inline-block size-3 align-middle" />
                 {dirtyCount} uncommitted change{dirtyCount === 1 ? "" : "s"}{" "}
                 in this session's working tree will be kept, not committed.
               </span>

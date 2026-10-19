@@ -5,6 +5,7 @@ import { Button } from "../components/ui/Button";
 import { cn } from "../lib/cn";
 import { selectClass as houseSelectClass } from "../components/ui/Select";
 import {
+  CheckIcon,
   GearIcon,
   McpIcon,
   MemoryIcon,
@@ -262,7 +263,7 @@ export function ClaudeConfigPanel() {
       ) : showRestart ? (
         <div className="flex items-center justify-between gap-3 border-b border-success/30 bg-success/10 px-4 py-2">
           <span className="font-code-sm text-code-sm text-on-surface">
-            Saved ✓{" "}
+            Saved <CheckIcon className="mr-1 inline-block size-3 align-middle" />{" "}
             {activeSessions.length > 0
               ? `${activeSessions.length} agent session(s) are running — restart them to apply the new config now.`
               : "Applies to new agent sessions. Restart Claude Code itself for restart-only settings (model, thinking)."}
@@ -312,7 +313,7 @@ export function ClaudeConfigPanel() {
                     )}
                   >
                     <span className="flex items-center gap-2">
-                      <s.Icon size={14} />
+                      <s.Icon className="size-3.5" />
                       {s.label}
                     </span>
                     {count !== null && (

@@ -6,6 +6,7 @@ import { parseUtcMs } from "../lib/time";
 import type { TrayRow } from "./HaltBanner";
 import { errorMessage } from "../hooks/useInvoke";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ClockIcon } from "./icons";
 
 /**
  * The approved gates still waiting for their run window to open (feedback
@@ -68,7 +69,10 @@ export function ScheduledRuns({
             key={row.choice_id}
             className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5 text-xs"
           >
-            <span className="font-label-caps text-label-caps text-tertiary">⏱ SCHEDULED</span>
+            <span className="inline-flex items-center gap-1 font-label-caps text-label-caps text-tertiary">
+              <ClockIcon className="size-3" />
+              SCHEDULED
+            </span>
             <span className={cn("font-semibold", authorColorClass(who, hues))}>{who}</span>
             <span className="text-on-surface-variant">{runsLabel(row.run_not_before ?? null, now)}</span>
             {/* The first line, clipped at the pane's width; the whole command

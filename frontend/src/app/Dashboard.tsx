@@ -33,7 +33,7 @@ import {
 } from "../lib/effort";
 import { cn } from "../lib/cn";
 import { PARTICIPANT_COLORS } from "../components/authorColor";
-import { CloseIcon, RescanIcon, WarnIcon } from "../components/icons";
+import { CheckIcon, CloseIcon, RescanIcon, WarnIcon } from "../components/icons";
 import { PresetOfferBanner } from "./PresetOfferCard";
 import { ActionItemsPanel } from "../components/ActionItemsPanel";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -886,7 +886,7 @@ export function Dashboard() {
                                 : "border-outline-variant",
                             )}
                           >
-                            <RescanIcon size={10} className="mx-auto" />
+                            <RescanIcon className="mx-auto size-2.5" />
                           </button>
                           {PARTICIPANT_COLORS.map((c) => {
                             // Feedback #11/#12 leftover: a hue another row
@@ -1116,7 +1116,7 @@ export function Dashboard() {
                     role="status"
                     className="mt-2 rounded border border-warning/50 bg-warning/15 px-3 py-2 font-code-sm text-code-sm text-warning"
                   >
-                    <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+                    <WarnIcon className="mr-1 inline-block size-3 align-middle" />
                     {rosterWarning}
                   </p>
                 )}
@@ -1268,7 +1268,7 @@ export function Dashboard() {
                   )}
                   aria-hidden
                 >
-                  {step.done ? "✓" : i + 1}
+                  {step.done ? <CheckIcon className="size-3" /> : i + 1}
                 </span>
                 <span className="text-xs text-on-surface-variant">
                   {step.body}

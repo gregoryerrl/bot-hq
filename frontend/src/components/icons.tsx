@@ -1,31 +1,68 @@
 import type { SVGProps, ReactNode } from "react";
 import { cn } from "../lib/cn";
 
-export type IconProps = SVGProps<SVGSVGElement> & { size?: number };
+/**
+ * What the base owns, so no call site can drift from the set: the 24-unit
+ * canvas, the outline look, and the sizing mechanism (a class — never the
+ * `width`/`height` attributes).
+ */
+type Owned =
+  | "children"
+  | "viewBox"
+  | "width"
+  | "height"
+  | "fill"
+  | "stroke"
+  | "strokeWidth"
+  | "strokeLinecap"
+  | "strokeLinejoin"
+  | "aria-hidden";
+
+/** Every other SVG attribute passes through — `className`, `style`, handlers. */
+export type IconProps = Omit<SVGProps<SVGSVGElement>, Owned>;
 
 /**
- * Shared outline-icon base — `fill="none"`, `stroke="currentColor"`, round
- * caps/joins — so every icon reads as an outline that inherits the surrounding
- * text color. Use these instead of emoji/dingbat glyphs (which render filled
- * and clash with the Industrial Terminal styling).
+ * A caller's own size: a `size-*`, `w-*` or `h-*` utility, after any variant
+ * prefix (`md:`, `group-hover:`) or the `!` modifier.
  */
-function Svg({
-  size = 16,
-  children,
-  ...props
-}: IconProps & { children: ReactNode }) {
+const CALLER_SIZED = /(?:^|\s)(?:\S+:)?!?(?:size|w|h)-\S/;
+
+/**
+ * **One icon set** (the 2026-10-19 visual pass, slice S1d): every icon is drawn
+ * on this one base — a 24-unit outline, `fill="none"`, `stroke="currentColor"`
+ * at 1.75 with round caps and joins, so it inherits the surrounding text colour
+ * — and is `aria-hidden="true"`: an icon is never an accessible name, so an
+ * icon-only button carries its own `aria-label`. Use these instead of emoji and
+ * dingbat glyphs (✕ ▸ ⚠ ✓ ⏸ …), which render filled, in whatever the font
+ * draws, and clash with the Industrial Terminal styling.
+ *
+ * Sized by CLASS: `size-4` (16 px) unless the caller's `className` sizes the
+ * icon itself. The default is DROPPED then, not out-ordered: `cn` is plain
+ * `clsx` (no tailwind-merge), so `size-4 size-3` would resolve by stylesheet
+ * order, where `.size-4` sorts after `.size-3` and the caller's size would lose.
+ *
+ * Preflight makes every `svg` a block. An icon that stands where a glyph sat
+ * inside a run of text therefore takes `inline-block align-middle`; one beside
+ * text in a flex row needs neither.
+ *
+ * Until S1d there were two bases — stroke 1.75 at a 16 px attribute size for
+ * the app chrome, stroke 2 at a `size-3.5` class for the Context Library
+ * family — kept apart so that merging the two icon modules changed no pixels.
+ * The near-twins that merge left (`MemoryIcon`/`FileIcon`,
+ * `RescanIcon`/`RefreshIcon`) are still two drawings each.
+ */
+function Svg({ className, children, ...props }: IconProps & { children: ReactNode }) {
   return (
     <svg
-      aria-hidden
+      {...props}
+      className={cn(!CALLER_SIZED.test(className ?? "") && "size-4", className)}
       viewBox="0 0 24 24"
-      width={size}
-      height={size}
       fill="none"
       stroke="currentColor"
       strokeWidth={1.75}
       strokeLinecap="round"
       strokeLinejoin="round"
-      {...props}
+      aria-hidden="true"
     >
       {children}
     </svg>
@@ -150,137 +187,226 @@ export function WarnIcon(props: IconProps) {
 }
 
 // ============================================================================
-// Class-sized family (moved here from `app/contextLibraryShared.tsx`, round 9)
+// The Context Library family (moved here from `app/contextLibraryShared.tsx`,
+// round 9). On its own stroke-2, `size-3.5` base until S1d.
 // ============================================================================
 
-/**
- * The second base: `strokeWidth={2}` and sized by a Tailwind `size-*` CLASS
- * (default `size-3.5` = 14 px) instead of width/height attributes. It exists
- * so consolidating the icon modules changed no pixels — every Context Library
- * caller was written against these defaults. Unifying the two bases (stroke
- * 1.75 vs 2, attribute-sized 16 px vs class-sized 14 px) is a visual decision
- * to make with the app open, not a refactor; likewise fusing the near-twins
- * (`MemoryIcon`/`FileIcon`, `RescanIcon`/`RefreshIcon`). `cn` is plain
- * `clsx` — no tailwind-merge — so a caller's `size-*` only wins when it is
- * larger than the default (`.size-4` sorts after `.size-3.5`).
- */
-function ClassSvg({
-  className,
-  children,
-}: {
-  className?: string;
-  children: ReactNode;
-}) {
+/** Plus — register / add. */
+export function PlusIcon(props: IconProps) {
   return (
-    <svg
-      className={cn("size-3.5", className)}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      {children}
-    </svg>
-  );
-}
-
-type ClassIconProps = { className?: string };
-
-/** Plus — register / add. (Defaulted `size-4` until round 9, which made its
- *  one caller's `className="size-3.5"` a no-op; `size-3.5` like its siblings.) */
-export function PlusIcon({ className }: ClassIconProps) {
-  return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** Refresh / rescan (the Context Library's rescan button; `animate-spin`
  *  while running). Near-twin of `RescanIcon` — different arc geometry. */
-export function RefreshIcon({ className }: ClassIconProps) {
+export function RefreshIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <polyline points="23 4 23 10 17 10" />
       <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** Document with a folded corner — a CL file / workspace file. Near-twin of
  *  `MemoryIcon` (1-unit y offset). */
-export function FileIcon({ className }: ClassIconProps) {
+export function FileIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
       <polyline points="14 2 14 8 20 8" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** Eye — agent-visible. */
-export function EyeIcon({ className }: ClassIconProps) {
+export function EyeIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
       <circle cx="12" cy="12" r="3" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** Eye, slashed — hidden from agents. */
-export function EyeOffIcon({ className }: ClassIconProps) {
+export function EyeOffIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
       <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
       <path d="M14.12 14.12a3 3 0 11-4.24-4.24" />
       <line x1="1" y1="1" x2="23" y2="23" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** Folder. */
-export function FolderIcon({ className }: ClassIconProps) {
+export function FolderIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
-/** Close ×. */
-export function CloseIcon({ className }: ClassIconProps) {
+/** Close × — the dismiss ACTION; replaces ✕. (`CrossIcon` is the status mark.) */
+export function CloseIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <line x1="18" y1="6" x2="6" y2="18" />
       <line x1="6" y1="6" x2="18" y2="18" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** Save (floppy). */
-export function SaveIcon({ className }: ClassIconProps) {
+export function SaveIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" />
       <polyline points="17 21 17 13 7 13 7 21" />
       <polyline points="7 3 7 8 15 8" />
-    </ClassSvg>
+    </Svg>
   );
 }
 
 /** "Collapse all" — two chevrons meeting at the center (top points down,
  *  bottom points up), the VS-Code tree-toolbar fold glyph. */
-export function CollapseAllIcon({ className }: ClassIconProps) {
+export function CollapseAllIcon(props: IconProps) {
   return (
-    <ClassSvg className={className}>
+    <Svg {...props}>
       <polyline points="7 8 12 12 17 8" />
       <polyline points="7 16 12 12 17 16" />
-    </ClassSvg>
+    </Svg>
+  );
+}
+
+// ============================================================================
+// Glyph replacements (S1d) — each one retires a text glyph that stood in for
+// an icon.
+// ============================================================================
+
+/** Chevron, pointing right — a closed disclosure; replaces ▸ / ▶. Turn it
+ *  with `rotate-90` for an animated open state, or swap in `ChevronDownIcon`. */
+export function ChevronRightIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8.5 5l7 7-7 7" />
+    </Svg>
+  );
+}
+
+/** Chevron, pointing down — an open disclosure; replaces ▾. */
+export function ChevronDownIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 8.5l7 7 7-7" />
+    </Svg>
+  );
+}
+
+/** Check mark — done, passed, saved, staged; replaces ✓. */
+export function CheckIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </Svg>
+  );
+}
+
+/** Cross mark — failed; replaces ✗. Drawn to `CheckIcon`'s size, so the pair
+ *  reads as one; the larger `CloseIcon` is the dismiss action. */
+export function CrossIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M7 7l10 10" />
+      <path d="M17 7 7 17" />
+    </Svg>
+  );
+}
+
+/** Two bars — paused / halted; replaces ⏸. */
+export function PauseIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M9 5v14" />
+      <path d="M15 5v14" />
+    </Svg>
+  );
+}
+
+/** Clock face — scheduled; replaces ⏱. */
+export function ClockIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </Svg>
+  );
+}
+
+/** Git branch — a session's worktree branch; replaces ⎇. */
+export function BranchIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6 3v12" />
+      <circle cx="18" cy="6" r="3" />
+      <circle cx="6" cy="18" r="3" />
+      <path d="M18 9a9 9 0 0 1-9 9" />
+    </Svg>
+  );
+}
+
+/** Pencil — edit / rename; replaces ✎. */
+export function EditIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+    </Svg>
+  );
+}
+
+/** Arrow, pointing left — back. */
+export function ArrowLeftIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M19 12H5" />
+      <path d="M11 18l-6-6 6-6" />
+    </Svg>
+  );
+}
+
+/** Arrow, pointing right — forward / open. */
+export function ArrowRightIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 12h14" />
+      <path d="M13 6l6 6-6 6" />
+    </Svg>
+  );
+}
+
+/** Skip forward — a passed turn; replaces ⏭. */
+export function SkipIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5 5l10 7-10 7z" />
+      <path d="M19 5v14" />
+    </Svg>
+  );
+}
+
+/** A filled dot — an unsaved / live marker; replaces •. The one filled shape
+ *  in the set: a dot drawn in outline would read as a ring. */
+export function DotIcon(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="12" cy="12" r="4" fill="currentColor" />
+    </Svg>
   );
 }

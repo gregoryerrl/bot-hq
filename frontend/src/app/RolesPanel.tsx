@@ -6,7 +6,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { useDiscardGuard, useReportDirty } from "../hooks/useDiscardGuard";
 import { cn } from "../lib/cn";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
-import { SaveIcon } from "../components/icons";
+import { CheckIcon, SaveIcon } from "../components/icons";
 import type {
   AppError,
   CapabilityView,
@@ -582,7 +582,7 @@ function RoleForm({
           )}
           {saved && !dirty && (
             <span className="rounded border border-success/40 bg-success/15 px-1.5 py-0.5 font-label-caps text-label-caps text-success">
-              Saved ✓
+              Saved <CheckIcon className="inline-block size-3 align-middle" />
             </span>
           )}
         </div>

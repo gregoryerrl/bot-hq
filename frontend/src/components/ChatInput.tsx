@@ -15,6 +15,7 @@ import {
   insideBacktickSpan,
   tokenSegments,
 } from "../lib/tokenExpand";
+import { CheckIcon, PauseIcon } from "./icons";
 
 /** One participant the `@` picker can insert (rc3 D17). */
 type Mentionable = {
@@ -694,7 +695,10 @@ export function ChatInput({
       {paused && (
         <div className="flex items-center gap-2 border-b border-outline-variant bg-surface-container-low px-3 py-2">
           <span className="flex-1 text-xs text-on-surface-variant">
-            <span className="font-semibold text-on-surface">⏸ Paused</span>
+            <span className="font-semibold text-on-surface">
+              <PauseIcon className="mr-1 inline-block size-3 align-middle" />
+              Paused
+            </span>
             {" — agents halted. Type below to steer, or"}
           </span>
           {onResume && (
@@ -932,7 +936,8 @@ export function ChatInput({
                 className="min-w-[5.5rem]"
                 title="Staged — delivers at the next turn break, with your staged answers. Click to edit."
               >
-                Staged ✓
+                Staged
+                <CheckIcon className="size-3.5" />
               </Button>
             ) : (
               <Button

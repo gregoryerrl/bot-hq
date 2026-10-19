@@ -3,6 +3,7 @@ import { clampOverflows, useMeasuredClampOverflow } from "../hooks/useClampOverf
 import { cn } from "../lib/cn";
 import { parseUtcMs } from "../lib/time";
 import { authorColorClass } from "./authorColor";
+import { PauseIcon } from "./icons";
 
 /** One pending tray row, as `list_session_tray` returns it. */
 export type TrayRow = {
@@ -282,7 +283,8 @@ export function HaltBanner({
               className="font-label-caps text-label-caps text-primary"
               data-testid="temporary-halt"
             >
-              ⏸ TEMPORARY HALT
+              <PauseIcon className="mr-1 inline-block size-3 align-middle" />
+              TEMPORARY HALT
             </span>
             <span className="text-xs text-on-surface-variant">
               {wakeAtMs - now > 0
@@ -293,7 +295,8 @@ export function HaltBanner({
         ) : (
           <>
             <span className="font-label-caps text-label-caps text-primary">
-              ⏸ HALT
+              <PauseIcon className="mr-1 inline-block size-3 align-middle" />
+              HALT
             </span>
             <span className="text-xs text-on-surface-variant">
               {/* rc3 D35 made "waiting on you" literal: a declared halt stops the

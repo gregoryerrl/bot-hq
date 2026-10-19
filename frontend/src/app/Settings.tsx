@@ -480,7 +480,7 @@ function WorktreeKeptBadge({ sessionId }: { sessionId: string }) {
       className="shrink-0 rounded border border-warning/40 bg-warning/15 px-2 py-0.5 font-label-caps text-label-caps text-warning"
       title={`Worktree kept — may have uncommitted work: ${keptPath}`}
     >
-      <WarnIcon size={12} className="mr-1 inline-block align-[-2px]" />
+      <WarnIcon className="mr-1 inline-block size-3 align-middle" />
       Worktree kept
     </span>
   );

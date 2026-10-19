@@ -7,6 +7,7 @@ import { RelativeTime } from "./RelativeTime";
 import { UNKNOWN_PARTICIPANT } from "../lib/participants";
 import type { AgentMessage } from "../lib/bindings";
 import { fileArgInCommand } from "./FileViewerDialog";
+import { ChevronDownIcon, ChevronRightIcon, WarnIcon } from "./icons";
 
 interface ChatMessageProps {
   message: AgentMessage;
@@ -98,7 +99,8 @@ export const ChatMessage = memo(function ChatMessage({
     // NOT fall through to the prose render and read as the user's words.
     return (
       <div className="my-4 text-center font-code-sm text-code-sm italic text-warning">
-        ⚠ {message.content}
+        <WarnIcon className="mr-1 inline-block size-3 align-middle" />
+        {message.content}
       </div>
     );
   }
@@ -203,7 +205,11 @@ function ToolMessage({
         title={isUse ? "tool call" : "tool result"}
       >
         <span aria-hidden className="w-3 text-on-surface-variant">
-          {expanded ? "▾" : "▸"}
+          {expanded ? (
+            <ChevronDownIcon className="mt-0.5 size-3" />
+          ) : (
+            <ChevronRightIcon className="mt-0.5 size-3" />
+          )}
         </span>
         <span
           className={cn(

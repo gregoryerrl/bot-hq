@@ -166,7 +166,7 @@ describe("ChatInput turn-status + Stop", () => {
     );
 
     // The parent flips `staged`: the box locks read-only, the toggle shows
-    // Staged ✓, and the text stays visible — it IS the queued message.
+    // Staged (with a check icon), and the text stays visible — it IS the queued message.
     rerender(
       <ChatInput
         activity="busy"
@@ -183,7 +183,7 @@ describe("ChatInput turn-status + Stop", () => {
     const box = screen.getByRole("textbox");
     expect(box).toHaveValue("queued while they work");
     expect(box).toHaveAttribute("readonly");
-    fireEvent.click(screen.getByRole("button", { name: "Staged ✓" }));
+    fireEvent.click(screen.getByRole("button", { name: "Staged" }));
     await waitFor(() => expect(onUnstage).toHaveBeenCalledTimes(1));
   });
 
@@ -231,7 +231,7 @@ describe("ChatInput turn-status + Stop", () => {
         stagedText="queued while they work"
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Staged ✓" }));
+    fireEvent.click(screen.getByRole("button", { name: "Staged" }));
     await waitFor(() => expect(onUnstage).toHaveBeenCalledTimes(1));
     // Editing again: the text is a draft again, persisted again.
     expect(localStorage.getItem("bothq:draft:s-stage")).toBe("queued while they work");

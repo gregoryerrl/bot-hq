@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { Button } from "../components/ui/Button";
+import { CloseIcon } from "../components/icons";
 
 /**
  * The one-time starter offers (1.0.1) — same contract as the Roles tab's
@@ -127,7 +128,7 @@ export function PresetOfferBanner() {
           Review offers
         </Button>
         <Button variant="ghost" onClick={dismiss} aria-label="Dismiss">
-          ✕
+          <CloseIcon />
         </Button>
       </div>
     </div>

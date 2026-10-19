@@ -13,7 +13,7 @@ import { Markdown } from "./Markdown";
 import { ErrorBanner } from "./ErrorBanner";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { FileViewerDialog, fileArgsInCommand } from "./FileViewerDialog";
-import { TrashIcon } from "./icons";
+import { CheckIcon, ChevronRightIcon, TrashIcon, WarnIcon } from "./icons";
 import { Button } from "./ui/Button";
 import { cn } from "../lib/cn";
 import { formatRelative, formatTimestamp } from "../lib/time";
@@ -836,7 +836,7 @@ function ApplyDiffBlock({ diff }: { diff: ComputeApplyDiffResult | null }) {
                   aria-hidden
                   className="text-on-surface-variant transition-transform group-open:rotate-90"
                 >
-                  ▶
+                  <ChevronRightIcon className="size-3" />
                 </span>
                 <span className="truncate font-code-sm text-warning">
                   {g.file}
@@ -1183,7 +1183,8 @@ function TrayChoice({
       )}
       {entry.stale && (
         <div className="mb-1 rounded border border-error/40 bg-error-container/20 px-2 py-1 font-body-md text-body-md text-on-error-container">
-          ⚠ Stale — requested {relAgo(entry.asked_at)}; the requesting agent has
+          <WarnIcon className="mr-1 inline-block size-3.5 align-middle" />
+          Stale — requested {relAgo(entry.asked_at)}; the requesting agent has
           moved on. Review the command before approving (repo state may have
           changed).
         </div>
@@ -1219,7 +1220,8 @@ function TrayChoice({
       {stagedOption !== undefined && (
         <div className="mt-1 flex items-center gap-2 font-code-sm text-code-sm text-on-surface-variant">
           <span className="rounded bg-primary/15 px-1.5 py-0.5 text-primary">
-            ✓ staged: {stagedOption}
+            <CheckIcon className="mr-1 inline-block size-3 align-middle" />
+            staged: {stagedOption}
           </span>
           <span>sends with your message</span>
           {onUnstage && (

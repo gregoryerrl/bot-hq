@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { GatedKeyword, GateMode } from "../lib/bindings";
 import { SegToggle } from "./ui/SegToggle";
 import { useListEditor } from "../hooks/useListEditor";
+import { CloseIcon } from "./icons";
 
 interface GatedKeywordListProps {
   /** Current keyword rows (the caller's draft). */
@@ -97,7 +98,7 @@ export function GatedKeywordList({
                 aria-label="Remove keyword"
                 className="shrink-0 rounded border border-outline-variant bg-transparent px-2 py-1 font-code-sm text-code-sm text-on-surface-variant transition-colors hover:bg-surface-container-high hover:text-on-surface"
               >
-                ✕
+                <CloseIcon className="size-3.5" />
               </button>
             </li>
           ))}

@@ -9,7 +9,7 @@ import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { accountLabelOf, formatLimitMark, markIsLive, marksFor } from "../lib/accounts";
 import { terminalInputClass, FieldLabel } from "./contextLibraryShared";
-import { CloseIcon, SaveIcon } from "../components/icons";
+import { CheckIcon, CloseIcon, CrossIcon, SaveIcon } from "../components/icons";
 import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 import { selectClass } from "../components/ui/Select";
@@ -244,7 +244,12 @@ export function ModelsPanel() {
                       testResult[m.id].ok ? "text-success" : "text-error",
                     )}
                   >
-                    {testResult[m.id].ok ? "✓ " : "✗ "}
+                    {testResult[m.id].ok ? (
+                      <CheckIcon className="mr-1 inline-block size-3 align-middle" />
+                    ) : (
+                      <CrossIcon className="mr-1 inline-block size-3 align-middle" />
+                    )}
+                    <span className="sr-only">{testResult[m.id].ok ? "Passed: " : "Failed: "}</span>
                     {testResult[m.id].message}
                   </div>
                 )}

@@ -19,7 +19,9 @@ import {
   type TreeNode,
 } from "./contextLibraryShared";
 import {
+  ChevronRightIcon,
   CollapseAllIcon,
+  CrossIcon,
   EyeIcon,
   EyeOffIcon,
   FileIcon,
@@ -240,11 +242,11 @@ export function WorkspaceSidebar({
                   +{rescanReport.added.length}
                 </span>
                 <span className="inline-flex items-center gap-0.5 text-tertiary">
-                  <RescanIcon size={12} />
+                  <RescanIcon className="size-3" />
                   {rescanReport.touched.length}
                 </span>
                 <span className="inline-flex items-center gap-0.5 text-warning">
-                  <WarnIcon size={12} />
+                  <WarnIcon className="size-3" />
                   {rescanReport.orphaned.length}
                 </span>
               </>
@@ -254,7 +256,8 @@ export function WorkspaceSidebar({
                 className="text-error"
                 title={`Rescan failed for: ${rescanFailures.join(", ")}`}
               >
-                ✗{rescanFailures.length} failed
+                <CrossIcon className="mr-0.5 inline-block size-3 align-middle" />
+                {rescanFailures.length} failed
               </span>
             )}
           </div>
@@ -439,7 +442,7 @@ function CategorySection({
             isCollapsed ? "" : "rotate-90",
           )}
         >
-          ▸
+          <ChevronRightIcon className="size-3" />
         </span>
         <span className="truncate">{label}</span>
         <span className="ml-auto pl-1 font-code-sm text-code-sm text-on-surface-variant/60">
@@ -535,7 +538,7 @@ function FolderNodeImpl({
             isCollapsed ? "" : "rotate-90",
           )}
         >
-          ▸
+          <ChevronRightIcon className="size-3" />
         </span>
         <FolderIcon className="shrink-0 text-on-surface-variant/60" />
         <span className="truncate">{label}</span>

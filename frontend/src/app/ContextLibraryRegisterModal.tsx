@@ -4,6 +4,7 @@ import { errorMessage } from "../hooks/useInvoke";
 import { baseName, pickFolder, terminalInputClass } from "./contextLibraryShared";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { useEscapeKey } from "../hooks/useEscapeKey";
+import { ChevronRightIcon } from "../components/icons";
 
 // ============================================================================
 // New-project modal — the primary "add a project" flow.
@@ -196,7 +197,7 @@ export function RegisterProjectModal({
               aria-hidden
               className={`inline-block w-3 transition-transform ${advancedOpen ? "rotate-90" : ""}`}
             >
-              ▸
+              <ChevronRightIcon className="size-3" />
             </span>
             Advanced
           </button>

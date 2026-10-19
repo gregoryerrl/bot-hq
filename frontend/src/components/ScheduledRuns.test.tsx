@@ -33,7 +33,7 @@ describe("ScheduledRuns", () => {
       />,
     );
     const strip = screen.getByTestId("scheduled-runs");
-    expect(strip).toHaveTextContent("⏱ SCHEDULED");
+    expect(strip).toHaveTextContent("SCHEDULED");
     expect(strip).toHaveTextContent("HANDS · Opus");
     expect(strip).toHaveTextContent(/runs \d\d:\d\d \(in [34] min\)/);
     expect(strip).toHaveTextContent("gh pr merge 803 --squash");

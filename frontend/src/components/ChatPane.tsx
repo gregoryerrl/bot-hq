@@ -16,6 +16,7 @@ import { cn } from "../lib/cn";
 import { authorLabel, useParticipantLabels } from "../lib/participants";
 import { compactRows } from "../lib/chatRows";
 import type { AgentMessage } from "../lib/bindings";
+import { SkipIcon } from "./icons";
 
 // Stable reference so the zustand selector doesn't return a fresh array per
 // call (would trigger infinite re-renders via Object.is).
@@ -316,7 +317,8 @@ function PassLine({
       className="my-1.5 break-words text-center font-code-sm text-code-sm text-on-surface-variant"
       data-testid="pass-line"
     >
-      ⏭ passed — {text}
+      <SkipIcon className="mr-1 inline-block size-3 align-middle" />
+      passed — {text}
     </div>
   );
 }

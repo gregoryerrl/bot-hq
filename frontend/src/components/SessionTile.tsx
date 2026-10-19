@@ -170,7 +170,7 @@ function SessionTileImpl({
             }
             data-testid="needs-you"
           >
-            <WarnIcon size={14} className="shrink-0" />
+            <WarnIcon className="size-3.5 shrink-0" />
             <span className="truncate">[Needs you · {needsYouParts(needs).join(" · ")}]</span>
           </div>
         )}

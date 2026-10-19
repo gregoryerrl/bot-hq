@@ -12,7 +12,7 @@ import type {
   ProjectView,
 } from "../lib/bindings";
 import { type OpenTab, tabKey, tabLabel, terminalInputClass } from "./contextLibraryShared";
-import { CloseIcon, FileIcon, FolderIcon, SaveIcon } from "../components/icons";
+import { CloseIcon, DotIcon, FileIcon, FolderIcon, SaveIcon } from "../components/icons";
 import { FolderView } from "./ContextLibraryFolderView";
 import { PolicyForm } from "../components/PolicyForm";
 import { SegToggle } from "../components/ui/SegToggle";
@@ -332,7 +332,7 @@ function TabStrip({
                   title="Unsaved changes"
                   aria-label="Unsaved changes"
                 >
-                  •
+                  <DotIcon className="size-3" />
                 </span>
               )}
             </button>
