@@ -379,7 +379,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         cwd: cfg.working_dir.as_ref().map(|d| d.display().to_string()),
         deadlines: InterruptDeadlines::default(),
         server_pid: child_pid,
-        server_baseline: child_pid.map(server_tree).unwrap_or_default(),
+        server_baseline: child_pid.and_then(server_tree),
         data_dir: cfg.data_dir.clone(),
         session_id: cfg.session_id.clone(),
     };
@@ -537,16 +537,17 @@ impl Default for InterruptDeadlines {
 }
 
 /// The app-server's own process tree at the driver's start — see
-/// `Driver::server_baseline`. Empty where there is no tree walk.
-fn server_tree(pid: u32) -> Vec<u32> {
+/// `Driver::server_baseline`. `None` when it could not be listed (and
+/// always where there is no tree walk).
+fn server_tree(pid: u32) -> Option<Vec<u32>> {
     #[cfg(unix)]
     {
-        crate::process::descendants(pid)
+        crate::process::descendants_checked(pid)
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
-        Vec::new()
+        None
     }
 }
 
@@ -578,8 +579,11 @@ struct Driver {
     /// whatever Codex started for itself. A descendant that is not among
     /// them is taken for a command's process — a working assumption (a helper
     /// Codex starts lazily would be taken for one too), only ever SUBTRACTED
-    /// from a fresh listing, never signalled on its own.
-    server_baseline: Vec<u32>,
+    /// from a fresh listing, never signalled on its own. `None` when the
+    /// listing failed at start: an unknown tree is never "clean", and never
+    /// an empty baseline that would make the native binary look like a
+    /// command (EYES 37ff33f6).
+    server_baseline: Option<Vec<u32>>,
     /// Where the handoff files live, and whose they are — for the text put
     /// back after a compaction.
     data_dir: std::path::PathBuf,
@@ -865,23 +869,46 @@ impl Driver {
             return Ok(0);
         }
         #[cfg(unix)]
-        loop {
-            let live = crate::process::descendants_checked(pid).ok_or_else(|| "ps could not list the app-server's processes".to_string())?;
-            let newer: Vec<u32> = live.into_iter().filter(|p| !self.server_baseline.contains(p)).collect();
-            if newer.is_empty() {
-                return Ok(0);
-            }
-            if atomic {
-                if let Some(until) = until {
-                    let now = tokio::time::Instant::now();
-                    if now < until {
-                        tokio::time::sleep((until - now).min(std::time::Duration::from_millis(250))).await;
-                        continue;
+        {
+            let Some(baseline) = self.server_baseline.as_deref() else {
+                return Err("the app-server's own processes were never listed (ps failed at its start)".to_string());
+            };
+            let list = || -> Result<Vec<u32>, String> {
+                let live = crate::process::descendants_checked(pid).ok_or_else(|| "ps could not list the app-server's processes".to_string())?;
+                Ok(live.into_iter().filter(|p| !baseline.contains(p)).collect())
+            };
+            let newer = loop {
+                let newer = list()?;
+                if newer.is_empty() {
+                    return Ok(0);
+                }
+                if atomic {
+                    if let Some(until) = until {
+                        let now = tokio::time::Instant::now();
+                        if now < until {
+                            tokio::time::sleep((until - now).min(std::time::Duration::from_millis(250))).await;
+                            continue;
+                        }
                     }
                 }
-            }
+                break newer;
+            };
             crate::process::kill_each(&newer);
-            return Ok(newer.len());
+            // Gone for real before the next turn may start: SIGKILL is
+            // asynchronous, and a kill that failed is only visible here. Each
+            // target is asked itself (`is_gone`), not the tree — a child whose
+            // parent died first leaves the tree alive, reparented.
+            let gone_by = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let survivors: Vec<u32> = newer.iter().copied().filter(|p| !crate::process::is_gone(*p)).collect();
+                if survivors.is_empty() {
+                    return Ok(newer.len());
+                }
+                if tokio::time::Instant::now() >= gone_by {
+                    return Err(format!("{} process(es) survived SIGKILL: {survivors:?}", survivors.len()));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
         }
     }
 
@@ -1216,7 +1243,7 @@ mod tests {
             cwd: Some("/tmp/repo".into()),
             deadlines: InterruptDeadlines { plain: std::time::Duration::from_millis(400), atomic: std::time::Duration::from_millis(800) },
             server_pid: SERVER_PID.with(|p| p.get()),
-            server_baseline: SERVER_PID.with(|p| p.get()).map(server_tree).unwrap_or_default(),
+            server_baseline: if BASELINE_UNKNOWN.with(|b| b.get()) { None } else { SERVER_PID.with(|p| p.get()).and_then(server_tree) },
             data_dir: DATA_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-data-dir")),
             session_id: "s-test".into(),
         };
@@ -1229,6 +1256,8 @@ mod tests {
         static SERVER_PID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
         /// A data dir with rendered handoff files, for the compaction test.
         static DATA_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+        /// Build the next harness as if `ps` had failed at the driver's start.
+        static BASELINE_UNKNOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// A compaction puts the rendered handoff file (and the user's words)
@@ -1517,6 +1546,20 @@ mod tests {
     #[cfg(unix)]
     struct ServerGuard(std::process::Child);
     #[cfg(unix)]
+    impl ServerGuard {
+        /// Whether the stand-in server itself has exited (reaped here — the
+        /// test is its parent, so a bare `kill(pid, 0)` would still see it).
+        fn exited(&mut self) -> bool {
+            for _ in 0..40 {
+                if self.0.try_wait().ok().flatten().is_some() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            false
+        }
+    }
+    #[cfg(unix)]
     impl Drop for ServerGuard {
         fn drop(&mut self) {
             crate::process::kill_process_tree(self.0.id());
@@ -1597,11 +1640,12 @@ mod tests {
         h.fake.answer_interrupt(&req, "t1").await;
         assert!(alive(command), "Codex left the command running");
         h.fake.turn_interrupted("t1").await;
-        // The queued page's turn starts only once the command is gone.
+        // The queued page's turn starts only once the command is GONE — not
+        // merely signalled: no wait here, the driver did the waiting.
         h.fake.hooks_armed().await;
         let start = h.fake.read().await;
         assert_eq!(start["method"], "turn/start");
-        assert!(wait_dead(command), "the command was stopped before the next turn started");
+        assert!(!alive(command), "the command was gone before the next turn started");
         assert!(own.iter().all(|p| alive(*p)) && alive(server_pid), "the app-server's own tree is untouched");
         let notice = next_event(&mut h).await;
         assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "{notice:?}");
@@ -1640,8 +1684,44 @@ mod tests {
         let done = next_event(&mut h).await;
         assert!(matches!(&done, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "{done:?}");
         assert!(t0.elapsed() >= std::time::Duration::from_millis(700), "not before the deadline: {:?}", t0.elapsed());
-        assert!(wait_dead(command));
+        assert!(!alive(command), "gone before the notice, not merely signalled");
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
+        drop(server);
+    }
+
+    /// An app-server whose own tree could not be listed at start has no
+    /// baseline: at the first interrupted completion the driver cannot tell a
+    /// command from the native binary, so it gives the whole server up (the
+    /// reaped notice names why) instead of killing by guess (EYES 37ff33f6).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unknown_baseline_reaps_the_server_instead_of_guessing() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        BASELINE_UNKNOWN.with(|b| b.set(true));
+        let mut h = harness();
+        BASELINE_UNKNOWN.with(|b| b.set(false));
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("build it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let command = start_command(server_pid, &own);
+        h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        h.fake.turn_interrupted("t1").await;
+        let mut saw = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(6), h.events.recv()).await.unwrap() {
+                Some(AgentEvent::Notice(n)) if n.contains("could not tell") && n.contains("never listed") => saw = true,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(saw, "the reaped notice names the unknown baseline");
+        let mut server = server;
+        assert!(wait_dead(command) && server.exited(), "the whole server tree is gone");
         drop(server);
     }
 

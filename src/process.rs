@@ -75,6 +75,23 @@ pub fn descendants_checked(pid: u32) -> Option<Vec<u32>> {
     Some(order)
 }
 
+/// Whether `pid` is finished: no such process, or a zombie its parent has
+/// only to reap. Asked of the pid itself, so a child that was reparented
+/// when its parent died first (and so left its old parent's tree) is still
+/// seen alive until it is actually gone (EYES e3a49b5a).
+#[cfg(unix)]
+pub fn is_gone(pid: u32) -> bool {
+    // SAFETY: kill(2) with signal 0 only checks; a stale pid answers ESRCH.
+    let answered = unsafe { libc::kill(pid as i32, 0) };
+    if answered != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        return true;
+    }
+    match command("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim_start().starts_with('Z'),
+        _ => false,
+    }
+}
+
 /// SIGKILL each pid, in the order given (callers pass children first).
 /// Best-effort: a pid that is already gone is skipped.
 #[cfg(unix)]
@@ -130,6 +147,30 @@ mod tests {
         let out = tokio_command("git").arg("--version").output().await.expect("git runs");
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
+    }
+
+    /// `is_gone` answers for the pid itself: a running sleep is not gone, a
+    /// killed-and-reaped one is, and a killed-but-unreaped one (a zombie) is
+    /// finished too.
+    #[cfg(unix)]
+    #[test]
+    fn is_gone_tells_a_finished_process_from_a_running_one() {
+        let mut child = command("sleep").arg("300").spawn().expect("sleep runs");
+        let pid = child.id();
+        assert!(!is_gone(pid));
+        kill_each(&[pid]);
+        // Not yet reaped by this test: a zombie, which counts as gone.
+        let mut gone = false;
+        for _ in 0..40 {
+            if is_gone(pid) {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(gone, "a SIGKILLed child is gone (zombie or reaped)");
+        let _ = child.wait();
+        assert!(is_gone(pid));
     }
 
     /// The tree, not the leader: a shell with two sleeping children is listed
