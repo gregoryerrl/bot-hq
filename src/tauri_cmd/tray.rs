@@ -128,6 +128,10 @@ pub async fn send_user_response(
     text: String,
     picks: Vec<StagedPick>,
 ) -> Result<(), AppError> {
+    // Startup BEFORE any pick resolves (EYES U2): the picks record first and
+    // the message posts last, so a send that failed on a dormant session
+    // would already have applied its answers. Idempotent; refuses a closed row.
+    core.ensure_session_started(&session_id).await?;
     core.send_user_response(
         &session_id,
         &text,

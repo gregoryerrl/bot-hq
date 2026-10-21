@@ -59,6 +59,12 @@ pub async fn broadcast_message(
     session_id: String,
     text: String,
 ) -> Result<(), AppError> {
+    // The user's Send waits for the roster (EYES U2 / 2b1592e0): the view's
+    // mount respawns a dormant session in the background, and a Send in the
+    // seconds after a relaunch used to fail with "no live session" and need
+    // a second click. `ensure_session_started` is idempotent, waits on the
+    // spawn gate for a respawn in flight, and refuses a closed row.
+    core.ensure_session_started(&session_id).await?;
     core.broadcast(&session_id, &text, crate::core::Authored::ByUser).await?;
     Ok(())
 }
@@ -67,6 +73,28 @@ pub async fn broadcast_message(
 mod tests {
     use super::*;
     use crate::storage::{MessageKind};
+
+    /// **The user's two Send commands wait for the roster before sending**
+    /// (EYES U2 / 2b1592e0): after a relaunch the view's mount respawns a
+    /// dormant session in the background and a Send in those seconds failed
+    /// with "no live session"; `send_user_response` records the picks before
+    /// it posts the message, so the wait must come before any of it.
+    /// Source-asserted: the commands take a live `CoreAppState`.
+    #[test]
+    fn the_users_send_commands_start_the_session_before_sending() {
+        for (file, name, send) in [
+            (include_str!("messages.rs"), "broadcast_message", "core.broadcast("),
+            (include_str!("tray.rs"), "send_user_response", "core.send_user_response("),
+        ] {
+            let at = file.find(&format!("pub async fn {name}(")).unwrap_or_else(|| panic!("{name} exists"));
+            let body = &file[at..];
+            let end = body[1..].find("\n#[tauri::command]").map_or(body.len(), |n| n + 1);
+            let body = &body[..end];
+            let start = body.find("core.ensure_session_started(&session_id)").unwrap_or_else(|| panic!("{name} waits for the roster"));
+            let sends = body.find(send).unwrap_or_else(|| panic!("{name} sends"));
+            assert!(start < sends, "{name}: the roster is started before the send");
+        }
+    }
 
     #[tokio::test]
     async fn messages_for_session_returns_in_order_and_maps_authors() {

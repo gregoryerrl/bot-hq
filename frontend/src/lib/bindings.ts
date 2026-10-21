@@ -2669,7 +2669,15 @@ scheduled: boolean;
  * UI warns + requires confirm. Computed at list time from the live in-memory
  * pending map (false from the bare `From` conversion; the list commands set it).
  */
-stale: boolean }
+stale: boolean; 
+/**
+ * How an APPROVED gate's run ended (feedback #104): the command's exit
+ * code once it ran (124 = bot-hq's timeout), or why the run was refused
+ * (its body changed, its window passed). Both null while it has not run
+ * yet, and on rows from before 0085/0087. The chat's gate chip reads
+ * these so "approved" is never shown over a run that failed.
+ */
+exit_code: number | null; run_refusal: string | null }
 /**
  * One scalar/env setting with provenance + inheritance.
  */

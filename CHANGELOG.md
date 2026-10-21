@@ -13,6 +13,12 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **The first message after a relaunch lands.** Opening a session that
+  was dormant (after a relaunch, or one nobody had looked at) starts its
+  agents in the background, and a message sent in those seconds failed
+  with "no live session" and had to be sent again. Send now waits for the
+  agents to be up — the same wait a staged tray answer gets, before any
+  answer is recorded.
 - **A gate id quoted in chat shows how its run ended.** The chip beside a
   gate id read "approved" even when the approved command then failed, timed
   out or was refused at run time; it now reads "ran", "exit N", "timed out"
