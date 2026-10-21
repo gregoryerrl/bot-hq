@@ -728,6 +728,15 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                     }
                 }
             });
+            // A session halted WITH a wake instant was promised a turn; the
+            // wake needs a ring, and a boot alone gives nobody one. Bring
+            // those rosters back now, so the re-armed halt deals the turn —
+            // this is what `scripts/relaunch.sh` (a relaunch from inside a
+            // session) comes back through.
+            let core_for_wakes = Arc::clone(&core_for_setup);
+            tokio::spawn(async move {
+                core_for_wakes.respawn_temporarily_halted_sessions().await;
+            });
             tracing::info!("Tauri setup complete; webview launching");
             Ok(())
         })

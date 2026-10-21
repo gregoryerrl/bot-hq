@@ -166,6 +166,19 @@ impl Storage {
         Ok(row.and_then(|(w,)| w))
     }
 
+    /// The open sessions holding a TEMPORARY halt (a wake instant), oldest
+    /// first — the ones a boot brings back on its own, so the wake has a ring
+    /// to deal to. A plain halt, a closed row, a session with no halt: not
+    /// listed.
+    pub async fn sessions_with_temporary_halt(&self) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT id FROM sessions WHERE closed_at IS NULL AND halt_wake_at IS NOT NULL ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
 
     /// Persist (or clear) this session's staged message — the Stage slot
     /// (rc3 B1-F11).
@@ -659,6 +672,25 @@ impl Storage {
 mod tests {
     use super::{list_active_sessions_with_preview_sql, session_order_by};
     use crate::storage::{MessageKind, Storage};
+
+    /// A boot brings back the sessions that hold a TEMPORARY halt — a wake
+    /// instant is a promise of a turn, and the wake needs a ring. A plain
+    /// halt, a cleared one, a session with none, and a closed row that kept
+    /// its wake instant are not listed.
+    #[tokio::test]
+    async fn a_boot_lists_the_open_sessions_with_a_wake_instant() {
+        let s = Storage::memory().await.unwrap();
+        for id in ["waking", "plain", "cleared", "idle", "closed"] {
+            s.create_session(id, "t", None).await.unwrap();
+        }
+        s.declare_temporary_session_halt("waking", "hands", "relaunching", "2026-10-21T08:40:00Z").await.unwrap();
+        s.declare_session_halt("plain", "hands", "waiting on you").await.unwrap();
+        s.declare_temporary_session_halt("cleared", "hands", "ci", "2026-10-21T08:40:00Z").await.unwrap();
+        s.clear_session_halt("cleared").await.unwrap();
+        s.declare_temporary_session_halt("closed", "hands", "ci", "2026-10-21T08:40:00Z").await.unwrap();
+        s.close_session("closed", false).await.unwrap();
+        assert_eq!(s.sessions_with_temporary_halt().await.unwrap(), vec!["waking".to_string()]);
+    }
 
     /// **A closed session refuses a halt declaration** (round 13). The ghost
     /// specimen: the close path's kill raced ahead of the row close, and the

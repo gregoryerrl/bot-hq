@@ -658,6 +658,31 @@ impl AppState {
         Ok(())
     }
 
+    /// **A boot brings back every open session holding a TEMPORARY halt.** A
+    /// wake instant is a promise of a turn — to an agent waiting on CI, a
+    /// deploy, or a relaunch it asked for itself (`scripts/relaunch.sh`) —
+    /// and the wake needs a ring: `register_session_sequencer` re-arms the
+    /// halt when the roster comes up, and a past instant fires at once. Until
+    /// this, a halt that expired while the app was down woke nobody until
+    /// the user happened to view the session. Sessions without a wake instant
+    /// stay dormant, as after any relaunch. Each spawn is its own attempt: one
+    /// session's failure is logged and the rest still come back.
+    pub async fn respawn_temporarily_halted_sessions(&self) {
+        let ids = match self.storage.sessions_with_temporary_halt().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(?e, "boot: could not list the sessions holding a temporary halt");
+                return;
+            }
+        };
+        for id in ids {
+            match self.ensure_session_started(&id).await {
+                Ok(()) => tracing::info!(session_id = %id, "boot: respawned a session holding a temporary halt; its wake re-arms"),
+                Err(e) => tracing::warn!(session_id = %id, ?e, "boot: a session holding a temporary halt did not respawn"),
+            }
+        }
+    }
+
     /// **Reopen a closed session** (round 10, B4): clear the row's `closed_at`
     /// / `archived` / halt slot, spawn the roster (`--resume` off each
     /// participant's own claude session id, as any respawn does), and tell the
@@ -3786,6 +3811,42 @@ mod tests {
             "Stop must reach the ring — a paused banner over a ring that keeps \
              dealing is the state this fixed"
         );
+    }
+
+    /// **A boot respawns the sessions holding a TEMPORARY halt, and nothing
+    /// else.** The wake (`fire_temporary_halt`) deals to a ring; after a boot
+    /// no ring exists until something spawns the roster, so a halt that
+    /// expired while the app was down — a CI wait, a relaunch the agent asked
+    /// for through `scripts/relaunch.sh` — woke nobody until the user viewed
+    /// the session. Source-asserted like its neighbours (`ensure_session_started`
+    /// spawns real subprocesses): the boot path must reach the respawn, the
+    /// respawn must select by wake instant and must go through THE one spawn
+    /// path, and no boot sweep over every open session may come back (that
+    /// flagged every deliberately-open session at once, 1.0.1 Batch 3).
+    #[test]
+    fn a_boot_respawns_the_sessions_holding_a_wake_instant_through_the_one_spawn_path() {
+        let main = include_str!("../main.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            main.matches("respawn_temporarily_halted_sessions()").count(),
+            1,
+            "setup spawns the boot respawn exactly once"
+        );
+        let src = include_str!("state.rs");
+        let prod = src.split("mod tests {").next().expect("a split always yields a first part");
+        let body = prod
+            .split("pub async fn respawn_temporarily_halted_sessions")
+            .nth(1)
+            .expect("respawn_temporarily_halted_sessions exists")
+            .split("\n    }\n")
+            .next()
+            .expect("the function has a body");
+        assert!(body.contains("sessions_with_temporary_halt()"), "selected by wake instant, not by `closed_at IS NULL`");
+        assert!(body.contains("self.ensure_session_started(&id)"), "through the one spawn path");
+        assert!(!body.contains("list_active_sessions") && !body.contains("list_sessions("), "no sweep over every open session");
     }
 
     /// **A relaunch mid-stage puts the user's words back, and tells the ring.**

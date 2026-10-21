@@ -71,6 +71,15 @@ model side by side. Migration 0102 applies on first launch.
   where the session starts. **Test** on a Codex row leaves nothing running:
   the probe's short-lived app-server (the native binary under npm's `codex`
   wrapper) is reaped with its whole process group, on every exit path.
+- **An agent can relaunch bot-hq and come back to its session.**
+  `scripts/relaunch.sh --from <session> --delay 20` stops the app, rebuilds
+  it and launches it again from outside the agent's own process group (the
+  app's exit kills that group), refusing while any other session is
+  mid-turn. The agent declares a temporary halt first; at boot bot-hq now
+  respawns every open session that holds a wake instant, so the halt
+  re-arms and its expiry deals the agent its next turn. The same boot step
+  fixes a quieter gap: a halt that expired while the app was down (an agent
+  waiting on CI, say) used to wake nobody until you opened the session.
 
 ## [1.0.10] — 2026-10-19
 

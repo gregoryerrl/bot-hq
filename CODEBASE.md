@@ -834,7 +834,7 @@ to `isPolicyFile` → branch in `EditorAreaImpl`.
 | `tests/phase_vote_wiring_test.rs` | every storage method the D37 phase-advance vote needs has a caller OUTSIDE its defining file — round 5's E1, where `bump_phase_epoch` was defined, tested seven times and called by nothing, leaving the epoch at 0 through 114 live transitions. A `pub` method on a `pub struct` is never `dead_code`, and a test that calls it does not pin its mount |
 | `examples/dump_role_prose.rs` | LIVE: generator for the role-prose reseed migrations |
 | (deleted) the two native-loop research spikes (native_loop, subscription_loop) rc3 D9 closed — removed 2026-08-17 (round 7); recoverable from git history at a1475e7 | historical |
-| `scripts/`, `packaging/`, `site/`, `templates/`, `start`, `frontend/scripts/check-import-cycles.mjs` | turn-latency tool · Homebrew cask · landing page · CL seeds · dev launcher · the import-cycle gate `start` runs |
+| `scripts/`, `packaging/`, `site/`, `templates/`, `start`, `frontend/scripts/check-import-cycles.mjs` | turn-latency tool · `scripts/relaunch.sh` (an agent relaunches the app from inside its session; the boot respawn in `core/state.rs::respawn_temporarily_halted_sessions` brings it back) · Homebrew cask · landing page · CL seeds · dev launcher · the import-cycle gate `start` runs |
 | `Cargo.toml`, `frontend/package.json`, `.gitignore`, `.env` | deps + config |
 
 **Where to add X.** New canonical fact → update the ARCHITECTURE.md H2 AND grep
