@@ -549,20 +549,20 @@ function ModelDialog({
                     : null,
                 })
               }
-              placeholder={codex ? "872000" : "(unknown — meter shows a gap)"}
+              placeholder={codex ? "1050000" : "(unknown — meter shows a gap)"}
               className={fieldClass}
             />
             {codex ? (
               <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
-                The window Codex runs this model at, in tokens — bot-hq hands it
-                over as <code>model_context_window</code> and places Codex&apos;s
-                compaction point below it so the handoff rows come first. Codex
-                keeps 5% of it back (the meter sees the rest) and caps it at the
-                model&apos;s maximum, which is smaller than the API&apos;s published
-                window: 872,000 on the ChatGPT models seen so far, against
-                defaults of 272,000 (500,000 on GPT-6.1 Sol). Leave it blank for
-                Codex&apos;s default; a value above the cap gets the session a
-                notice naming the value to use.
+                The window Codex runs this model at, in tokens — the API&apos;s
+                published window (1,050,000 on the GPT-6 and GPT-5.6 models).
+                bot-hq hands it over as <code>model_context_window</code> together
+                with a model catalog that carries it (Codex&apos;s own catalog caps
+                the window at 872,000 otherwise) and places Codex&apos;s compaction
+                point below it so the handoff rows come first. Codex keeps 5% of
+                it back; the meter sees the rest. Leave it blank for Codex&apos;s
+                default (272,000; 500,000 on GPT-6.1 Sol); a value Codex does not
+                take gets the session a notice naming the value it runs.
               </span>
             ) : (
               <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">

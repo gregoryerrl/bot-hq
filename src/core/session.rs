@@ -2255,6 +2255,13 @@ async fn participant_spawn_config(
         mcp_token: mcp_token.clone(),
         hook_trust: c.hook_trust.clone(),
         hook_exe: None,
+        // The row's window reaches Codex through its catalog (the cap on
+        // `model_context_window` is the catalog's), written fresh per spawn.
+        model_catalog: config
+            .context_window
+            .filter(|w| *w > 0)
+            .and_then(|w| u64::try_from(w).ok())
+            .and_then(|w| crate::agents::codex::home::write_model_catalog(std::path::Path::new(&c.account.dir), &config.model_name, w)),
     });
     let mcp_config_path = if codex.is_some() {
         None

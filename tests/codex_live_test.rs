@@ -115,6 +115,7 @@ async fn a_codex_participant_runs_one_gated_turn_for_real() {
             mcp_token: mcp_token.into(),
             hook_trust: vec![trust],
             hook_exe: Some(exe.clone()),
+            model_catalog: None,
         }),
     };
     let mut handle = spawn_codex_agent(cfg).await.expect("the participant starts");

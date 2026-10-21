@@ -47,12 +47,15 @@ model side by side. Migration 0102 applies on first launch.
   the home's sign-in and that the model is one the account offers.
 - **A Codex row's context window is the one Codex runs the model at.**
   Codex's own defaults are small (272,000 tokens; 500,000 on GPT-6.1 Sol)
-  and well under the API's published windows; the row's value is handed
-  over as `model_context_window`, which Codex caps at the model's maximum
-  (872,000 on the ChatGPT models seen so far). Codex keeps 5% of it back and
-  the meter sees the rest; bot-hq places Codex's compaction point below
-  that so the handoff rows come first. A row above the cap gets the session
-  one notice naming the value to use.
+  and well under the API's published windows, and its catalog caps any
+  override at 872,000 on the ChatGPT models. bot-hq hands the row's value
+  over as `model_context_window` together with a model catalog — Codex's
+  own, with the row's window on the row's model — so the published window
+  (1,050,000 on the GPT-6 and GPT-5.6 models) is what the model runs at; a
+  context of 853,000 tokens was served to GPT-6 Astra this way. Codex keeps
+  5% of it back and the meter sees the rest; bot-hq places Codex's
+  compaction point below that so the handoff rows come first. A value Codex
+  does not take gets the session one notice naming the value it runs.
 - **The Tool Gate and the reviewer's deny list hold on Codex.** Codex has
   no permission layer of its own that bot-hq can lean on, so bot-hq writes
   one hook into the Codex home and that hook is the only gate: it asks the

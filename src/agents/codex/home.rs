@@ -134,6 +134,32 @@ pub fn write_hooks_json(home: &Path, exe: &Path, data_dir: &Path) -> Result<Path
     Ok(path)
 }
 
+/// Write the model catalog a participant runs under: Codex's own
+/// server-fetched catalog (`<home>/models_cache.json`), with the row's model
+/// given the row's window as both `context_window` and `max_context_window`.
+/// Codex caps `model_context_window` at the catalog's maximum — 872,000 on
+/// the ChatGPT models, against the API's published 1,050,000 — and
+/// `model_catalog_json` replaces the catalog at startup; the backend served
+/// 853,310 tokens of context to gpt-6-astra this way (2026-10-21). Rewritten
+/// at every spawn so Codex's refreshes are kept. `None`, and no override,
+/// when the home has no catalog yet or the model is not in it.
+pub fn write_model_catalog(home: &Path, model: &str, window: u64) -> Option<PathBuf> {
+    let cache = home.join("models_cache.json");
+    let text = std::fs::read_to_string(&cache).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let mut models = parsed.get("models")?.as_array()?.clone();
+    let row = models.iter_mut().find(|m| m.get("slug").and_then(|s| s.as_str()) == Some(model))?;
+    let obj = row.as_object_mut()?;
+    obj.insert("context_window".into(), serde_json::json!(window));
+    obj.insert("max_context_window".into(), serde_json::json!(window));
+    let path = home.join(format!("bot-hq-catalog-{}.json", model.replace(['/', '\\'], "_")));
+    let body = serde_json::to_string(&serde_json::json!({ "models": models })).ok()?;
+    let tmp = home.join(format!(".{}.tmp", path.file_name()?.to_string_lossy()));
+    std::fs::write(&tmp, body).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
+    Some(path)
+}
+
 /// The key Codex files our hook's trust under.
 pub fn hook_key(home: &Path) -> String {
     format!("{}{HOOK_KEY_SUFFIX}", home.join("hooks.json").display())
@@ -264,6 +290,44 @@ impl RenderedHook {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The catalog handed to Codex is its own, with ONE change: the row's
+    /// model carries the row's window as both `context_window` and
+    /// `max_context_window` (the cap on `model_context_window`). Every other
+    /// field and every other model stay as served; no catalog in the home, or
+    /// a model not in it, means no override.
+    #[test]
+    fn the_model_catalog_is_codexs_own_with_the_rows_window_on_the_rows_model() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(write_model_catalog(home.path(), "gpt-6-astra", 1_050_000), None, "no catalog yet: no override");
+        std::fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::json!({
+                "etag": "x", "fetched_at": "2026-10-21T11:56:22Z",
+                "models": [
+                    {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "context_window": 272_000, "max_context_window": 872_000, "effective_context_window_percent": 95, "multi_agent_version": "v2"},
+                    {"slug": "gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "context_window": 500_000, "max_context_window": 872_000, "effective_context_window_percent": 95}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(write_model_catalog(home.path(), "gpt-7-nova", 1_050_000), None, "a model the account does not offer: no override");
+        let path = write_model_catalog(home.path(), "gpt-6-astra", 1_050_000).expect("the catalog is written");
+        assert_eq!(path, home.path().join("bot-hq-catalog-gpt-6-astra.json"));
+        let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let models = written["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2, "every model is kept");
+        let astra = &models[0];
+        assert_eq!(astra["context_window"], 1_050_000);
+        assert_eq!(astra["max_context_window"], 1_050_000);
+        assert_eq!(astra["effective_context_window_percent"], 95, "nothing else on the row changes");
+        assert_eq!(astra["multi_agent_version"], "v2");
+        let sol = &models[1];
+        assert_eq!(sol["context_window"], 500_000, "the other model is as served");
+        assert_eq!(sol["max_context_window"], 872_000);
+        assert!(written.get("etag").is_none(), "only the models array is handed over");
+    }
 
     /// One `PreToolUse` group with a catch-all matcher, one command handler
     /// that runs this binary's `codex-gate` with the data dir — quoted, so a

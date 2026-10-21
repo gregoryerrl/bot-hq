@@ -50,6 +50,10 @@ pub struct CodexSpawn {
     /// The binary the gate hook runs (for tests, whose `current_exe` is the
     /// test harness). Defaults to this process's own.
     pub hook_exe: Option<std::path::PathBuf>,
+    /// The model catalog written for this spawn (`home::write_model_catalog`):
+    /// Codex's own, with the row's window on the row's model. `None` when the
+    /// home has no catalog yet — Codex's default stands.
+    pub model_catalog: Option<std::path::PathBuf>,
 }
 
 /// The Codex features bot-hq turns off for every participant (plan P3 table).
@@ -136,14 +140,20 @@ pub fn config_overrides(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String> {
     if let Some(window) = cfg.config.context_window.filter(|w| *w > 0) {
         // The row's window is the one Codex runs the model at: its registry
         // defaults are small (272,000; 500,000 on gpt-6.1-sol) and the
-        // override is clamped to the model's `max_context_window` (872,000 on
-        // every model of the user's account, measured 2026-10-21). Codex keeps
-        // 5% of it back and reports the rest as the window the meter sees;
-        // the compaction point goes the claude path's reserve below that so
-        // the handoff rows come first (`pump::COMPACT_RESERVE_TOKENS`).
+        // override is clamped to the catalog's `max_context_window` (872,000
+        // on every model of the user's account) — so the catalog itself is
+        // handed over with the row's window in it (`model_catalog_json`,
+        // written by `home::write_model_catalog`; the backend served 853,310
+        // tokens of context to gpt-6-astra under it, measured 2026-10-21).
+        // Codex keeps 5% back and reports the rest as the window the meter
+        // sees; the compaction point goes the claude path's reserve below
+        // that so the handoff rows come first (`pump::COMPACT_RESERVE_TOKENS`).
         out.push(format!("model_context_window={window}"));
         let limit = usable_window(window as u64).saturating_sub(COMPACT_RESERVE_TOKENS);
         out.push(format!("model_auto_compact_token_limit={limit}"));
+        if let Some(catalog) = &codex.model_catalog {
+            out.push(format!("model_catalog_json={}", toml_str(&catalog.display().to_string())));
+        }
     }
     out
 }
@@ -1010,6 +1020,7 @@ mod tests {
             mcp_token: "secret-token".into(),
             hook_trust: vec![HookTrust { key: "/h/hooks.json:pre_tool_use:0:0".into(), hash: "sha256:abc".into() }],
             hook_exe: None,
+            model_catalog: Some(PathBuf::from("/h/bot-hq-catalog-gpt-6-astra.json")),
         };
         let cfg = SpawnConfig {
             agent_name: "eyes".into(),
@@ -1089,6 +1100,8 @@ mod tests {
             // compaction point sits the claude path's reserve below that.
             "model_context_window=872000",
             "model_auto_compact_token_limit=795400",
+            // The catalog carries the row's window past Codex's default cap.
+            "model_catalog_json=\"/h/bot-hq-catalog-gpt-6-astra.json\"",
         ] {
             assert!(overrides.contains(&o), "missing {o}: {overrides:?}");
         }
