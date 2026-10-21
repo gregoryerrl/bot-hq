@@ -2939,14 +2939,18 @@ mod tests {
         ev_tx.send(AgentEvent::Init { session_id: Some("thr".into()), api_key_source: Some("none".into()) }).await.unwrap();
         ev_tx.send(AgentEvent::Notice("eyes: the usage window is 10% used".into())).await.unwrap();
         // Processed before the deal, as in the live log (the notice row is
-        // the synchronisation point).
-        for _ in 0..200 {
+        // the synchronisation point) — asserted, so a slow run cannot process
+        // the Init after the deal and pass without exercising the bug (EYES).
+        let mut seen = false;
+        for _ in 0..400 {
             let rows = storage.messages_for_session("s1", None).await.unwrap();
             if rows.iter().any(|m| m.content.contains("usage window")) {
+                seen = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+        assert!(seen, "the pre-deal notice was processed before the ring dealt");
 
         // The ring deals turn one; the model works and completes.
         cell.store(1, std::sync::atomic::Ordering::Release);
