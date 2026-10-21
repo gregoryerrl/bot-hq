@@ -3144,6 +3144,29 @@ mod tests {
         );
     }
 
+    /// EYES 45644e90: the step that sends a Codex row to the Codex spawn.
+    /// `spawn_supervised_agent` reaches its branch for real here — a Codex
+    /// row without its Codex settings fails with the Codex driver's own
+    /// refusal, a claude row with an absent binary fails with claude's; with
+    /// the branch deleted, the Codex row would spawn claude and the first
+    /// error would read like claude's instead.
+    #[tokio::test]
+    async fn the_supervisor_sends_a_codex_row_to_the_codex_spawn() {
+        let refusal = |r: Result<AgentHandle, anyhow::Error>| match r {
+            Ok(_) => panic!("a spawn that cannot succeed succeeded"),
+            Err(e) => e.to_string(),
+        };
+        let mut codex_row = cfg();
+        codex_row.config.runtime = "codex".into();
+        codex_row.codex = None;
+        let err = refusal(spawn_supervised_agent(codex_row, RetryPolicy::default()).await);
+        assert!(err.contains("Codex settings"), "the Codex driver refused it: {err}");
+        let mut claude_row = cfg();
+        claude_row.claude_bin = Some("/nonexistent/claude-for-this-test".into());
+        let err = refusal(spawn_supervised_agent(claude_row, RetryPolicy::default()).await);
+        assert!(err.to_lowercase().contains("claude"), "the claude spawn refused it: {err}");
+    }
+
     #[test]
     fn command_has_required_flags() {
         let argv = debug_command(&cfg());

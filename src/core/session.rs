@@ -1530,7 +1530,8 @@ async fn display_name_for(storage: &Storage, p: &crate::storage::Participant) ->
 /// becomes its command line.
 ///
 /// It stops one line short of launching, and that is the point. The launch is
-/// `spawn_supervised_agent`, which no test can follow, so anything assembled on
+/// `spawn_supervised_agent`, which a test can follow only as far as its first
+/// refusal (its runtime branch is pinned that way), so anything assembled on
 /// the far side of it is unpinnable by construction. Everything on THIS side —
 /// the participant's role overrides, its capability snapshot, its resume id, the
 /// MCP servers its capabilities allow minus the ones its role disabled — is a
