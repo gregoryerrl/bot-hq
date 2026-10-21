@@ -546,6 +546,15 @@ impl Default for InterruptDeadlines {
     }
 }
 
+/// Whether a program under the app-server is one of Codex's own helpers
+/// (`codex-code-mode-host`, any `codex-*` binary) rather than a command.
+fn is_codex_helper(program: &str) -> bool {
+    std::path::Path::new(program)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "codex" || n.starts_with("codex-"))
+}
+
 /// The app-server's own process tree at the driver's start — see
 /// `Driver::server_baseline`. `None` when it could not be listed (and
 /// always where there is no tree walk).
@@ -883,9 +892,18 @@ impl Driver {
             let Some(baseline) = self.server_baseline.as_deref() else {
                 return Err("the app-server's own processes were never listed (ps failed at its start)".to_string());
             };
+            // What is NOT a command: the app-server's own tree, and the helpers
+            // Codex starts lazily under it — `codex-code-mode-host` appeared
+            // only at the first `exec` call and was killed by this cleanup on
+            // 2026-10-21T13:12Z ("1 process was stopped" with no command in
+            // flight). Anything whose program is a `codex-*` binary is Codex's.
             let list = || -> Result<Vec<u32>, String> {
-                let live = crate::process::descendants_checked(pid).ok_or_else(|| "ps could not list the app-server's processes".to_string())?;
-                Ok(live.into_iter().filter(|p| !baseline.contains(p)).collect())
+                let live = crate::process::descendants_named(pid).ok_or_else(|| "ps could not list the app-server's processes".to_string())?;
+                Ok(live
+                    .into_iter()
+                    .filter(|(p, program)| !baseline.contains(p) && !is_codex_helper(program))
+                    .map(|(p, _)| p)
+                    .collect())
             };
             let newer = loop {
                 let newer = list()?;
@@ -1735,6 +1753,64 @@ mod tests {
         assert!(saw, "the reaped notice names the unknown baseline");
         let mut server = server;
         assert!(wait_dead(command) && server.exited(), "the whole server tree is gone");
+        drop(server);
+    }
+
+    /// A helper Codex starts lazily under the app-server — `codex-code-mode-host`
+    /// at the first `exec` call, after the baseline — is Codex's, not a
+    /// command: the cleanup leaves it alone and stops the command beside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_codex_helper_started_after_the_baseline_survives_the_cleanup() {
+        // The stand-in helper: `sleep` under Codex's helper name (a symlink —
+        // a COPY of a macOS system binary loses its signature and dies at exec).
+        let bin = tempfile::tempdir().unwrap();
+        let sleep = String::from_utf8_lossy(&crate::process::command("sh").args(["-c", "command -v sleep"]).output().unwrap().stdout).trim().to_string();
+        let helper = bin.path().join("codex-code-mode-host");
+        std::os::unix::fs::symlink(&sleep, &helper).unwrap();
+        // The server starts the helper AND the command on SIGUSR1.
+        let script = format!("sleep 300 & trap '{} 400 & sleep 400 &' USR1; while :; do wait; done", helper.display());
+        let shell = crate::process::command("sh").args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let server_pid = shell.id();
+        let own = wait_for_descendants(server_pid, 1);
+        let server = ServerGuard(shell);
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("build it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        unsafe {
+            libc::kill(server_pid as i32, libc::SIGUSR1);
+        }
+        let (mut helper_pid, mut command_pid) = (None, None);
+        for _ in 0..100 {
+            for (p, program) in crate::process::descendants_named(server_pid).unwrap_or_default() {
+                if own.contains(&p) {
+                    continue;
+                }
+                if program.ends_with("codex-code-mode-host") {
+                    helper_pid = Some(p);
+                } else if program.ends_with("sleep") {
+                    command_pid = Some(p);
+                }
+            }
+            if helper_pid.is_some() && command_pid.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let (helper_pid, command_pid) = (helper_pid.expect("the helper started"), command_pid.expect("the command started"));
+        h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        h.fake.turn_interrupted("t1").await;
+        let notice = next_event(&mut h).await;
+        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "only the command: {notice:?}");
+        assert!(!alive(command_pid), "the command is gone");
+        assert!(alive(helper_pid), "Codex's helper is left alone");
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
         drop(server);
     }
 
