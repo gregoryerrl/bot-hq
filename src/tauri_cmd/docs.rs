@@ -403,21 +403,33 @@ pub async fn summarize_session_doc(
     // `default_model_id` app setting first — a key nothing has WRITTEN since
     // rc3 D8 retired the Agents tab (a role owns its default model), so that
     // branch was dead; dropped rather than kept as a promise.
-    let slot0 = storage
-        .participants_for_session(&session_id)
-        .await
-        .ok()
-        .and_then(|roster| roster.into_iter().next());
-    let model_id = slot0
-        .as_ref()
-        .and_then(|p| p.model_id.clone())
-        .filter(|m| !m.is_empty());
+    // The summarizer is claude-code's (⛔ not the Codex connector's), so the
+    // participant it bills is the first one that runs through claude-code —
+    // a Codex participant's home is not a Claude account, and its GPT model
+    // id is not one `claude -p` can run. A roster with no claude-code
+    // participant summarises on the app default, in the default dir.
     // The summarizer is a one-off subprocess, not a session participant; the
     // name is only the label `resolve_spawn_config` puts on the config it
-    // returns and the `agent_configs` key it may fall back to.
-    let mut cfg =
-        crate::core::session::resolve_spawn_config(&storage, "doc-summarizer", model_id.as_deref())
-            .await;
+    // returns and the `agent_configs` key it may fall back to. The model row
+    // (not the participant's spawn record, which a never-spawned row leaves
+    // at its default) says which connector a participant runs through.
+    let roster = storage.participants_for_session(&session_id).await.unwrap_or_default();
+    let mut slot0 = None;
+    let mut cfg = None;
+    for p in &roster {
+        let model_id = p.model_id.clone().filter(|m| !m.is_empty());
+        let candidate =
+            crate::core::session::resolve_spawn_config(&storage, "doc-summarizer", model_id.as_deref()).await;
+        if candidate.runtime() == crate::agents::runtime::Runtime::ClaudeCode {
+            slot0 = Some(p.clone());
+            cfg = Some(candidate);
+            break;
+        }
+    }
+    let mut cfg = match cfg {
+        Some(c) => c,
+        None => crate::core::session::resolve_spawn_config(&storage, "doc-summarizer", None).await,
+    };
     // It bills the SESSION's account (0090): the config dir slot 0 was spawned
     // into, when recorded, else the model row's. Without this a session on a
     // second account would have its summaries billed to the default one.
@@ -523,6 +535,17 @@ pub async fn validate_model(
     // `model_id` is always supplied, so the name is only the config's label.
     let cfg =
         crate::core::session::resolve_spawn_config(&storage, "model-probe", Some(&model_id)).await;
+    // The Codex connector's check: the home's sign-in and the model's
+    // availability, from one short app-server (no model call).
+    if cfg.runtime() == crate::agents::runtime::Runtime::Codex {
+        let home = crate::storage::normalize_config_dir(cfg.claude_config_dir.as_deref());
+        let Some(home) = home else {
+            return Ok(ValidateResult { ok: false, message: "This Codex row names no Codex home — give it one (never ~/.codex) and save first.".into() });
+        };
+        let req = crate::agents::codex::probe::CodexProbeRequest { bin: None, home: home.clone(), cwd: None };
+        let probe = crate::agents::codex::probe::probe_home(&req).await;
+        return Ok(codex_probe_verdict(&probe, &home, &cfg.model_name));
+    }
     Ok(
         match tokio::time::timeout(Duration::from_secs(30), probe_model(cfg)).await {
             Ok(result) => result,
@@ -532,6 +555,61 @@ pub async fn validate_model(
             },
         },
     )
+}
+
+/// Test connection for a Codex row: signed in as a ChatGPT account, and the
+/// model id is one the account can run. Names the email and plan on a pass,
+/// the sign-in command when the home is logged out, the available ids when
+/// the model is not among them.
+pub(crate) fn codex_probe_verdict(
+    probe: &crate::agents::codex::probe::CodexProbe,
+    home: &str,
+    model_name: &str,
+) -> ValidateResult {
+    use crate::agents::account_setup::{codex_login_command, Shell};
+    use crate::agents::spawn::AuthProbe;
+    match &probe.auth {
+        AuthProbe::Unreadable(why) => ValidateResult { ok: false, message: format!("Couldn't ask Codex: {why}") },
+        AuthProbe::LoggedOut => ValidateResult {
+            ok: false,
+            message: format!(
+                "{home} is not signed in to a ChatGPT account. Run this in {}, then test again: {}",
+                Shell::host().terminal(),
+                codex_login_command(Shell::host(), home)
+            ),
+        },
+        AuthProbe::LoggedIn { auth_method, email, subscription_type, .. } => {
+            let who = email.as_deref().unwrap_or("an account");
+            if auth_method.as_deref() != Some(crate::agents::codex::probe::SUBSCRIPTION_ACCOUNT_TYPE) {
+                return ValidateResult {
+                    ok: false,
+                    message: format!(
+                        "{home} is signed in with `{}`, which bills API usage, not the ChatGPT subscription. Sign the ChatGPT account in: {}",
+                        auth_method.as_deref().unwrap_or("?"),
+                        codex_login_command(Shell::host(), home)
+                    ),
+                };
+            }
+            if !probe.models.is_empty() && !probe.models.iter().any(|m| m == model_name) {
+                return ValidateResult {
+                    ok: false,
+                    message: format!(
+                        "Signed in as {who}, but `{model_name}` is not a model this account offers. Available: {}.",
+                        probe.models.join(", ")
+                    ),
+                };
+            }
+            ValidateResult {
+                ok: true,
+                message: format!(
+                    "Connected — signed in as {who}{} (Codex {}){}.",
+                    subscription_type.as_deref().map(|p| format!(", plan {p}")).unwrap_or_default(),
+                    if probe.version.is_empty() { "?" } else { probe.version.as_str() },
+                    if probe.models.is_empty() { "; the model list could not be read" } else { "" }
+                ),
+            }
+        }
+    }
 }
 
 /// One-shot model ping. Non-empty output on a clean exit ⇒ reachable; a non-zero
@@ -588,6 +666,35 @@ async fn probe_model(cfg: AgentConfig) -> ValidateResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test connection on a Codex row reads the probe, not `claude -p`: a
+    /// ChatGPT sign-in with the model listed passes and names the account; a
+    /// logged-out home says the sign-in command; an API-key sign-in and an
+    /// unlisted model fail with the thing to fix.
+    #[test]
+    fn a_codex_rows_test_connection_reads_the_probe() {
+        use crate::agents::codex::probe::CodexProbe;
+        use crate::agents::spawn::AuthProbe;
+        let chatgpt = |models: Vec<&str>| CodexProbe {
+            auth: AuthProbe::LoggedIn { auth_method: Some("chatgpt".into()), email: Some("me@example.com".into()), org_id: Some("acct".into()), subscription_type: Some("pro".into()) },
+            hooks: Vec::new(),
+            version: "0.163.0".into(),
+            models: models.into_iter().map(str::to_string).collect(),
+        };
+        let ok = codex_probe_verdict(&chatgpt(vec!["gpt-6.1-sol", "gpt-6-astra"]), "/h", "gpt-6-astra");
+        assert!(ok.ok, "{}", ok.message);
+        assert!(ok.message.contains("me@example.com") && ok.message.contains("pro") && ok.message.contains("0.163.0"), "{}", ok.message);
+        let missing = codex_probe_verdict(&chatgpt(vec!["gpt-6.1-sol"]), "/h", "gpt-6-astra");
+        assert!(!missing.ok && missing.message.contains("gpt-6.1-sol"), "{}", missing.message);
+        let unlisted = codex_probe_verdict(&chatgpt(vec![]), "/h", "gpt-6-astra");
+        assert!(unlisted.ok && unlisted.message.contains("could not be read"), "{}", unlisted.message);
+        let out = codex_probe_verdict(&CodexProbe { auth: AuthProbe::LoggedOut, hooks: Vec::new(), version: String::new(), models: Vec::new() }, "/h", "gpt-6-astra");
+        assert!(!out.ok && out.message.contains("codex login") && out.message.contains("/h"), "{}", out.message);
+        let api = codex_probe_verdict(&CodexProbe { auth: AuthProbe::LoggedIn { auth_method: Some("apiKey".into()), email: None, org_id: None, subscription_type: None }, hooks: Vec::new(), version: String::new(), models: Vec::new() }, "/h", "x");
+        assert!(!api.ok && api.message.contains("API usage"), "{}", api.message);
+        let dead = codex_probe_verdict(&CodexProbe { auth: AuthProbe::Unreadable("no codex".into()), hooks: Vec::new(), version: String::new(), models: Vec::new() }, "/h", "x");
+        assert!(!dead.ok && dead.message.contains("no codex"), "{}", dead.message);
+    }
 
     #[tokio::test]
     async fn session_doc_search_empty_when_storage_absent() {

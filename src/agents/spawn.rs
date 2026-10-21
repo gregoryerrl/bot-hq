@@ -450,6 +450,10 @@ pub struct SpawnConfig {
     /// gateway participant or when the status could not be read.
     pub account_email: Option<String>,
     pub account_org: Option<String>,
+    /// The Codex connector's own settings (`agents::codex::spawn::CodexSpawn`)
+    /// when this participant's model row runs through Codex; `None` for
+    /// claude-code. `spawn_supervised_agent` picks the spawn function by it.
+    pub codex: Option<crate::agents::codex::spawn::CodexSpawn>,
 }
 
 /// Inherited environment that would pick the child's credential or billing
@@ -858,8 +862,9 @@ impl AgentHandle {
     /// [`ParticipantInput::deliver`] compares a receipt against. It is a
     /// parameter rather than something read off the channels because the
     /// channels carry no identity — the caller is the last place that knows.
-    /// Test-only since round 7 (2026-08-17): no production caller — kept as a test seam, not shipped.
-    #[cfg(test)]
+    /// Its production caller since 2026-10-21 is the Codex connector
+    /// (`agents::codex::spawn::spawn_codex_agent`): exactly the alternative
+    /// implementation this constructor was kept for.
     pub fn from_parts(
         name: String,
         session_id: impl Into<Arc<str>>,
@@ -1099,18 +1104,36 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     // what every caller holds — each respawned incarnation is bridged onto it —
     // so this is the input whose session id has to be right.
     let session_id: Arc<str> = Arc::from(cfg.session_id.as_str());
-    let first = spawn_agent(cfg.clone()).await?;
-
-    tokio::spawn(supervise(
-        cfg,
-        policy,
-        first,
-        out_event_tx,
-        out_input_rx,
-        out_control_rx,
-        kill_rx,
-        spawn_agent,
-    ));
+    // The connector, by the model row's runtime (0102): the Codex driver
+    // fills the same handle, so the supervisor and the pump never know which.
+    match cfg.config.runtime() {
+        crate::agents::runtime::Runtime::Codex => {
+            let first = crate::agents::codex::spawn::spawn_codex_agent(cfg.clone()).await?;
+            tokio::spawn(supervise(
+                cfg,
+                policy,
+                first,
+                out_event_tx,
+                out_input_rx,
+                out_control_rx,
+                kill_rx,
+                crate::agents::codex::spawn::spawn_codex_agent,
+            ));
+        }
+        crate::agents::runtime::Runtime::ClaudeCode => {
+            let first = spawn_agent(cfg.clone()).await?;
+            tokio::spawn(supervise(
+                cfg,
+                policy,
+                first,
+                out_event_tx,
+                out_input_rx,
+                out_control_rx,
+                kill_rx,
+                spawn_agent,
+            ));
+        }
+    }
 
     Ok(AgentHandle {
         name,
@@ -1315,6 +1338,7 @@ async fn supervise<S, Fut>(
 /// connector: one set of constants renders claude-code's `--disallowedTools`
 /// here AND decides the Codex hook's refusals, so the two enforcers cannot
 /// drift. The `eyes_denies_*` tests below iterate those same constants.
+#[cfg(test)]
 pub(crate) use crate::policy::read_only_rules::{
     GH_ISSUE_WRITE_VERBS, GH_PR_WRITE_VERBS, GH_RELEASE_WRITE_VERBS, GH_REPO_WRITE_VERBS,
     GIT_BRANCH_WRITE_VERBS,
@@ -2113,6 +2137,7 @@ mod tests {
             account_dir: None,
             account_email: None,
             account_org: None,
+            codex: None,
         }
     }
 

@@ -187,6 +187,9 @@ pub struct Participant {
     /// when the status could not be read.
     pub account_email_at_spawn: Option<String>,
     pub account_org_at_spawn: Option<String>,
+    /// The connector's own version at the participant's first spawn (0102):
+    /// `""` until something ran; Codex's from `initialize.userAgent`.
+    pub runtime_version_at_spawn: String,
 }
 
 /// One participant a session is created with: **a role and a model**.
@@ -226,7 +229,8 @@ const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, 
      runtime, capabilities, participation_mode, turn_position, done_vote, enabled, \
      effort, ultracode, claude_session_id, color, label, \
      effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded, \
-     account_dir_at_spawn, account_email_at_spawn, account_org_at_spawn";
+     account_dir_at_spawn, account_email_at_spawn, account_org_at_spawn, \
+     runtime_version_at_spawn";
 
 fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     use sqlx::Row;
@@ -276,6 +280,7 @@ fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
         account_dir_at_spawn: r.get("account_dir_at_spawn"),
         account_email_at_spawn: r.get("account_email_at_spawn"),
         account_org_at_spawn: r.get("account_org_at_spawn"),
+        runtime_version_at_spawn: r.get("runtime_version_at_spawn"),
     }
 }
 
@@ -1636,6 +1641,28 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording the account at spawn for participant {participant_id}"))?;
+        Ok(())
+    }
+
+    /// Record the connector a participant was spawned through and that
+    /// connector's version (0102) — written at the FIRST spawn, like the
+    /// account dir, and pinned: the stored `claude_session_id` belongs to this
+    /// runtime and is never handed to the other one.
+    pub async fn set_runtime_at_spawn(
+        &self,
+        participant_id: i64,
+        runtime: crate::agents::runtime::Runtime,
+        version: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE session_participants SET runtime = ?, runtime_version_at_spawn = ? WHERE id = ?",
+        )
+        .bind(runtime.as_str())
+        .bind(version)
+        .bind(participant_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("recording the runtime at spawn for participant {participant_id}"))?;
         Ok(())
     }
 
@@ -5354,6 +5381,7 @@ mod tests {
             account_dir_at_spawn: None,
             account_email_at_spawn: None,
             account_org_at_spawn: None,
+            runtime_version_at_spawn: String::new(),
             id,
             session_id: "s1".into(),
             slug: slug.into(),
@@ -7728,4 +7756,20 @@ mod tests {
             ]
         );
     }
+    /// 0102: the connector and its version are recorded on the row; the
+    /// column read defaults mean a fresh row reads as claude-code with no
+    /// version, so a resume can tell which connector its session id belongs to.
+    #[tokio::test]
+    async fn the_runtime_at_spawn_is_recorded_on_the_participant() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        s.ensure_session_roster("s1", MAX_SESSION_PARTICIPANTS).await.unwrap();
+        let p = s.participants_for_session("s1").await.unwrap().remove(0);
+        assert_eq!(p.runtime, "claude_code");
+        assert_eq!(p.runtime_version_at_spawn, "");
+        s.set_runtime_at_spawn(p.id, crate::agents::runtime::Runtime::Codex, "0.163.0").await.unwrap();
+        let p = s.participants_for_session("s1").await.unwrap().remove(0);
+        assert_eq!((p.runtime.as_str(), p.runtime_version_at_spawn.as_str()), ("codex", "0.163.0"));
+    }
+
 }

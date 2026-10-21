@@ -736,6 +736,7 @@ async fn spawn_session_handle(
     // mark is per account AND model (0091).
     let mut model_names: Vec<String> = Vec::with_capacity(live.len());
     let auth_probe = live_auth_probe();
+    let codex_probe = live_codex_probe();
     for (slot, p) in live.iter().enumerate() {
         // D8's model chain: the participant's own pick (create dialog) wins,
         // then the ROLE's default, then the per-agent row. The middle step is
@@ -784,6 +785,7 @@ async fn spawn_session_handle(
             working_repo_path.clone(),
             &bridge,
             &*auth_probe,
+            &*codex_probe,
         )
         .await?;
         accounts.push((
@@ -794,6 +796,7 @@ async fn spawn_session_handle(
                 org: spawn_cfg.account_org.clone(),
                 subscription: bills_a_subscription(&spawn_cfg.config),
                 console_login: None,
+                runtime: spawn_cfg.config.runtime(),
             },
         ));
         model_names.push(spawn_cfg.config.model_name.clone());
@@ -1588,6 +1591,9 @@ pub(crate) struct ParticipantAccount {
     /// subscription login (a Console key), posted by the caller; `None`
     /// otherwise.
     pub console_login: Option<String>,
+    /// The connector the account belongs to (0102): a Codex home is a ChatGPT
+    /// account, not a Claude one — the straddle notice counts per connector.
+    pub runtime: crate::agents::runtime::Runtime,
 }
 
 impl ParticipantAccount {
@@ -1728,6 +1734,189 @@ where
         org,
         subscription,
         console_login,
+        runtime: crate::agents::runtime::Runtime::ClaudeCode,
+    })
+}
+
+/// The Codex probe, injected like the claude one so the decision can be
+/// tested without a `codex` binary; production passes [`live_codex_probe`].
+pub(crate) type CodexProbeFn = dyn Fn(crate::agents::codex::probe::CodexProbeRequest) -> futures::future::BoxFuture<'static, crate::agents::codex::probe::CodexProbe>
+    + Send
+    + Sync;
+
+/// The production probe: one short-lived `codex app-server` in the home.
+pub(crate) fn live_codex_probe() -> Box<CodexProbeFn> {
+    Box::new(|req| Box::pin(async move { crate::agents::codex::probe::probe_home(&req).await }))
+}
+
+/// A probe that cannot tell, for tests that spawn without a CLI.
+#[cfg(test)]
+pub(crate) fn no_codex_probe() -> Box<CodexProbeFn> {
+    Box::new(|_| Box::pin(async { crate::agents::codex::probe::CodexProbe { auth: crate::agents::spawn::AuthProbe::Unreadable("no CLI in tests".into()), hooks: Vec::new(), version: String::new(), models: Vec::new() } }))
+}
+
+/// What the Codex branch of `participant_spawn_config` decided: the account,
+/// the trust grant for bot-hq's hook, and whether the stored session id may
+/// be resumed on this connector.
+pub(crate) struct CodexAccount {
+    pub account: ParticipantAccount,
+    pub hook_trust: Vec<crate::agents::codex::home::HookTrust>,
+    pub resume: Option<String>,
+    /// A notice the caller posts (a dropped resume), or `None`.
+    pub notice: Option<String>,
+}
+
+/// The one place a Codex participant's account is decided (0102) — the
+/// connector's `resolve_participant_account`, run INSTEAD of it (never after:
+/// a Codex home probed by `claude auth status` reads as logged out, and a
+/// blank one would snapshot the default Claude account — plan-eyes P1).
+///
+/// The HOME is pinned at the first spawn like the Claude dir (the thread
+/// lives in it). It is never blank: Codex's default `~/.codex` is the user's
+/// own (bot-hq writes its gate hook into the home it is given), so a row
+/// without a home is refused. The runtime is pinned too (P6): a stored
+/// session id from the other connector is dropped with a notice, never
+/// handed to this one.
+///
+/// The IDENTITY is what the probe's `account/read` reported: a `chatgpt`
+/// account is the subscription sign-in (email + `chatgptAccountId` as the
+/// organisation); an `apiKey` sign-in bills the API and is refused at a
+/// first spawn, said once otherwise; a logged-out home is refused at a first
+/// spawn with the sign-in command; an unreadable probe never refuses.
+///
+/// The hooks file is written BEFORE the probe so `hooks/list` can report the
+/// hash Codex gives it; a listed entry that equals what bot-hq rendered gets
+/// its hash cached and granted to the spawn (`hooks.state`).
+pub(crate) async fn resolve_codex_account(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+    cfg: &AgentConfig,
+    data_dir: &std::path::Path,
+    cwd: Option<&std::path::Path>,
+    probe: &CodexProbeFn,
+) -> Result<CodexAccount> {
+    use crate::agents::account_setup::{codex_login_command, Shell};
+    use crate::agents::codex::home::{write_hooks_json, RenderedHook};
+    use crate::agents::runtime::Runtime;
+    use crate::agents::spawn::AuthProbe;
+    let first_spawn = p.account_dir_at_spawn.as_deref().is_none_or(str::is_empty);
+    let home = match p.account_dir_at_spawn.as_deref().filter(|d| !d.is_empty()) {
+        Some(recorded) => recorded.to_string(),
+        None => crate::storage::normalize_config_dir(cfg.claude_config_dir.as_deref()).unwrap_or_default(),
+    };
+    if home.is_empty() {
+        anyhow::bail!(
+            "{} can't start: its model row ({}) runs through Codex but names no Codex home. Give the row \
+             a home of its own in Settings → Models (never ~/.codex — bot-hq writes its gate hook there).",
+            p.slug,
+            cfg.model_name
+        );
+    }
+    // The runtime pin (P6): a session id recorded under the other connector is
+    // not this one's thread.
+    let recorded_runtime = Runtime::from_column(&p.runtime);
+    let (resume, notice) = match (&p.claude_session_id, recorded_runtime) {
+        (Some(id), Runtime::Codex) => (Some(id.clone()), None),
+        (Some(_), other) => (
+            None,
+            Some(format!(
+                "ℹ [bot-hq] {} starts a fresh Codex thread: its stored session belongs to {other}, which \
+                 cannot be resumed on Codex.",
+                p.slug
+            )),
+        ),
+        (None, _) => (None, None),
+    };
+    let exe = std::env::current_exe().context("locating the bot-hq binary for the gate hook")?;
+    write_hooks_json(std::path::Path::new(&home), &exe, data_dir)
+        .with_context(|| format!("{} can't start: the Codex home's gate hook could not be written", p.slug))?;
+    let rendered = RenderedHook::new(std::path::Path::new(&home), &exe, data_dir);
+    let probed = probe(crate::agents::codex::probe::CodexProbeRequest {
+        bin: None,
+        home: home.clone(),
+        cwd: cwd.map(|c| c.display().to_string()),
+    })
+    .await;
+    let mut email = None;
+    let mut org = None;
+    let mut console_login = None;
+    let login = codex_login_command(Shell::host(), &home);
+    match &probed.auth {
+        AuthProbe::LoggedIn { auth_method: Some(method), email: e, org_id, .. }
+            if method != crate::agents::codex::probe::SUBSCRIPTION_ACCOUNT_TYPE =>
+        {
+            if first_spawn {
+                anyhow::bail!(
+                    "{} can't start: {home} is signed in with `{method}`, which bills API usage, not the \
+                     ChatGPT subscription. Sign the ChatGPT account in and start again: {login}",
+                    p.slug
+                );
+            }
+            warn!(participant = %p.slug, %home, %method, "the Codex home's sign-in is not the subscription");
+            console_login = Some(format!(
+                "⚠ [bot-hq] {} runs in {home}, signed in with `{method}` — that bills API usage, not the \
+                 ChatGPT subscription.",
+                p.slug
+            ));
+            email = e.clone();
+            org = org_id.clone();
+        }
+        AuthProbe::LoggedIn { email: e, org_id, .. } => {
+            email = e.clone();
+            org = org_id.clone();
+        }
+        AuthProbe::LoggedOut if first_spawn => {
+            anyhow::bail!(
+                "{} can't start: {home} is not signed in to a ChatGPT account. Run this in {}, then start \
+                 the session again: {login}",
+                p.slug,
+                Shell::host().terminal()
+            );
+        }
+        AuthProbe::LoggedOut => {
+            warn!(participant = %p.slug, %home, "the Codex home is not signed in; Codex will report its own error");
+        }
+        AuthProbe::Unreadable(why) => {
+            warn!(participant = %p.slug, %why, "could not probe the Codex home; spawning anyway");
+        }
+    }
+    // Trust: the listed entry that IS bot-hq's hook, exactly, else the cache.
+    let key = crate::agents::codex::home::hook_key(std::path::Path::new(&home));
+    let mut hook_trust = Vec::new();
+    if let Some(trust) = probed.hooks.iter().find_map(|h| rendered.trust_for(h)) {
+        if let Err(e) = storage.set_codex_hook_trust(&home, &key, &trust.hash, &probed.version).await {
+            warn!(participant = %p.slug, ?e, "caching the Codex hook trust failed");
+        }
+        hook_trust.push(trust);
+    } else if let Ok(Some(cached)) = storage.codex_hook_trust(&home, &key).await {
+        hook_trust.push(crate::agents::codex::home::HookTrust { key: key.clone(), hash: cached.trusted_hash });
+    }
+    // Record, as the Claude path does: the home at the first spawn, the
+    // identity whenever the row has none yet, the runtime pin with the
+    // connector's version.
+    if first_spawn || (p.account_email_at_spawn.is_none() && email.is_some()) {
+        if let Err(e) = storage.set_account_at_spawn(p.id, &home, email.as_deref(), org.as_deref()).await {
+            warn!(participant = %p.slug, ?e, "recording the Codex account at spawn failed");
+        }
+    }
+    if first_spawn || recorded_runtime != Runtime::Codex {
+        if let Err(e) = storage.set_runtime_at_spawn(p.id, Runtime::Codex, &probed.version).await {
+            warn!(participant = %p.slug, ?e, "recording the runtime at spawn failed");
+        }
+    }
+    info!(
+        participant = %p.slug,
+        %home,
+        email = email.as_deref().unwrap_or("unknown"),
+        first_spawn,
+        version = %probed.version,
+        "codex participant account"
+    );
+    Ok(CodexAccount {
+        account: ParticipantAccount { dir: home, email, org, subscription: true, console_login, runtime: Runtime::Codex },
+        hook_trust,
+        resume,
+        notice,
     })
 }
 
@@ -1805,8 +1994,10 @@ pub(crate) async fn account_limited_notice(
 /// spawn into different config dirs, or `None` when they share one (gateway
 /// participants are not accounts and are not counted — G1/P4).
 pub(crate) fn account_straddle_notice(accounts: &[(String, ParticipantAccount)]) -> Option<String> {
-    let subs: Vec<&(String, ParticipantAccount)> =
-        accounts.iter().filter(|(_, a)| a.subscription).collect();
+    let subs: Vec<&(String, ParticipantAccount)> = accounts
+        .iter()
+        .filter(|(_, a)| a.subscription && a.runtime == crate::agents::runtime::Runtime::ClaudeCode)
+        .collect();
     let mut dirs: Vec<&str> = subs.iter().map(|(_, a)| a.dir.as_str()).collect();
     dirs.sort_unstable();
     dirs.dedup();
@@ -1848,6 +2039,7 @@ async fn participant_spawn_config(
     // the rendered config build a throwaway bridge, which costs them one line.
     bridge: &Arc<SignalingBridge>,
     auth_probe: &AuthProbeFn,
+    codex_probe: &CodexProbeFn,
 ) -> Result<SpawnConfig> {
     let agent_name = p.slug.as_str();
     // The participant's OWN session, not one passed alongside it. A mismatch
@@ -1860,22 +2052,61 @@ async fn participant_spawn_config(
     // `resolve_participant_account`. A refusal (a logged-out custom dir on a
     // first spawn) is posted to the channel so the user reads the login
     // command where the session stopped, then fails the spawn.
-    let account = match resolve_participant_account(storage, p, &config, auth_probe).await
-    {
-        Ok(account) => account,
+    // The connector decides which account resolution runs (0102, P1): a
+    // Codex row never reaches `claude auth status`.
+    let runtime = config.runtime();
+    let resolved = match runtime {
+        crate::agents::runtime::Runtime::Codex => {
+            resolve_codex_account(storage, p, &config, &paths.data_dir, working_dir.as_deref(), codex_probe)
+                .await
+                .map(Some)
+        }
+        crate::agents::runtime::Runtime::ClaudeCode => Ok(None),
+    };
+    let codex_account = match resolved {
+        Ok(c) => c,
         Err(e) => {
             crate::core::post_system_notice(
                 storage,
                 Some(bridge),
                 session_id,
                 crate::storage::MessageKind::SystemNotice,
-                format!("⚠ [bot-hq] {e}"),
+                format!("⚠ [bot-hq] {e:#}"),
                 None,
             )
             .await;
             return Err(e);
         }
     };
+    let account = match &codex_account {
+        Some(c) => c.account.clone(),
+        None => match resolve_participant_account(storage, p, &config, auth_probe).await {
+            Ok(account) => account,
+            Err(e) => {
+                crate::core::post_system_notice(
+                    storage,
+                    Some(bridge),
+                    session_id,
+                    crate::storage::MessageKind::SystemNotice,
+                    format!("⚠ [bot-hq] {e}"),
+                    None,
+                )
+                .await;
+                return Err(e);
+            }
+        },
+    };
+    if let Some(text) = codex_account.as_ref().and_then(|c| c.notice.clone()) {
+        crate::core::post_system_notice(
+            storage,
+            Some(bridge),
+            session_id,
+            crate::storage::MessageKind::SystemNotice,
+            text,
+            None,
+        )
+        .await;
+    }
     if let Some(text) = &account.console_login {
         crate::core::post_system_notice(
             storage,
@@ -1937,6 +2168,15 @@ async fn participant_spawn_config(
     {
         warn!(participant = %p.slug, ?e, "recording the spawn knobs failed");
     }
+    // A Codex participant's prompt carries the connector's notes: the tool
+    // names the rules use are claude-code's, and Codex's base instructions
+    // ask for a commit trailer the hook refuses (`agents::codex::runtime_notes`).
+    let system_prompt = match runtime {
+        crate::agents::runtime::Runtime::Codex => {
+            format!("{system_prompt}\n\n{}", crate::agents::codex::runtime_notes(&config.model_name))
+        }
+        crate::agents::runtime::Runtime::ClaudeCode => system_prompt,
+    };
     // Persist the COMPOSED prompt on the row (1.0.0 Batch 7 P3, dissect #27):
     // the schema promised "stored so what the agent actually ran with is
     // inspectable" since 0044 and nothing ever wrote it — 0 of 158 rows on
@@ -1966,15 +2206,31 @@ async fn participant_spawn_config(
     // respawn writes a new config anyway.
     let mcp_token = uuid::Uuid::new_v4().to_string();
     bridge.register_mcp_token(session_id, agent_name, &mcp_token);
-    let json = mcp_config_json(
-        signaling_addr,
-        session_id,
-        agent_name,
-        Some(&mcp_token),
-        &user_servers,
-    );
-    std::fs::write(&mcp_config_path, json)
-        .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
+    // A Codex participant gets no claude mcp-config file: its MCP wiring is
+    // `-c` overrides naming bot-hq's server alone (the user's own MCP servers
+    // are the claude connector's; ⛔ Codex's are not forwarded either), with
+    // the secret in a header from the env — never on argv.
+    let codex = codex_account.as_ref().map(|c| crate::agents::codex::spawn::CodexSpawn {
+        bin: None,
+        mcp_url: format!("http://{signaling_addr}/sessions/{session_id}/{agent_name}/mcp"),
+        mcp_token: mcp_token.clone(),
+        hook_trust: c.hook_trust.clone(),
+        hook_exe: None,
+    });
+    let mcp_config_path = if codex.is_some() {
+        None
+    } else {
+        let json = mcp_config_json(
+            signaling_addr,
+            session_id,
+            agent_name,
+            Some(&mcp_token),
+            &user_servers,
+        );
+        std::fs::write(&mcp_config_path, json)
+            .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
+        Some(mcp_config_path)
+    };
     // The claude CLI tells an agent to end commits with a co-author trailer.
     // When this session's policy forbids a word that trailer holds,
     // the `commit-msg` hook would refuse the very commit the CLI asked for, so
@@ -2001,11 +2257,16 @@ async fn participant_spawn_config(
         agent_name: agent_name.to_string(),
         config,
         system_prompt_path,
-        mcp_config_path: Some(mcp_config_path),
+        mcp_config_path,
         working_dir,
         claude_bin: None,
         session_id: session_id.to_string(),
-        resume_session_id: p.claude_session_id.clone(),
+        // The stored session id is this connector's (the Codex branch drops
+        // one recorded under the other connector; a claude row's is its own).
+        resume_session_id: match &codex_account {
+            Some(c) => c.resume.clone(),
+            None => p.claude_session_id.clone(),
+        },
         project: project.clone(),
         data_dir: paths.data_dir.clone(),
         capabilities,
@@ -2014,6 +2275,7 @@ async fn participant_spawn_config(
         account_dir: account.account_dir(),
         account_email: account.email.clone(),
         account_org: account.org.clone(),
+        codex,
     })
 }
 
@@ -3422,6 +3684,7 @@ mod tests {
             account_dir_at_spawn: None,
             account_email_at_spawn: None,
             account_org_at_spawn: None,
+            runtime_version_at_spawn: String::new(),
             id,
             session_id: "s1".into(),
             slug: slug.into(),
@@ -4029,6 +4292,7 @@ mod tests {
                     None,
                     &SignalingBridge::new(),
                     &*no_auth_probe(),
+                    &*no_codex_probe(),
                 )
                 .await
                 .expect("spawn config")
@@ -4109,6 +4373,7 @@ mod tests {
             None,
             &SignalingBridge::new(),
             &*no_auth_probe(),
+            &*no_codex_probe(),
         )
         .await
         .expect("spawn config");
@@ -4158,6 +4423,7 @@ mod tests {
             None,
             &bridge,
             &*no_auth_probe(),
+            &*no_codex_probe(),
         )
         .await
         .expect("spawn config");
@@ -4223,6 +4489,7 @@ mod tests {
                 None,
                 &bridge,
                 &*no_auth_probe(),
+                &*no_codex_probe(),
             )
             .await
             .expect("spawn config");
@@ -4278,6 +4545,7 @@ mod tests {
                     None,
                     &bridge,
                     &*no_auth_probe(),
+                    &*no_codex_probe(),
                 )
                 .await
                 .expect("spawn config");
@@ -4351,6 +4619,7 @@ mod tests {
             None,
             &SignalingBridge::new(),
             &*no_auth_probe(),
+            &*no_codex_probe(),
         )
         .await
         .expect("spawn config");
@@ -4400,6 +4669,7 @@ mod tests {
             None,
             &SignalingBridge::new(),
             &*no_auth_probe(),
+            &*no_codex_probe(),
         )
         .await
         .expect("spawn config");
@@ -4598,15 +4868,236 @@ mod tests {
             None,
             &SignalingBridge::new(),
             &probe,
+            &*no_codex_probe(),
         )
         .await
         .unwrap();
         assert_eq!(spawn_cfg.account_dir.as_deref(), Some("/tmp/bot-hq-acct-b"));
+        assert!(spawn_cfg.codex.is_none());
+        assert!(!std::fs::read_to_string(&spawn_cfg.system_prompt_path).unwrap().contains("Runtime notes (Codex)"));
         let env = crate::agents::spawn::debug_env(&spawn_cfg);
         assert!(
             env.contains(&("CLAUDE_CONFIG_DIR".into(), "/tmp/bot-hq-acct-b".into())),
             "the recorded dir reaches the child env: {env:?}"
         );
+    }
+
+    // ---- 0102: the Codex connector's account ---------------------------
+
+    fn astra_row(id: &str, home: &str) -> crate::storage::Model {
+        crate::storage::Model {
+            id: id.into(),
+            display_name: "Astra".into(),
+            provider: "openai".into(),
+            model_name: "gpt-6-astra".into(),
+            base_url: None,
+            auth_token: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            context_window: Some(475_000),
+            cli_settings: None,
+            claude_config_dir: Some(home.into()),
+            runtime: "codex".into(),
+        }
+    }
+
+    /// A claude probe that must never be asked — the Codex branch sits BEFORE
+    /// the claude account resolution (plan-eyes P1).
+    fn never_claude_probe() -> Box<AuthProbeFn> {
+        Box::new(|dir| Box::pin(async move { panic!("the claude auth probe must not run for a Codex row (asked about {dir:?})") }))
+    }
+
+    /// A Codex probe answering the same thing every time, remembering what it
+    /// was asked. `armed` lists bot-hq's own hook for `home` as Codex would
+    /// after `write_hooks_json`, untrusted with the given hash.
+    fn fixed_codex_probe(
+        auth: crate::agents::spawn::AuthProbe,
+        armed_in: Option<(&str, &std::path::Path, &str)>,
+    ) -> (Box<CodexProbeFn>, Arc<std::sync::Mutex<Vec<crate::agents::codex::probe::CodexProbeRequest>>>) {
+        let asked: Arc<std::sync::Mutex<Vec<crate::agents::codex::probe::CodexProbeRequest>>> = Arc::default();
+        let seen = Arc::clone(&asked);
+        let hooks = armed_in.map(|(home, data_dir, hash)| {
+            let rendered = crate::agents::codex::home::RenderedHook::new(
+                std::path::Path::new(home),
+                &std::env::current_exe().unwrap(),
+                data_dir,
+            );
+            vec![crate::agents::codex::home::ListedHook {
+                key: rendered.key,
+                event_name: "preToolUse".into(),
+                matcher: Some(".*".into()),
+                command: rendered.command,
+                source_path: rendered.source_path,
+                current_hash: hash.into(),
+                trust_status: "untrusted".into(),
+                enabled: true,
+            }]
+        });
+        let probe: Box<CodexProbeFn> = Box::new(move |req| {
+            seen.lock().unwrap().push(req);
+            let auth = auth.clone();
+            let hooks = hooks.clone().unwrap_or_default();
+            Box::pin(async move { crate::agents::codex::probe::CodexProbe { auth, hooks, version: "0.163.0".into(), models: vec!["gpt-6-astra".into()] } })
+        });
+        (probe, asked)
+    }
+
+    fn chatgpt_account(email: &str, account_id: &str) -> crate::agents::spawn::AuthProbe {
+        crate::agents::spawn::AuthProbe::LoggedIn {
+            auth_method: Some("chatgpt".into()),
+            email: Some(email.into()),
+            org_id: Some(account_id.into()),
+            subscription_type: Some("pro".into()),
+        }
+    }
+
+    /// THE WIRE (plan-eyes P1): a Codex row resolves its account through the
+    /// Codex probe and never reaches `claude auth status`; the snapshot it
+    /// records is the ChatGPT account; the runtime is pinned on the row; the
+    /// trust hash the probe reported for bot-hq's own hook is cached and
+    /// granted to the spawn; the spawn config carries the Codex settings and
+    /// no claude mcp-config file. Delete the branch and this panics.
+    #[tokio::test]
+    async fn a_codex_row_never_reaches_the_claude_auth_probe() {
+        let s = Storage::memory().await.unwrap();
+        let home_dir = TempDir::new().unwrap();
+        let home = home_dir.path().join("codex-home");
+        let home_str = home.to_str().unwrap().to_string();
+        s.upsert_model(&astra_row("m-astra", &home_str)).await.unwrap();
+        let p = seed_hands_on(&s, "m-astra").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        assert_eq!(cfg.runtime(), crate::agents::runtime::Runtime::Codex);
+        let data_dir = TempDir::new().unwrap();
+        let (codex_probe, asked) = fixed_codex_probe(chatgpt_account("me@example.com", "acct-1"), Some((&home_str, data_dir.path(), "sha256:first")));
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let spawn_cfg = participant_spawn_config(
+            &s,
+            &p,
+            cfg,
+            &paths,
+            &None,
+            "prompt".into(),
+            "127.0.0.1:4242".parse().unwrap(),
+            mcp_temp.path(),
+            Some(std::path::PathBuf::from("/tmp/repo")),
+            &SignalingBridge::new(),
+            &*never_claude_probe(),
+            &*codex_probe,
+        )
+        .await
+        .unwrap();
+        let codex = spawn_cfg.codex.as_ref().expect("a Codex spawn carries its settings");
+        assert_eq!(codex.mcp_url, "http://127.0.0.1:4242/sessions/s1/hands/mcp");
+        assert!(!codex.mcp_token.is_empty());
+        assert_eq!(codex.hook_trust.len(), 1);
+        assert_eq!(codex.hook_trust[0].hash, "sha256:first");
+        assert_eq!(spawn_cfg.account_dir.as_deref(), Some(home_str.as_str()));
+        assert_eq!(spawn_cfg.account_email.as_deref(), Some("me@example.com"));
+        assert_eq!(spawn_cfg.account_org.as_deref(), Some("acct-1"));
+        assert!(spawn_cfg.mcp_config_path.is_none(), "no claude mcp-config for a Codex participant");
+        assert_eq!(spawn_cfg.resume_session_id, None);
+        assert!(home.join("hooks.json").is_file(), "the gate hook was written before the probe");
+        let prompt = std::fs::read_to_string(&spawn_cfg.system_prompt_path).unwrap();
+        assert!(prompt.starts_with("prompt"), "the composed prompt comes first");
+        assert!(prompt.contains("# Runtime notes (Codex)") && prompt.contains("gpt-6-astra") && prompt.contains("co-author trailer"), "the connector's notes are appended: {prompt}");
+        let probed = asked.lock().unwrap();
+        assert_eq!(probed.len(), 1);
+        assert_eq!(probed[0].home, home_str);
+        assert_eq!(probed[0].cwd.as_deref(), Some("/tmp/repo"));
+        drop(probed);
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some(home_str.as_str()));
+        assert_eq!(p.account_email_at_spawn.as_deref(), Some("me@example.com"));
+        assert_eq!(p.account_org_at_spawn.as_deref(), Some("acct-1"));
+        assert_eq!((p.runtime.as_str(), p.runtime_version_at_spawn.as_str()), ("codex", "0.163.0"));
+        let cached = s.codex_hook_trust(&home_str, &crate::agents::codex::home::hook_key(&home)).await.unwrap().expect("the hash is cached");
+        assert_eq!(cached.trusted_hash, "sha256:first");
+    }
+
+    /// A Codex row with no home, a logged-out home at the first spawn, and
+    /// an API-key sign-in are refused — each with the thing to do.
+    #[tokio::test]
+    async fn a_codex_spawn_is_refused_without_a_home_a_login_or_a_subscription() {
+        let s = Storage::memory().await.unwrap();
+        let home_dir = TempDir::new().unwrap();
+        let home_str = home_dir.path().join("h").to_str().unwrap().to_string();
+        let data_dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(s.clone()).await;
+
+        let mut no_home = astra_row("m-astra", &home_str);
+        no_home.claude_config_dir = None;
+        s.upsert_model(&no_home).await.unwrap();
+        let p = seed_hands_on(&s, "m-astra").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (codex_probe, _) = fixed_codex_probe(chatgpt_account("me@example.com", "acct-1"), None);
+        let err = participant_spawn_config(&s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp_temp.path(), None, &bridge, &*never_claude_probe(), &*codex_probe)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Codex home"), "{err}");
+
+        s.upsert_model(&astra_row("m-astra", &home_str)).await.unwrap();
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (logged_out, _) = fixed_codex_probe(crate::agents::spawn::AuthProbe::LoggedOut, None);
+        let err = participant_spawn_config(&s, &p, cfg.clone(), &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp_temp.path(), None, &bridge, &*never_claude_probe(), &*logged_out)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("codex login") && err.contains(&home_str), "{err}");
+
+        let (api_key, _) = fixed_codex_probe(
+            crate::agents::spawn::AuthProbe::LoggedIn { auth_method: Some("apiKey".into()), email: None, org_id: None, subscription_type: None },
+            None,
+        );
+        let err = participant_spawn_config(&s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp_temp.path(), None, &bridge, &*never_claude_probe(), &*api_key)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("API") && err.contains("codex login"), "{err}");
+        assert_eq!(reread(&s).await.account_dir_at_spawn, None, "a refused first spawn records nothing");
+    }
+
+    /// P6: a participant whose row changed connector does not hand its stored
+    /// session id to the other one — the resume is dropped, with a notice, and
+    /// the new connector starts fresh.
+    #[tokio::test]
+    async fn a_session_id_from_the_other_connector_is_never_resumed() {
+        let s = Storage::memory().await.unwrap();
+        let home_dir = TempDir::new().unwrap();
+        let home_str = home_dir.path().join("h").to_str().unwrap().to_string();
+        s.upsert_model(&astra_row("m-astra", &home_str)).await.unwrap();
+        let p = seed_hands_on(&s, "m-astra").await;
+        // The row was claude-code when this participant first spawned.
+        s.set_participant_claude_id(p.id, "claude-uuid-1").await.unwrap();
+        s.set_runtime_at_spawn(p.id, crate::agents::runtime::Runtime::ClaudeCode, "").await.unwrap();
+        let p = reread(&s).await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let data_dir = TempDir::new().unwrap();
+        let (codex_probe, _) = fixed_codex_probe(chatgpt_account("me@example.com", "acct-1"), Some((&home_str, data_dir.path(), "sha256:x")));
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(s.clone()).await;
+        let spawn_cfg = participant_spawn_config(&s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp_temp.path(), None, &bridge, &*never_claude_probe(), &*codex_probe)
+            .await
+            .unwrap();
+        assert_eq!(spawn_cfg.resume_session_id, None, "a claude session id is not a Codex thread id");
+        let rows = s.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("fresh") && m.content.contains("claude_code")), "a notice says why: {rows:?}");
+    }
+
+    /// The straddle notice is about CLAUDE accounts: a Codex participant beside
+    /// a Claude one is not a straddle.
+    #[test]
+    fn a_codex_account_is_not_a_claude_straddle() {
+        let claude = |dir: &str| ParticipantAccount { dir: dir.into(), email: Some("a@example.com".into()), org: None, subscription: true, console_login: None, runtime: crate::agents::runtime::Runtime::ClaudeCode };
+        let codex = ParticipantAccount { dir: "/h".into(), email: Some("b@example.com".into()), org: None, subscription: true, console_login: None, runtime: crate::agents::runtime::Runtime::Codex };
+        assert_eq!(account_straddle_notice(&[("hands".into(), claude("")), ("eyes".into(), codex.clone())]), None);
+        assert!(account_straddle_notice(&[("hands".into(), claude("")), ("eyes".into(), claude("/Users/me/.claude-acct-2")), ("third".into(), codex)]).is_some());
     }
 
     /// G1: a gateway participant (its own token + base URL) is not an account
@@ -4820,6 +5311,7 @@ mod tests {
             org: Some("org-1".into()),
             subscription: true,
             console_login: None,
+            runtime: crate::agents::runtime::Runtime::ClaudeCode,
         };
         let fable = "claude-fable-5-1";
         assert_eq!(account_limited_notice(&s, &p, &acct, fable).await, None, "no mark yet");
@@ -4858,6 +5350,7 @@ mod tests {
             org: None,
             subscription: true,
             console_login: None,
+            runtime: crate::agents::runtime::Runtime::ClaudeCode,
         };
         let gateway = |dir: &str| ParticipantAccount {
             dir: dir.into(),
@@ -4865,6 +5358,7 @@ mod tests {
             org: None,
             subscription: false,
             console_login: None,
+            runtime: crate::agents::runtime::Runtime::ClaudeCode,
         };
         assert_eq!(
             account_straddle_notice(&[

@@ -52,5 +52,5 @@ pub use bridge::{
 pub(crate) const RESERVED_MCP_KEYS: &[&str] = &["bot-hq", "claude-in-chrome"];
 pub use server::{
     default_user_settings_paths, load_user_mcp_servers, mcp_config_json, start_signaling_server,
-    SignalingServer, HOOK_TOKEN_HEADER,
+    SignalingServer, HOOK_TOKEN_HEADER, MCP_TOKEN_HEADER,
 };

@@ -21,7 +21,30 @@ model side by side. Migration 0102 applies on first launch.
   `codex login` command for it, and the Claude CLI settings field is
   hidden. The list marks Codex rows. The New Session dialog's account
   quick-select stays a Claude-account swap and leaves Codex rows where you
-  put them. Spawning through Codex lands in the next entries.
+  put them.
+- **A participant on a Codex row runs through the Codex CLI.** One
+  `codex app-server` process per participant, driven over its JSON-RPC
+  protocol, so a session can pair a Claude model with a GPT model (Fable and
+  Astra, say) and both take turns in the same ring, read the same documents
+  and call the same bot-hq tools. The account it bills is the ChatGPT
+  sign-in of its Codex home (recorded at its first spawn, like a Claude
+  participant's config dir); its context meter reads the window Codex
+  reports; a usage limit, a lost sign-in or a full context is said in the
+  channel the way a Claude participant's is. **Test** on a Codex row checks
+  the home's sign-in and that the model is one the account offers.
+- **The Tool Gate and the reviewer's deny list hold on Codex.** Codex has
+  no permission layer of its own that bot-hq can lean on, so bot-hq writes
+  one hook into the Codex home and that hook is the only gate: it asks the
+  running app which role is calling, applies the Tool Gate's keywords (and
+  parks the command for you) for an executor, and the read-only deny list —
+  no commits, pushes, branch or tree mutations, no `gh` writes, no file
+  edits — for a reviewer, through every shell form (`cd x && git push`,
+  `sh -c '…'`, `xargs`, git's global options). It refuses, loudly, whenever
+  it cannot decide (the app not running, an unknown caller) and before
+  every turn bot-hq checks Codex still lists and trusts it. Terminal
+  sessions (which could carry commands past the hook), Codex's own
+  sub-agents, app connectors, plugins, goals, image generation, worktrees,
+  browsers and memories are switched off for participants.
 
 ## [1.0.10] — 2026-10-19
 
