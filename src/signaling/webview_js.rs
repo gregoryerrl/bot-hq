@@ -138,7 +138,6 @@ mod tests {
         assert!(js.contains("el.click()"));
     }
 
-    #[test]
     /// A `<select>` is driven by option value or label through its own
     /// prototype setter + a change event; a checkbox by `click()`; a text
     /// field as before.
