@@ -107,8 +107,11 @@ if [[ -n "$busy" ]]; then
 fi
 log "running ./start --release (stop → frontend → release build → launch)"
 # `start` stays as the app's parent and forwards a termination; this process
-# is that parent now, detached, like a terminal that nobody closes.
-if ./start --release; then
+# is that parent now, detached, like a terminal that nobody closes. Its
+# stdout is dropped: `start` tees the app's output into bot-hq.log already,
+# and the first run duplicated the whole app log here. stderr — a failed
+# build's errors — stays.
+if ./start --release 2>&1 >/dev/null; then
   log "the app exited"
   exit 0
 fi
