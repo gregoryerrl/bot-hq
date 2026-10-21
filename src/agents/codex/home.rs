@@ -336,13 +336,12 @@ mod tests {
     #[test]
     fn the_trust_override_is_one_whole_table() {
         let home = Path::new("/Users/me/.codex-bot-hq");
+        // The file path is joined by the platform (a backslash on Windows).
+        let file = home.join("hooks.json").display().to_string();
         let key = hook_key(home);
-        assert_eq!(key, "/Users/me/.codex-bot-hq/hooks.json:pre_tool_use:0:0");
+        assert_eq!(key, format!("{file}:pre_tool_use:0:0"));
         let flag = hooks_state_override(&[HookTrust { key: key.clone(), hash: "sha256:abc".into() }]);
-        assert_eq!(
-            flag,
-            r#"hooks.state={"/Users/me/.codex-bot-hq/hooks.json:pre_tool_use:0:0"={enabled=true,trusted_hash="sha256:abc"}}"#
-        );
+        assert_eq!(flag, format!(r#"hooks.state={{"{file}:pre_tool_use:0:0"={{enabled=true,trusted_hash="sha256:abc"}}}}"#));
         assert_eq!(hooks_state_override(&[]), "hooks.state={}");
     }
 
@@ -353,6 +352,7 @@ mod tests {
     #[test]
     fn a_listed_entry_earns_trust_only_when_it_matches_what_was_rendered() {
         let home = Path::new("/Users/me/.codex-bot-hq");
+        let file = home.join("hooks.json").display().to_string();
         let rendered = RenderedHook::new(home, Path::new("/opt/bot-hq"), Path::new("/data"));
         let listed = |event: &str, matcher: &str, command: &str, path: &str| ListedHook {
             key: hook_key(home),
@@ -364,7 +364,7 @@ mod tests {
             trust_status: "untrusted".into(),
             enabled: true,
         };
-        let ok = listed("preToolUse", ".*", &rendered.command, "/Users/me/.codex-bot-hq/hooks.json");
+        let ok = listed("preToolUse", ".*", &rendered.command, &file);
         assert_eq!(rendered.trust_for(&ok).map(|t| t.hash), Some("sha256:abc".to_string()));
         let mut other = ok.clone();
         other.command = "/usr/local/bin/my-linter".into();
@@ -379,7 +379,7 @@ mod tests {
         other.source_path = "/Users/me/.codex/hooks.json".into();
         assert!(rendered.trust_for(&other).is_none(), "another file");
         let mut other = ok.clone();
-        other.key = "/Users/me/.codex-bot-hq/hooks.json:pre_tool_use:1:0".into();
+        other.key = format!("{file}:pre_tool_use:1:0");
         assert!(rendered.trust_for(&other).is_none(), "another position");
     }
 
@@ -397,7 +397,7 @@ mod tests {
             event_name: "preToolUse".into(),
             matcher: Some(".*".into()),
             command: rendered.command.clone(),
-            source_path: "/Users/me/.codex-bot-hq/hooks.json".into(),
+            source_path: home.join("hooks.json").display().to_string(),
             current_hash: "sha256:abc".into(),
             trust_status: "trusted".into(),
             enabled: true,
