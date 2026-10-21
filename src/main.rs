@@ -212,13 +212,20 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                 }
             }
             let violations = ViolationsLog::new(&paths.data_dir);
-            // Wipe any stale per-session policy snapshots — a leftover file would
-            // leak a prior session's resolved policy into a fresh session that
-            // should re-seed from the current blueprints.
-            if let Err(e) =
-                bot_hq::policy::session_policy::purge_all_session_policies(&paths.data_dir)
-            {
-                tracing::warn!(?e, "purge_all_session_policies failed at startup");
+            // Wipe the per-session policy snapshots of sessions that are no
+            // longer open. The OPEN sessions keep theirs: that file is the
+            // session's sole policy, gear-tab edits included, and wiping it
+            // reset the user's toggles on every relaunch.
+            match storage.list_active_sessions().await {
+                Ok(open) => {
+                    let keep = open.into_iter().map(|s| s.id).collect();
+                    match bot_hq::policy::session_policy::purge_session_policies_except(&paths.data_dir, &keep) {
+                        Ok(n) if n > 0 => tracing::info!(purged = n, "startup GC: closed sessions' policy snapshots"),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(?e, "purging closed sessions' policy snapshots failed at startup"),
+                    }
+                }
+                Err(e) => tracing::warn!(?e, "could not list the open sessions; policy snapshots left as they are"),
             }
             let bridge = SignalingBridge::with_policy(violations, paths.data_dir.clone());
             bridge.set_storage(storage.clone()).await;

@@ -1364,8 +1364,10 @@ inherited general → project → session.
 - The git hooks (`pre-push`, `commit-msg`, …) read this snapshot via
   `Policy::resolve_at_root` (threaded `BOT_HQ_SESSION_ID`), so a hook
   subprocess sees the same session-scoped policy the agent runs under.
-- Purged on bot-hq startup (`main.rs`) and on `close_session`
-  (`core/state.rs` → `bridge::cleanup_session_policy`).
+- Purged on `close_session` (`core/state.rs` → `bridge::cleanup_session_policy`);
+  at bot-hq startup (`main.rs`) only the files of sessions that are no longer
+  open go — an open session keeps its snapshot across a relaunch, gear-tab
+  edits included.
 
 The per-session **Tool Gate** keyword list is part of the same snapshot
 (see "Tool Gate" above): `hooks.rs::run_tool_gate` reads the frozen

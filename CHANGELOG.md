@@ -11,6 +11,13 @@ A second connector is on its way in: OpenAI's Codex CLI beside claude-code,
 chosen per saved model, so one session can run a Claude model and a GPT
 model side by side. Migration 0102 applies on first launch.
 
+### Fixed
+
+- **Session Settings survive a relaunch.** The per-session policy snapshot
+  (the gear tab's Tool-Gate keywords and push toggles) was wiped for every
+  session at startup, so each relaunch reset what you had allowed in an
+  open session. Only closed sessions' snapshots are cleared now.
+
 ### Added
 
 - **A saved model names the CLI it runs through.** The Model dialog has a

@@ -91,13 +91,27 @@ pub fn delete_session_policy(data_dir: &Path, session_id: &str) -> Result<()> {
     }
 }
 
-/// Wipe every session policy snapshot. Called at bot-hq startup — a leftover
-/// file would leak one session's resolved policy into a fresh session that
-/// should re-seed from the current blueprints.
-pub fn purge_all_session_policies(data_dir: &Path) -> Result<()> {
+/// Wipe the session policy snapshots of every session that is NOT in `keep`.
+/// Called at bot-hq startup with the open sessions: a closed session's
+/// leftover goes (its id never comes back), while an open session's file —
+/// the sole policy of that session, gear-tab edits included — survives the
+/// relaunch. Until 2026-10-21 this wiped EVERY file, so each relaunch reset
+/// the user's Tool-Gate and push toggles on every open session (the user:
+/// "session settings doesn't survive relaunches"). Returns how many went.
+pub fn purge_session_policies_except(data_dir: &Path, keep: &std::collections::HashSet<String>) -> Result<usize> {
     let dir = session_policies_dir(data_dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Ok(0) };
+    let mut purged = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if path.extension().and_then(|e| e.to_str()) != Some("yaml") || keep.contains(stem) {
+            continue;
+        }
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        purged += 1;
+    }
+    Ok(purged)
 }
 
 #[cfg(test)]
@@ -173,16 +187,22 @@ mod tests {
         assert!(read_session_policy(dir.path(), "   ").unwrap().is_none());
     }
 
+    /// A relaunch keeps the open sessions' snapshots (the gear-tab edits are
+    /// in them) and clears the rest.
     #[test]
-    fn purge_clears_everything() {
+    fn the_startup_purge_keeps_the_open_sessions_files() {
         let dir = tempdir().unwrap();
-        for sid in ["a", "b", "c"] {
+        for sid in ["open-1", "open-2", "closed"] {
             write_session_policy(dir.path(), sid, &sample()).unwrap();
         }
-        purge_all_session_policies(dir.path()).unwrap();
-        for sid in ["a", "b", "c"] {
-            assert!(read_session_policy(dir.path(), sid).unwrap().is_none());
-        }
+        let keep = ["open-1", "open-2"].into_iter().map(String::from).collect();
+        assert_eq!(purge_session_policies_except(dir.path(), &keep).unwrap(), 1);
+        assert!(read_session_policy(dir.path(), "open-1").unwrap().is_some());
+        assert!(read_session_policy(dir.path(), "open-2").unwrap().is_some());
+        assert!(read_session_policy(dir.path(), "closed").unwrap().is_none());
+        // No directory at all: nothing to do, no error.
+        let empty = tempdir().unwrap();
+        assert_eq!(purge_session_policies_except(empty.path(), &keep).unwrap(), 0);
     }
 
     #[test]
