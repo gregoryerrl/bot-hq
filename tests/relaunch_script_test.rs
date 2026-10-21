@@ -34,22 +34,35 @@ impl Bench {
 
     /// Run the detached branch with no delay; the (exit status, everything it printed).
     fn run(&self, from: &str, extra_path: Option<&Path>) -> (bool, String) {
+        let child = self.spawn(from, extra_path, "0");
+        finish(child)
+    }
+
+    /// Start the detached branch with a delay and leave it running, so the
+    /// state can change underneath it.
+    fn spawn(&self, from: &str, extra_path: Option<&Path>, delay: &str) -> std::process::Child {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut path = std::env::var("PATH").unwrap_or_default();
         if let Some(p) = extra_path {
             path = format!("{}:{path}", p.display());
         }
-        let out = Command::new("bash")
+        Command::new("bash")
             .arg(repo.join("scripts/relaunch.sh"))
-            .args(["--detached", "--from", from, "--delay", "0"])
+            .args(["--detached", "--from", from, "--delay", delay])
             .env("BOT_HQ_DATA_DIR", self.dir.path())
             .env("BOT_HQ_RELAUNCH_START", self.dir.path().join("start"))
             .env("PATH", path)
-            .output()
-            .expect("bash runs the script");
-        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        (out.status.success(), text)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("bash runs the script")
     }
+}
+
+fn finish(child: std::process::Child) -> (bool, String) {
+    let out = child.wait_with_output().expect("the script ends");
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.success(), text)
 }
 
 fn chmod_x(p: &Path) {
@@ -137,4 +150,37 @@ async fn a_caller_whose_halt_was_released_is_not_stranded() {
     let (ok, text) = b.run("me", None);
     assert!(!ok && text.contains("me holds no temporary halt"), "{text}");
     assert!(!b.launched());
+}
+
+/// The checks are made at the MOMENT of the stop, not only before the delay
+/// (EYES 34e0617b): the state passes preflight, then changes while the script
+/// sleeps — the caller's halt is released, or another session takes a turn —
+/// and the stop is still refused.
+#[tokio::test]
+async fn state_that_changes_during_the_delay_is_seen_at_the_stop() {
+    if !tools_present() {
+        return;
+    }
+    // The caller's halt released during the delay.
+    let b = Bench::new().await;
+    b.storage.create_session("me", "t", None).await.unwrap();
+    b.storage.declare_temporary_session_halt("me", "hands", "relaunching", "2026-10-21T09:00:00Z").await.unwrap();
+    let child = b.spawn("me", None, "2");
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    b.storage.clear_session_halt("me").await.unwrap();
+    let (ok, text) = finish(child);
+    assert!(!ok && text.contains("me holds no temporary halt"), "{text}");
+    assert!(!b.launched(), "released during the delay: {text}");
+
+    // Another session dealt a turn during the delay.
+    let b = Bench::new().await;
+    b.storage.create_session("me", "t", None).await.unwrap();
+    b.storage.create_session("other", "t", None).await.unwrap();
+    b.storage.declare_temporary_session_halt("me", "hands", "relaunching", "2026-10-21T09:00:00Z").await.unwrap();
+    let child = b.spawn("me", None, "2");
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    b.storage.set_current_turn("other", Some(5)).await;
+    let (ok, text) = finish(child);
+    assert!(!ok && text.contains("another session holds a turn — other"), "{text}");
+    assert!(!b.launched(), "a turn dealt during the delay: {text}");
 }
