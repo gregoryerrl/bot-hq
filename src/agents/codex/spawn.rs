@@ -149,8 +149,16 @@ pub fn config_overrides(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String> {
         // sees; the compaction point goes the claude path's reserve below
         // that so the handoff rows come first (`pump::COMPACT_RESERVE_TOKENS`).
         out.push(format!("model_context_window={window}"));
-        let limit = usable_window(window as u64).saturating_sub(COMPACT_RESERVE_TOKENS);
-        out.push(format!("model_auto_compact_token_limit={limit}"));
+        // A RESUMED thread keeps the window it was created with (measured
+        // 2026-10-21: a thread from the 872,000 days reported 828,400 after
+        // its row moved to 1,050,000), so a compaction point placed from the
+        // row would sit above the window it runs and never fire. Codex's own
+        // point, derived from the thread's window, is right for it; the
+        // row's placement is for the thread this spawn creates.
+        if cfg.resume_session_id.is_none() {
+            let limit = usable_window(window as u64).saturating_sub(COMPACT_RESERVE_TOKENS);
+            out.push(format!("model_auto_compact_token_limit={limit}"));
+        }
         if let Some(catalog) = &codex.model_catalog {
             out.push(format!("model_catalog_json={}", toml_str(&catalog.display().to_string())));
         }
@@ -1125,6 +1133,15 @@ mod tests {
         }
         assert!(!argv.iter().any(|a| a.contains("secret-token")), "the secret never rides argv: {argv:?}");
         assert!(!argv.iter().any(|a| a == "--ephemeral"), "resume needs the thread on disk");
+        // A resume keeps the window and the catalog (a failed resume starts a
+        // fresh thread under them) but leaves the compaction point to Codex:
+        // the resumed thread keeps the window it was created with.
+        let mut resuming = cfg.clone();
+        resuming.resume_session_id = Some("01a15d68-385e-71b0-a853-d45801d319e7".into());
+        let resumed: Vec<String> = config_overrides(&resuming, &codex);
+        assert!(resumed.iter().any(|o| o == "model_context_window=872000"));
+        assert!(resumed.iter().any(|o| o.starts_with("model_catalog_json=")));
+        assert!(!resumed.iter().any(|o| o.starts_with("model_auto_compact_token_limit=")), "{resumed:?}");
 
         let cmd = build_codex_command(&cfg, &codex);
         let env = envs(&cmd);

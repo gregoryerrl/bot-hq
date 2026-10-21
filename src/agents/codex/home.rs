@@ -152,7 +152,10 @@ pub fn write_model_catalog(home: &Path, model: &str, window: u64) -> Option<Path
     let obj = row.as_object_mut()?;
     obj.insert("context_window".into(), serde_json::json!(window));
     obj.insert("max_context_window".into(), serde_json::json!(window));
-    let path = home.join(format!("bot-hq-catalog-{}.json", model.replace(['/', '\\'], "_")));
+    // Named by model AND window: two participants on the same model with
+    // different rows write different files, and the same row writes the same
+    // bytes (EYES, 2026-10-21).
+    let path = home.join(format!("bot-hq-catalog-{}-{window}.json", model.replace(['/', '\\'], "_")));
     let body = serde_json::to_string(&serde_json::json!({ "models": models })).ok()?;
     let tmp = home.join(format!(".{}.tmp", path.file_name()?.to_string_lossy()));
     std::fs::write(&tmp, body).ok()?;
@@ -314,7 +317,12 @@ mod tests {
         .unwrap();
         assert_eq!(write_model_catalog(home.path(), "gpt-7-nova", 1_050_000), None, "a model the account does not offer: no override");
         let path = write_model_catalog(home.path(), "gpt-6-astra", 1_050_000).expect("the catalog is written");
-        assert_eq!(path, home.path().join("bot-hq-catalog-gpt-6-astra.json"));
+        assert_eq!(path, home.path().join("bot-hq-catalog-gpt-6-astra-1050000.json"));
+        // Another row on the same model, another window: its own file, and
+        // the first one is untouched.
+        let other = write_model_catalog(home.path(), "gpt-6-astra", 872_000).unwrap();
+        assert_eq!(other, home.path().join("bot-hq-catalog-gpt-6-astra-872000.json"));
+        assert!(path.exists());
         let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let models = written["models"].as_array().unwrap();
         assert_eq!(models.len(), 2, "every model is kept");

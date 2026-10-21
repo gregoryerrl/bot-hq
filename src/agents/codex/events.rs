@@ -66,7 +66,7 @@ impl Translator {
         self.clamp_said = true;
         let maximum = reported * 100 / super::spawn::USABLE_WINDOW_PERCENT;
         Some(format!(
-            "{}: Codex runs this model at a {}-token window, less than the {} the model row asks for — Codex caps              the window at the model's maximum. Set the row's context window to {} so the compaction point lands              where the meter expects; until then the participant may fill its window before Codex compacts.",
+            "{}: Codex runs this model at a {}-token window, less than the {} the model row asks for. A thread resumed from before the row changed keeps the window it was created with (a new session gets the row's); otherwise Codex capped it at the model's maximum — set the row to {} in that case. Codex places its own compaction point for a resumed thread, so it compacts in time either way.",
             self.model,
             crate::core::pump::group_thousands(reported),
             crate::core::pump::group_thousands(configured),
