@@ -16,7 +16,10 @@ pub(super) fn click_js(selector: &str) -> String {
 
 /// Set `text` on the first element matching `selector`, routing through the
 /// native value setter so React's onChange fires (plain `el.value = …`
-/// bypasses React).
+/// bypasses React). A `<select>` takes an option's VALUE, or its visible
+/// label when no value matches (the New Session dialog's role and model
+/// pickers carry ids a caller rarely knows); a checkbox takes `true`/`false`
+/// through `click()`, so its onChange fires as a user's would.
 pub(super) fn type_js(selector: &str, text: &str) -> String {
     let sel = serde_json::to_string(selector).unwrap();
     let txt = serde_json::to_string(text).unwrap();
@@ -25,6 +28,21 @@ pub(super) fn type_js(selector: &str, text: &str) -> String {
            const el = document.querySelector({sel}); \
            if (!el) {{ console.warn('webview_type: no element matches', {sel}); return; }} \
            el.focus(); \
+           if (el instanceof HTMLSelectElement) {{ \
+             const want = {txt}; \
+             const opts = Array.from(el.options); \
+             const hit = opts.find(o => o.value === want) || opts.find(o => o.textContent.trim() === want) || opts.find(o => o.textContent.includes(want)); \
+             if (!hit) {{ console.warn('webview_type: no option matches', want, opts.map(o => o.value + ' | ' + o.textContent.trim())); return; }} \
+             const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value'); \
+             if (desc && desc.set) {{ desc.set.call(el, hit.value); }} else {{ el.value = hit.value; }} \
+             el.dispatchEvent(new Event('change', {{ bubbles: true }})); \
+             return; \
+           }} \
+           if (el instanceof HTMLInputElement && el.type === 'checkbox') {{ \
+             const want = {txt} === 'true' || {txt} === 'on' || {txt} === '1'; \
+             if (el.checked !== want) {{ el.click(); }} \
+             return; \
+           }} \
            const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; \
            const desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
            if (desc && desc.set) {{ desc.set.call(el, {txt}); }} else {{ el.value = {txt}; }} \
@@ -111,6 +129,20 @@ mod tests {
         let js = click_js("[data-id=\"x\"]");
         assert!(js.contains("document.querySelector(\"[data-id=\\\"x\\\"]\")"));
         assert!(js.contains("el.click()"));
+    }
+
+    #[test]
+    /// A `<select>` is driven by option value or label through its own
+    /// prototype setter + a change event; a checkbox by `click()`; a text
+    /// field as before.
+    #[test]
+    fn type_js_drives_selects_and_checkboxes_too() {
+        let js = type_js("select[aria-label=\"Participant 1 role\"]", "HANDS");
+        assert!(js.contains("el instanceof HTMLSelectElement"));
+        assert!(js.contains("o.value === want") && js.contains("o.textContent.trim() === want"));
+        assert!(js.contains("HTMLSelectElement.prototype, 'value'"));
+        assert!(js.contains("el.type === 'checkbox'") && js.contains("el.click()"));
+        assert!(js.contains("HTMLTextAreaElement.prototype"), "the text path stays");
     }
 
     #[test]

@@ -1071,7 +1071,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "webview_type",
-            description: "Set the value of an input/textarea matched by the CSS selector + dispatch input/change events the React-friendly way (via the prototype value setter so React state actually updates). Element is also focused.",
+            description: "Set the value of an input/textarea matched by the CSS selector + dispatch input/change events the React-friendly way (via the prototype value setter so React state actually updates). Element is also focused. A `<select>` takes an option's value or its visible label (bot-hq, HANDS); a checkbox takes true/false (clicked when it differs).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
