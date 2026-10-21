@@ -57,3 +57,6 @@ node_modules/
 /capabilities/gen/
 # leftover of the deleted bench/ Python harnesses (2026-08-17)
 .pytest_cache/
+
+# Release builds made while a session runs, so the live hooks keep their binary
+/target-codex/

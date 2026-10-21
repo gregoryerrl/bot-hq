@@ -5,6 +5,7 @@
 
 pub mod account_setup;
 pub mod capability;
+pub mod codex;
 pub mod capability_prompt;
 pub mod events;
 pub mod general_rules;

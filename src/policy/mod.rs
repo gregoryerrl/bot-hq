@@ -26,6 +26,7 @@ pub mod audit;
 pub mod data_reads;
 pub mod hooks;
 pub mod presets;
+pub mod read_only_rules;
 pub mod secret_scan;
 pub mod session_policy;
 pub mod shell_lint;

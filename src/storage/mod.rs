@@ -25,6 +25,7 @@ use std::sync::LazyLock;
 pub mod row_types;
 
 mod account_marks;
+mod codex_hook_trust;
 mod activity_events;
 mod agent_config;
 mod cancel_events;
@@ -48,6 +49,7 @@ mod tray;
 mod user_words;
 
 pub use account_marks::AccountMark;
+pub use codex_hook_trust::CodexHookTrustRow;
 pub use cl_atoms::{Atom, RetrievedAtom};
 pub use context_readings::ContextReading;
 pub(crate) use cl_atoms::estimate_tokens;

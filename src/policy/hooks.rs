@@ -67,7 +67,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
             "usage: bot-hq policy-check \
-             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|compact-handoff|pre-compact}} \
+             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|codex-gate|handoff-due|compact-handoff|compact-user-words|pre-compact}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -156,6 +156,11 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
         }
         "tool-gate" => run_tool_gate(&data_dir, project.as_deref(), sid),
         "shell-lint" => run_shell_lint(&data_dir, sid),
+        // The Codex connector's ONE PreToolUse hook, for both postures: the
+        // read-only deny list or the Tool Gate, decided by the roster the app
+        // answers for — and FAIL CLOSED, because on Codex nothing stands
+        // behind this hook (`run_codex_gate`).
+        "codex-gate" => run_codex_gate(&data_dir, project.as_deref(), sid, &hook_agent()),
         // B1e: the mid-turn handoff reminder, on EVERY tool call of both
         // postures. Prints the due file's text as `additionalContext`, or
         // nothing; always exit 0 and never a permission decision — the Tool
@@ -1353,6 +1358,252 @@ fn run_tool_gate(data_dir: &Path, project: Option<&str>, session_id: Option<&str
         eprintln!("{m}");
     }
     Ok(code)
+}
+
+/// What a Codex participant may do, as the app's roster answers it: the
+/// `edit_files` grant decides, exactly as `build_command` decides claude-code's
+/// permission posture from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexPosture {
+    EditFiles,
+    ReadOnly,
+}
+
+/// A Codex PreToolUse payload (the claude-code shape): the tool's name and,
+/// for the shell tool, its command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CodexHookPayload {
+    pub tool_name: String,
+    pub command: Option<String>,
+}
+
+impl CodexHookPayload {
+    /// `None` when the payload is not JSON or names no tool — the caller fails
+    /// closed on it. The command is taken for `Bash` only (Codex reports its
+    /// shell tool under that name), trimmed, and dropped when empty.
+    pub(crate) fn parse(json: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(json).ok()?;
+        let tool_name = v.get("tool_name")?.as_str()?.trim().to_string();
+        if tool_name.is_empty() {
+            return None;
+        }
+        let command = (tool_name == "Bash")
+            .then(|| v.get("tool_input")?.get("command")?.as_str().map(|c| c.trim().to_string()))
+            .flatten()
+            .filter(|c| !c.is_empty());
+        Some(Self { tool_name, command })
+    }
+}
+
+/// The Codex connector's PreToolUse hook — the one enforcer of a participant's
+/// posture there (`policy::read_only_rules` says why). Reads the payload,
+/// asks the running app which posture the caller holds (`/hooks/posture`,
+/// by `BOT_HQ_SESSION_ID` + `BOT_HQ_AGENT`, which the hook inherits from the
+/// app-server's environment), then decides ([`codex_gate_decision`]).
+///
+/// FAIL CLOSED, the opposite of `run_tool_gate`: an unreadable payload, a
+/// missing session identity, an app that is not running or does not know the
+/// caller — every one is exit 2 with its reason on stderr. The claude hook can
+/// fail open because the CLI's permission layer still enforces the deny list;
+/// on Codex there is no second layer, so a hook that cannot decide must refuse.
+fn run_codex_gate(
+    data_dir: &Path,
+    project: Option<&str>,
+    session_id: Option<&str>,
+    agent: &str,
+) -> Result<i32> {
+    use std::io::Read;
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        eprintln!("bot-hq codex-gate: BLOCKED — could not read the hook payload; nothing runs until it can.");
+        return Ok(2);
+    }
+    let Some(payload) = CodexHookPayload::parse(&buf) else {
+        eprintln!("bot-hq codex-gate: BLOCKED — the hook payload is not a PreToolUse call bot-hq understands; nothing runs until it is.");
+        return Ok(2);
+    };
+    let Some(session_id) = session_id else {
+        eprintln!(
+            "bot-hq codex-gate: BLOCKED — no BOT_HQ_SESSION_ID in this process's environment, so \
+             bot-hq cannot tell which participant is calling. A Codex participant bot-hq spawned \
+             always carries it; nothing runs without it."
+        );
+        return Ok(2);
+    };
+    // The zsh `$var:x` trap first, as in the other two hooks, for every
+    // posture — a trapped command is never parked, and never run mangled.
+    if let Some(command) = payload.command.as_deref() {
+        if let Some(refusal) = shell_trap_refusal(command) {
+            eprintln!("{refusal}");
+            return Ok(2);
+        }
+    }
+    let rt = match hook_runtime() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("bot-hq codex-gate: BLOCKED — could not start the client that asks bot-hq for your posture ({e}); nothing runs until it can.");
+            return Ok(2);
+        }
+    };
+    let posture = match rt.block_on(fetch_posture(data_dir, session_id, agent)) {
+        Ok(p) => p,
+        Err(reason) => {
+            eprintln!(
+                "bot-hq codex-gate: BLOCKED — {reason}. Nothing runs until bot-hq is running and \
+                 knows this participant (session {session_id}, participant {agent})."
+            );
+            return Ok(2);
+        }
+    };
+    // What the edit posture needs, resolved the way `run_tool_gate` does it.
+    let sid = Some(session_id);
+    let (keywords, listed, parked) = match (posture, payload.command.as_deref()) {
+        (CodexPosture::EditFiles, Some(command)) => {
+            let keywords = crate::policy::tool_gate::resolve_keywords(data_dir, sid);
+            let listed = Policy::resolve(data_dir, project, sid)
+                .ok()
+                .and_then(|policy| crate::policy::data_reads::match_command(&policy, command));
+            let gated = listed.is_some()
+                || crate::policy::tool_gate::match_keyword("Bash", command, &keywords)
+                    == Some(crate::policy::tool_gate::GateMode::Gate);
+            let parked = if gated {
+                rt.block_on(park_gate(data_dir, session_id, agent, command))
+            } else {
+                None
+            };
+            (keywords, listed, parked)
+        }
+        (CodexPosture::ReadOnly, Some(command)) => {
+            let listed = Policy::resolve(data_dir, project, sid)
+                .ok()
+                .and_then(|policy| crate::policy::data_reads::match_command(&policy, command));
+            (Vec::new(), listed, None)
+        }
+        _ => (Vec::new(), None, None),
+    };
+    let (code, message) = codex_gate_decision(posture, &payload, &keywords, listed, parked.as_ref());
+    if let Some(m) = message {
+        eprintln!("{m}");
+    }
+    if code == 0 {
+        // The mid-turn handoff reminder rides the same hook (B1e), on a pass
+        // only: a refusal is the whole message.
+        if let Some(text) = handoff_due_text(data_dir, sid, agent) {
+            print!("{}", crate::agents::handoff::due_hook_output(&text));
+        }
+    }
+    Ok(code)
+}
+
+/// The Codex gate's decision table, pure. Read-only: a file-editing tool, a
+/// Bash line that RUNS a denied git/gh form, or a listed data read → 2 with
+/// the reason; anything else passes silently. Edit-capable: the Tool Gate's
+/// own decision on a Bash line (listed read first, then keywords), every other
+/// tool passes. The `parked` gate, when the caller managed to park, changes
+/// the wording the agent reads, never the decision.
+pub(crate) fn codex_gate_decision(
+    posture: CodexPosture,
+    payload: &CodexHookPayload,
+    keywords: &[crate::policy::tool_gate::GatedKeyword],
+    listed: Option<crate::policy::data_reads::DataRead>,
+    parked: Option<&ParkedGate>,
+) -> (i32, Option<String>) {
+    use crate::policy::read_only_rules::{command_denial, tool_denial};
+    match posture {
+        CodexPosture::ReadOnly => {
+            if let Some(denial) = tool_denial(&payload.tool_name) {
+                return (
+                    2,
+                    Some(format!(
+                        "bot-hq codex-gate: BLOCKED — a read-only role may not use {} (it holds no \
+                         edit_files capability). Say what you would change in the channel; the \
+                         executor applies it.",
+                        denial.rule
+                    )),
+                );
+            }
+            let Some(command) = payload.command.as_deref() else {
+                return (0, None);
+            };
+            if let Some(denial) = command_denial(command) {
+                return (
+                    2,
+                    Some(format!(
+                        "bot-hq codex-gate: BLOCKED — `{}` runs `{}`, which a read-only role may not \
+                         (no edit_files capability): no commits, pushes, branch or tree mutations, \
+                         and no gh writes. Reads (`git status`, `git log`, `gh pr view`, …) pass. \
+                         Say what you would change in the channel; the executor applies it.",
+                        denial.command, denial.rule
+                    )),
+                );
+            }
+            if let Some(read) = listed {
+                return (
+                    2,
+                    Some(format!(
+                        "A LISTED {kind} read (a stop, NOT an error): `{command}` runs the project's \
+                         {kind} list entry `{entry}`, so it needs the user's approval. Use your \
+                         `read_gate` tool with this command — it parks it for the user, marked as \
+                         your read. Do NOT rewrite it to get around the list.",
+                        kind = read.kind.label(),
+                        entry = read.entry
+                    )),
+                );
+            }
+            (0, None)
+        }
+        CodexPosture::EditFiles => {
+            let Some(command) = payload.command.as_deref() else {
+                return (0, None);
+            };
+            match &listed {
+                Some(read) => (2, Some(listed_read_refusal(command, read, parked))),
+                None => tool_gate_exit(command, keywords, parked),
+            }
+        }
+    }
+}
+
+/// `POST /hooks/posture` on the running app: which posture the caller holds.
+/// `Err(reason)` on every failure — the caller refuses with it.
+async fn fetch_posture(data_dir: &Path, session_id: &str, agent: &str) -> Result<CodexPosture, String> {
+    let Some(addr) = crate::paths::read_signaling_addr(data_dir) else {
+        return Err("bot-hq is not running (no signaling address in the data dir)".to_string());
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("could not build the client that asks bot-hq ({e})"))?;
+    let body = serde_json::json!({ "session_id": session_id, "agent": agent }).to_string();
+    let resp = with_hook_token(client.post(format!("http://{addr}/hooks/posture")), data_dir)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| format!("bot-hq is not running or did not answer ({e})"))?;
+    let status = resp.status();
+    let txt = resp.text().await.unwrap_or_default();
+    classify_posture_response(status, &txt)
+}
+
+/// Map a `(status, body)` from `/hooks/posture` onto a posture. Pure, so the
+/// mapping is testable without HTTP. Only a 2xx carrying `edit_files` as a
+/// bool answers; anything else is a reason to refuse.
+fn classify_posture_response(status: reqwest::StatusCode, body: &str) -> Result<CodexPosture, String> {
+    if !status.is_success() {
+        return Err(format!(
+            "bot-hq would not say which posture this participant holds ({}: {})",
+            status.as_u16(),
+            body.trim()
+        ));
+    }
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|_| "bot-hq's posture answer was not JSON".to_string())?;
+    match v.get("edit_files").and_then(|b| b.as_bool()) {
+        Some(true) => Ok(CodexPosture::EditFiles),
+        Some(false) => Ok(CodexPosture::ReadOnly),
+        None => Err("bot-hq's posture answer carried no edit_files".to_string()),
+    }
 }
 
 /// The read-only posture's PreToolUse Bash hook (feedback #96): the zsh
@@ -3529,6 +3780,82 @@ mod tests {
         };
         assert_eq!(run_cli(&args("s-1")).unwrap(), 0);
         assert_eq!(run_cli(&args("s-none")).unwrap(), 0);
+    }
+
+    /// The Codex hook is the ONLY enforcer of a read-only role's deny list
+    /// (claude-code's permission layer does that job on the other connector),
+    /// so its decision table is pinned here, pure: the tool names claude and
+    /// Codex use for a file edit, every command the line runs, the reads that
+    /// fall through — and exit 2 with the reason on stderr, nothing on stdout.
+    #[test]
+    fn codex_gate_for_a_read_only_role_denies_edits_and_mutations_and_passes_reads() {
+        let deny = |tool: &str, cmd: Option<&str>| {
+            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string) };
+            let (code, msg) = codex_gate_decision(CodexPosture::ReadOnly, &payload, &[], None, None);
+            assert_eq!(code, 2, "{tool} {cmd:?} must be denied");
+            msg.expect("a denial names its reason")
+        };
+        let allow = |tool: &str, cmd: Option<&str>| {
+            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string) };
+            let d = codex_gate_decision(CodexPosture::ReadOnly, &payload, &[], None, None);
+            assert_eq!(d, (0, None), "{tool} {cmd:?} must pass silently");
+        };
+        for tool in ["apply_patch", "Edit", "Write", "NotebookEdit", "Task"] {
+            let msg = deny(tool, None);
+            assert!(msg.contains("read-only"), "{msg}");
+            assert!(msg.contains(tool), "{msg}");
+        }
+        for cmd in ["git push", "cd /tmp/x && git push origin main", "sh -c 'git commit -m x'", "gh pr merge 1", "gh api -X POST x", "git -C . push"] {
+            let msg = deny("Bash", Some(cmd));
+            assert!(msg.contains("read-only"), "{msg}");
+            assert!(msg.contains("BLOCKED"), "{msg}");
+        }
+        for cmd in ["git status", "git log --oneline -3", "gh pr view 1", "cargo test", "cat README.md", "grep -rn 'git push' src"] {
+            allow("Bash", Some(cmd));
+        }
+        // Tools that are not file edits pass whatever they are called.
+        allow("Read", None);
+        allow("mcp__bot-hq-signaling__session_doc_write", None);
+        allow("web_search", None);
+    }
+
+    /// An edit-capable role on Codex gets the Tool Gate, not the deny list: a
+    /// file edit passes, a gated keyword is refused with the `action_gate`
+    /// routing, a listed read is stopped, and a plain command passes.
+    #[test]
+    fn codex_gate_for_an_edit_role_is_the_tool_gate() {
+        use crate::policy::tool_gate::{GateMode, GatedKeyword};
+        let kws = vec![GatedKeyword { keyword: "gh pr merge".into(), mode: GateMode::Gate }];
+        let decide = |tool: &str, cmd: Option<&str>, listed: Option<crate::policy::data_reads::DataRead>| {
+            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string) };
+            codex_gate_decision(CodexPosture::EditFiles, &payload, &kws, listed, None)
+        };
+        assert_eq!(decide("apply_patch", None, None), (0, None));
+        assert_eq!(decide("Bash", Some("git push origin codex-connector"), None), (0, None));
+        let (code, msg) = decide("Bash", Some("gh pr merge 12"), None);
+        assert_eq!(code, 2);
+        assert!(msg.unwrap().contains("action_gate"));
+        let read = crate::policy::data_reads::DataRead {
+            kind: crate::policy::data_reads::DataReadKind::Production,
+            entry: "gcloud logging read".into(),
+        };
+        let (code, msg) = decide("Bash", Some("gcloud logging read x"), Some(read));
+        assert_eq!(code, 2);
+        assert!(msg.unwrap().starts_with("A LISTED production read"));
+    }
+
+    /// The Codex payload parser: `tool_name` always, the command only for the
+    /// shell tool, and a payload that is not JSON is `None` — the caller fails
+    /// CLOSED on it, unlike the claude hook (whose permission layer backs it).
+    #[test]
+    fn codex_hook_payload_parses_tool_name_and_bash_command() {
+        let p = CodexHookPayload::parse(r#"{"tool_name":"Bash","tool_input":{"command":" git push "}}"#).unwrap();
+        assert_eq!(p.tool_name, "Bash");
+        assert_eq!(p.command.as_deref(), Some("git push"));
+        let p = CodexHookPayload::parse(r#"{"tool_name":"apply_patch","tool_input":{"patch":"*** Begin Patch"}}"#).unwrap();
+        assert_eq!((p.tool_name.as_str(), p.command), ("apply_patch", None));
+        assert!(CodexHookPayload::parse("not json").is_none());
+        assert!(CodexHookPayload::parse(r#"{"tool_input":{}}"#).is_none(), "no tool name");
     }
 
     #[test]

@@ -36,6 +36,13 @@ use tracing::{debug, info, warn};
 /// secret from `<data_dir>/.local/hook-token`. Shared with the client side in
 /// `policy::hooks` so the two cannot drift.
 pub const HOOK_TOKEN_HEADER: &str = "x-bot-hq-hook-token";
+/// The header an MCP client may carry its per-agent secret in, instead of the
+/// URL path (`/sessions/<id>/<agent>/mcp` + this header). The Codex connector
+/// uses it: its MCP config is passed on the app-server's argv, which any local
+/// `ps` reads, so the secret rides an env var the config names
+/// (`env_http_headers`) rather than the URL. When the path carries a token
+/// too, the path decides.
+pub const MCP_TOKEN_HEADER: &str = "x-bot-hq-mcp-token";
 
 /// Body of the 401 on `/hooks/*`. The common non-attack cause is a hook binary
 /// older than the running app: a hook body bakes in the ABSOLUTE path of
@@ -198,7 +205,7 @@ async fn handle_request(
     // routes now require this launch's hook secret (minted by `main.rs`,
     // written 0600 to `<data_dir>/.local/hook-token`, read by the hook binary
     // at run time), checked BEFORE the body is read.
-    if path == "/hooks/pre-push" || path == "/hooks/tool-gate" {
+    if path == "/hooks/pre-push" || path == "/hooks/tool-gate" || path == "/hooks/posture" {
         let presented = req
             .headers()
             .get(HOOK_TOKEN_HEADER)
@@ -211,6 +218,12 @@ async fn handle_request(
         // directly and blocks until the user picks.
         if path == "/hooks/pre-push" {
             return Ok(handle_pre_push(req.into_body(), bridge).await);
+        }
+        // The Codex PreToolUse hook asks which posture its caller holds before
+        // it decides anything — on that connector the hook is the only
+        // enforcer, so it refuses whenever this answer is missing.
+        if path == "/hooks/posture" {
+            return Ok(handle_posture(req.into_body(), bridge).await);
         }
         // The PreToolUse Tool Gate hook parks the approval for the command it
         // just blocked, so the agent doesn't have to convert the refusal into
@@ -252,7 +265,15 @@ async fn handle_request(
     // that agent's own mcp-config, so possessing it IS being that agent — and
     // since 1.0.5 a pair with no secret registered is refused too, so an
     // invented pair gets nothing (`mcp_token_matches` says why that is safe).
-    if !bridge.mcp_token_matches(&who.session_id, &who.agent, who.token.as_deref()) {
+    // The secret from the path, or — a session spawned on the Codex
+    // connector — from the header; the path decides when both are present.
+    let header_token = req
+        .headers()
+        .get(MCP_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let presented = who.token.clone().or(header_token);
+    if !bridge.mcp_token_matches(&who.session_id, &who.agent, presented.as_deref()) {
         warn!(
             session_id = %who.session_id,
             agent = %who.agent,
@@ -403,6 +424,43 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
     };
 
     text_response(StatusCode::OK, &json!({ "approved": approved }).to_string())
+}
+
+/// Handle `POST /hooks/posture` from the Codex PreToolUse hook. Body:
+/// `{ "session_id": "...", "agent": "<slug>" }`. Replies `{ "edit_files":
+/// <bool> }` from the roster — the same `resolve_caller_capabilities` the MCP
+/// gate decides with, so the hook and the tools agree on what a participant
+/// may do — or 404 when the roster does not know the caller (the hook fails
+/// closed on anything but a 2xx carrying the bool).
+async fn handle_posture(body: Incoming, bridge: Arc<SignalingBridge>) -> Response<Full<Bytes>> {
+    let bytes = match body.collect().await {
+        Ok(c) => c.to_bytes(),
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("body read failed: {e}")),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return text_response(StatusCode::BAD_REQUEST, &format!("bad json: {e}")),
+    };
+    let field = |name: &str| {
+        v.get(name)
+            .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let (Some(session_id), Some(agent)) = (field("session_id"), field("agent")) else {
+        return text_response(StatusCode::BAD_REQUEST, "missing session_id or agent");
+    };
+    match crate::signaling::jsonrpc::resolve_caller_capabilities(&bridge, &session_id, &agent).await {
+        crate::agents::ResolvedCapabilities::Known(set) => text_response(
+            StatusCode::OK,
+            &json!({ "edit_files": set.contains(crate::agents::Capability::EditFiles) }).to_string(),
+        ),
+        crate::agents::ResolvedCapabilities::Unreadable { reason } => text_response(
+            StatusCode::NOT_FOUND,
+            &format!("this caller's posture is unknown: {reason} (the session roster decides)"),
+        ),
+    }
 }
 
 /// Handle `POST /hooks/tool-gate` from the PreToolUse Tool Gate hook. Body:
@@ -900,6 +958,92 @@ mod tests {
         // Nothing was parked by the refused calls: exactly one tray row exists.
         let rows = storage.tray_entries_for_session("s1").await.unwrap();
         assert_eq!(rows.len(), 1, "refused calls must not park: {rows:?}");
+    }
+
+    /// The per-agent MCP secret can ride a header instead of the URL path —
+    /// the Codex connector cannot put it on the path without also putting it
+    /// on the app-server's argv, where any local `ps` reads it; it sends
+    /// `x-bot-hq-mcp-token` from an env var instead (`env_http_headers`). The
+    /// same secret, the same constant-time check; neither form present →
+    /// 403, a wrong header → 403, and when both are present the PATH decides.
+    #[tokio::test]
+    async fn an_mcp_call_may_carry_its_secret_in_a_header() {
+        let bridge = SignalingBridge::new();
+        bridge.register_mcp_token("s1", "eyes", "eyes-secret");
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let client = reqwest::Client::new();
+        let body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
+        let post = |path: String, header: Option<&'static str>| {
+            let (client, body) = (client.clone(), body.clone());
+            let url = format!("http://{}{}", server.local_addr, path);
+            async move {
+                let mut req = client.post(&url).header("content-type", "application/json");
+                if let Some(h) = header {
+                    req = req.header(MCP_TOKEN_HEADER, h);
+                }
+                req.body(body).send().await.unwrap().status().as_u16()
+            }
+        };
+        assert_eq!(post("/sessions/s1/eyes/mcp".into(), Some("eyes-secret")).await, 200, "the header form");
+        assert_eq!(post("/sessions/s1/eyes/mcp".into(), Some("wrong")).await, 403, "a wrong header");
+        assert_eq!(post("/sessions/s1/eyes/mcp".into(), None).await, 403, "neither form");
+        assert_eq!(post("/sessions/s1/eyes/eyes-secret/mcp".into(), Some("wrong")).await, 200, "the path wins over a wrong header");
+        assert_eq!(post("/sessions/s1/eyes/wrong/mcp".into(), Some("eyes-secret")).await, 403, "the path wins over a right header");
+        assert_eq!(post("/sessions/s1/hands/mcp".into(), Some("eyes-secret")).await, 403, "another agent's secret in the header");
+    }
+
+    /// The Codex hook's one question (`/hooks/posture`): does this caller hold
+    /// `edit_files`? Answered from the roster the MCP gate reads — the
+    /// executor is `true`, the reviewer `false` — behind the hook secret like
+    /// the other hook routes; a caller the roster does not know is refused
+    /// outright (the hook then fails closed), as is a body naming no caller.
+    #[tokio::test]
+    async fn the_posture_route_answers_from_the_roster_and_refuses_strangers() {
+        use crate::policy::ViolationsLog;
+        let data = tempfile::tempdir().unwrap();
+        let bridge =
+            SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        bridge.set_hook_token(HOOK_SECRET);
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "posture", None).await.unwrap();
+        storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let client = reqwest::Client::new();
+        let post = |body: String, token: Option<&'static str>| {
+            let client = client.clone();
+            let url = format!("http://{}/hooks/posture", server.local_addr);
+            async move {
+                let mut req = client.post(&url).header("content-type", "application/json");
+                if let Some(t) = token {
+                    req = req.header(HOOK_TOKEN_HEADER, t);
+                }
+                let resp = req.body(body).send().await.unwrap();
+                (resp.status(), resp.text().await.unwrap())
+            }
+        };
+        let ask = |agent: &str| json!({ "session_id": "s1", "agent": agent }).to_string();
+
+        let (status, txt) = post(ask("hands"), None).await;
+        assert_eq!((status, txt.as_str()), (StatusCode::UNAUTHORIZED, HOOK_TOKEN_REFUSAL));
+
+        let (status, txt) = post(ask("hands"), Some(HOOK_SECRET)).await;
+        assert_eq!(status, StatusCode::OK, "{txt}");
+        let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        assert_eq!(v["edit_files"], json!(true), "{txt}");
+
+        let (status, txt) = post(ask("eyes"), Some(HOOK_SECRET)).await;
+        assert_eq!(status, StatusCode::OK, "{txt}");
+        let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
+        assert_eq!(v["edit_files"], json!(false), "{txt}");
+
+        let (status, txt) = post(ask("stranger"), Some(HOOK_SECRET)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{txt}");
+        assert!(txt.contains("roster"), "{txt}");
+        let (status, _) = post(json!({ "session_id": "s1" }).to_string(), Some(HOOK_SECRET)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post(json!({ "agent": "hands" }).to_string(), Some(HOOK_SECRET)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     /// The WIRE, client side: the real hook client (`policy::hooks::park_gate`)

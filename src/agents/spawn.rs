@@ -1311,63 +1311,14 @@ async fn supervise<S, Fut>(
     }
 }
 
-/// A participant without `Capability::EditFiles` runs read-only under
-/// `--permission-mode dontAsk`. Tools with a
-/// read form worth keeping (`git branch`, `gh`) are denied BY WRITE VERB rather
-/// than by blanket noun, so the read forms fall through to the allowed `Bash`
-/// (deny wins over allow, so a blanket `Bash(gh issue:*)` / `Bash(git branch:*)`
-/// would also kill the reads). These const lists are the single source of truth:
-/// both `build_read_only_disallowed_tools` AND the `eyes_denies_*` tests iterate
-/// them, so enforcement and its test can't drift. New write verbs go here.
-///
-/// Mutating `git branch` forms. Read forms (bare / `--show-current` / `-a` / `-r`
-/// / `--list` / `--contains`) fall through. 2026-06-17: replaced the blanket
-/// `Bash(git branch:*)` deny that was false-blocking EYES's read-only listing.
-const GIT_BRANCH_WRITE_VERBS: &[&str] = &[
-    "-d",
-    "-D",
-    "--delete",
-    "-m",
-    "-M",
-    "--move",
-    "-c",
-    "-C",
-    "--copy",
-    "-f",
-    "--force",
-    "-u",
-    "--set-upstream-to",
-    "--unset-upstream",
-    "--track",
-    "--no-track",
-    "--edit-description",
-];
-/// Mutating `gh pr` verbs (read forms — view/diff/list/status/checks — fall through).
-const GH_PR_WRITE_VERBS: &[&str] = &[
-    "create", "edit", "close", "reopen", "merge", "ready", "review", "comment", "lock", "unlock",
-    "delete", "checkout",
-];
-/// Mutating `gh issue` verbs (read forms — view/list — fall through).
-const GH_ISSUE_WRITE_VERBS: &[&str] = &[
-    "create", "edit", "close", "reopen", "comment", "delete", "transfer", "pin", "unpin", "lock",
-    "unlock", "develop",
-];
-/// Mutating `gh release` verbs (read forms — view/list — fall through).
-const GH_RELEASE_WRITE_VERBS: &[&str] = &["create", "edit", "delete", "upload", "download"];
-/// Mutating `gh repo` verbs (read forms — view — fall through).
-const GH_REPO_WRITE_VERBS: &[&str] = &[
-    "create", "edit", "delete", "fork", "sync", "rename", "archive", "clone",
-];
-
-/// Build space-joined `Bash(<tool> <verb>:*)` deny patterns for a
-/// deny-by-write-verb tool. Read forms (no listed verb) fall through to allowed `Bash`.
-fn deny_write_verbs(tool: &str, verbs: &[&str]) -> String {
-    verbs
-        .iter()
-        .map(|v| format!("Bash({tool} {v}:*)"))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+/// The read-only deny list lives in `policy::read_only_rules` since the Codex
+/// connector: one set of constants renders claude-code's `--disallowedTools`
+/// here AND decides the Codex hook's refusals, so the two enforcers cannot
+/// drift. The `eyes_denies_*` tests below iterate those same constants.
+pub(crate) use crate::policy::read_only_rules::{
+    GH_ISSUE_WRITE_VERBS, GH_PR_WRITE_VERBS, GH_RELEASE_WRITE_VERBS, GH_REPO_WRITE_VERBS,
+    GIT_BRANCH_WRITE_VERBS,
+};
 
 /// The model row's `cli_settings` (0079) as the map `--settings` is built from.
 ///
@@ -1406,59 +1357,15 @@ fn model_cli_settings(
     }
 }
 
-/// The `--disallowedTools` value for a participant that may not edit files:
-/// static denies (Edit/Write/Task + the
-/// full-noun git mutations that have no read form worth preserving) plus the
-/// deny-by-write-verb collections for `git branch` and `gh`. `gh api` is fully
-/// denied — the POST/PATCH/DELETE escape hatch. Covered by the `eyes_denies_*`
-/// tests, which assert against the same `*_WRITE_VERBS` consts.
+/// The `--disallowedTools` value for a participant that may not edit files —
+/// rendered from `policy::read_only_rules` (the one list both connectors
+/// enforce). Covered by the `eyes_denies_*` tests, which assert against the
+/// same `*_WRITE_VERBS` consts.
 ///
 /// Selected by CAPABILITY, never by slug — the caller is
-/// `if !cfg.capabilities.grants(Capability::EditFiles)`. The name said `rain`
-/// until round-4 F6, which was cosmetic but read as if a deleted slug still
-/// gated enforcement.
+/// `if !cfg.capabilities.grants(Capability::EditFiles)`.
 fn build_read_only_disallowed_tools() -> String {
-    let mut parts: Vec<String> = [
-        "Edit",
-        "Write",
-        "NotebookEdit",
-        "Task",
-        "Bash(git commit:*)",
-        "Bash(git push:*)",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-
-    parts.push(deny_write_verbs("git branch", GIT_BRANCH_WRITE_VERBS));
-
-    // Full-noun git mutations — no read form worth preserving, so deny the noun.
-    parts.extend(
-        [
-            "Bash(git checkout:*)",
-            "Bash(git switch:*)",
-            "Bash(git reset:*)",
-            "Bash(git merge:*)",
-            "Bash(git rebase:*)",
-            "Bash(git add:*)",
-            "Bash(git stash:*)",
-            "Bash(git restore:*)",
-            "Bash(git rm:*)",
-            "Bash(git tag:*)",
-            "Bash(git cherry-pick:*)",
-            "Bash(git apply:*)",
-        ]
-        .iter()
-        .map(|s| s.to_string()),
-    );
-
-    parts.push(deny_write_verbs("gh pr", GH_PR_WRITE_VERBS));
-    parts.push(deny_write_verbs("gh issue", GH_ISSUE_WRITE_VERBS));
-    parts.push(deny_write_verbs("gh release", GH_RELEASE_WRITE_VERBS));
-    parts.push(deny_write_verbs("gh repo", GH_REPO_WRITE_VERBS));
-    parts.push("Bash(gh api:*)".to_string());
-
-    parts.join(" ")
+    crate::policy::read_only_rules::claude_disallowed_tools()
 }
 
 /// Pre-flight: ensure the `claude` binary is launchable on this platform, with

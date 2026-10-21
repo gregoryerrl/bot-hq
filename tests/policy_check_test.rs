@@ -133,3 +133,48 @@ fn the_tool_gate_hook_passes_a_keyword_quoted_to_grep() {
     let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gh api' src | sh");
     assert_eq!(code, 2, "a shell in the line keeps the whole-line match: {err}");
 }
+
+/// The Codex hook has no permission layer behind it, so it FAILS CLOSED: with
+/// no session identity in the environment, or with the app not running to
+/// say whether the caller may edit, every call is refused with the reason on
+/// stderr and nothing on stdout. (The decision table itself is pinned in
+/// `policy::hooks` unit tests; the server's posture route in
+/// `signaling::server` tests.)
+#[test]
+fn the_codex_gate_fails_closed_without_a_session_or_the_app() {
+    let data = tempfile::tempdir().unwrap();
+    let run = |sid: Option<&str>, tool: &str, command: &str| {
+        let payload = serde_json::json!({"tool_name": tool, "tool_input": {"command": command}}).to_string();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bot-hq"));
+        cmd.args(["policy-check", "codex-gate", "--data-dir", data.path().to_str().unwrap()])
+            .env("SHELL", "/bin/bash")
+            .env_remove("CLAUDE_CODE_SHELL")
+            .env_remove("BOT_HQ_SESSION_ID")
+            .env("BOT_HQ_AGENT", "eyes")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(sid) = sid {
+            cmd.env("BOT_HQ_SESSION_ID", sid);
+        }
+        let mut child = cmd.spawn().expect("the built binary runs");
+        child.stdin.take().unwrap().write_all(payload.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    // No session identity: refused, even for a read.
+    let (code, out, err) = run(None, "Bash", "git status");
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(err.contains("BOT_HQ_SESSION_ID"), "names what is missing: {err}");
+    // A session id but no app to ask: refused, naming the app.
+    let (code, out, err) = run(Some("s-nowhere"), "Bash", "git status");
+    assert_eq!((code, out.as_str()), (2, ""), "{err}");
+    assert!(err.contains("bot-hq") && err.contains("running"), "names the app: {err}");
+    // The zsh trap is caught before anything else, like the other two hooks.
+    let payload_trap = run(Some("s-nowhere"), "Bash", r#"git show "$R:app/x""#);
+    assert_eq!(payload_trap.0, 2);
+}
