@@ -341,7 +341,10 @@ mod tests {
         let key = hook_key(home);
         assert_eq!(key, format!("{file}:pre_tool_use:0:0"));
         let flag = hooks_state_override(&[HookTrust { key: key.clone(), hash: "sha256:abc".into() }]);
-        assert_eq!(flag, format!(r#"hooks.state={{"{file}:pre_tool_use:0:0"={{enabled=true,trusted_hash="sha256:abc"}}}}"#));
+        // The key is a TOML string: a Windows path's backslashes are escaped in it.
+        let quoted_key = toml_string(&key);
+        assert_eq!(flag, format!(r#"hooks.state={{{quoted_key}={{enabled=true,trusted_hash="sha256:abc"}}}}"#));
+        assert!(quoted_key.starts_with('"') && quoted_key.contains("hooks.json:pre_tool_use:0:0"), "{quoted_key}");
         assert_eq!(hooks_state_override(&[]), "hooks.state={}");
     }
 

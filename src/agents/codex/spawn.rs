@@ -952,7 +952,8 @@ mod tests {
         let events = t.translate(&usage);
         assert!(matches!(&events[..], [AgentEvent::AssistantUsage { .. }, AgentEvent::Notice(n)] if n.contains("872,000")), "{events:?}");
         assert_eq!(t.model, "gpt-6-astra");
-        assert!(t.login_command.contains("CODEX_HOME='/h'"), "{}", t.login_command);
+        // The host shell's sign-in command (PowerShell on Windows), for the home.
+        assert!(t.login_command.contains("'/h'") && t.login_command.contains("codex login"), "{}", t.login_command);
     }
 
     #[test]
