@@ -124,6 +124,13 @@ pub fn config_overrides(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String> {
         "web_search=\"live\"".to_string(),
         "memories.generate_memories=false".to_string(),
         "memories.use_memories=false".to_string(),
+        // The disabled `multi_agent*` features do not remove the sub-agent
+        // tools on 0.163.0: Codex resolves the multi-agent version as this
+        // switch → the model catalog's own value → the feature flags, and the
+        // account's catalog marks every model v1/v2 (measured 2026-10-21: the
+        // tools stayed listed with both flags off). An enabled `multi_agent_v2`
+        // would still outrank it, so the flag stays disabled too.
+        "agents.enabled=false".to_string(),
         hooks_state_override(&codex.hook_trust),
     ];
     if let Some(window) = cfg.config.context_window.filter(|w| *w > 0) {
@@ -896,7 +903,7 @@ mod tests {
         assert_eq!(&argv[..3], ["codex", "app-server", "--listen"]);
         assert_eq!(argv[3], "stdio://");
         let disabled: Vec<&str> = argv.windows(2).filter(|w| w[0] == "--disable").map(|w| w[1].as_str()).collect();
-        for f in ["unified_exec_tty", "multi_agent", "apps", "plugins", "goals", "image_generation", "worktrees", "unbounded_connection_retries", "memories", "computer_use"] {
+        for f in ["unified_exec_tty", "multi_agent", "multi_agent_v2", "apps", "plugins", "goals", "image_generation", "worktrees", "unbounded_connection_retries", "memories", "computer_use"] {
             assert!(disabled.contains(&f), "{f} must be disabled: {disabled:?}");
         }
         assert!(!disabled.contains(&"code_mode_host") && !disabled.contains(&"unified_exec") && !disabled.contains(&"hooks"), "the shell and the hooks stay on");
@@ -914,6 +921,9 @@ mod tests {
             "shell_environment_policy.exclude=[\"BOT_HQ_MCP_TOKEN\"]",
             "history.persistence=\"none\"",
             "memories.generate_memories=false",
+            // The sub-agent tools follow the model catalog unless this switch is
+            // off; the disabled `multi_agent*` features alone leave them listed.
+            "agents.enabled=false",
             "hooks.state={\"/h/hooks.json:pre_tool_use:0:0\"={enabled=true,trusted_hash=\"sha256:abc\"}}",
             // The row's window is the one Codex runs the model at; Codex keeps
             // 5% of it back (measured: 872,000 reports 828,400), and its

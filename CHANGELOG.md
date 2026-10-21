@@ -52,7 +52,10 @@ model side by side. Migration 0102 applies on first launch.
   every turn bot-hq checks Codex still lists and trusts it. Terminal
   sessions (which could carry commands past the hook), Codex's own
   sub-agents, app connectors, plugins, goals, image generation, worktrees,
-  browsers and memories are switched off for participants.
+  browsers and memories are switched off for participants. (The sub-agent
+  tools need their own switch: on Codex 0.163.0 the model catalog turns
+  them on regardless of the feature flags, and the first Fable + Astra
+  session still saw them — bot-hq now sets `agents.enabled=false` too.)
 - **Interrupting a Codex participant does not wait for its command.** Codex
   answers an interrupt at once but lets the running command finish, so a
   message typed during a long build would have waited for the build. bot-hq
