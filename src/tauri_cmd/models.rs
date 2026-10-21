@@ -108,6 +108,21 @@ pub(crate) fn validate_config_dir(
         )));
     }
     if let Some(home) = home {
+        // The OTHER CLI's default dir is the other runtime's by definition
+        // (EYES c4f6809d): `~/.claude` as a Codex home would get bot-hq's
+        // hooks file, a 0700 chmod and a Codex sign-in; `~/.codex` as a
+        // Claude dir would get claude's files. Neither is stored on any row,
+        // so the row-level rule cannot see them.
+        let (other_leaf, other_name) = match runtime {
+            Runtime::ClaudeCode => (".codex", "Codex's default home"),
+            Runtime::Codex => (".claude", "claude-code's default config dir"),
+        };
+        if std::path::Path::new(&dir) == home.join(other_leaf) {
+            return Err(AppError::Validation(format!(
+                "That is {other_name} (~/{other_leaf}), which belongs to the other runtime — a {field} \
+                 needs a path of its own (e.g. {dir_example})"
+            )));
+        }
         if std::path::Path::new(&dir) == home.join(default_leaf) {
             return Err(AppError::Validation(match runtime {
                 Runtime::ClaudeCode => "That is the CLI's default dir — leave the field blank for it. \
@@ -446,10 +461,16 @@ mod tests {
         assert!(!msg.contains("Claude"), "must not talk about Claude: {msg}");
         let msg = refusal("~/.codex-bot-hq", Runtime::Codex);
         assert!(msg.contains("Codex home"), "{msg}");
-        // The Claude default is NOT the Codex default, and vice versa.
+        // The OTHER CLI's default dir is refused too (EYES c4f6809d): account
+        // 1's `~/.claude` can never be a Codex home, nor `~/.codex` a Claude dir.
         let claude_default = home.join(".claude");
-        assert!(validate_config_dir(Some(claude_default.to_str().unwrap()), Some(home), Runtime::Codex).is_ok());
-        assert!(validate_config_dir(Some(codex_default), Some(home), Runtime::ClaudeCode).is_ok());
+        let msg = refusal(claude_default.to_str().unwrap(), Runtime::Codex);
+        assert!(msg.contains("other runtime") && msg.contains(".claude"), "{msg}");
+        let msg = match validate_config_dir(Some(codex_default), Some(home), Runtime::ClaudeCode) {
+            Err(AppError::Validation(msg)) => msg,
+            other => panic!("~/.codex must be refused as a Claude dir, got {other:?}"),
+        };
+        assert!(msg.contains("other runtime") && msg.contains(".codex"), "{msg}");
     }
 
     /// EYES d928bf99 (a) + N3: Save refuses a dir that a row of the OTHER

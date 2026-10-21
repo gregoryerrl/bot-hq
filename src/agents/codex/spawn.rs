@@ -355,6 +355,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         agent_name: cfg.agent_name.clone(),
         rendered,
         cwd: cfg.working_dir.as_ref().map(|d| d.display().to_string()),
+        deadlines: InterruptDeadlines::default(),
     };
     let event_tx_for_lifecycle = event_tx.clone();
     let agent_name = cfg.agent_name.clone();
@@ -443,6 +444,29 @@ struct Started {
     resume_failed: Option<String>,
 }
 
+/// How long an interrupt waits for the turn to end before escalating (G2):
+/// `plain` for an ordinary command, `atomic` for one mid `git commit` /
+/// `git push` / migration (the working tree is given that long not to be
+/// left half-written — `core::state::ATOMIC_OP_DEFERRAL_CAP`'s posture),
+/// then `after_kill` once the command's tree is dead before the driver gives
+/// the server up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptDeadlines {
+    pub plain: std::time::Duration,
+    pub atomic: std::time::Duration,
+    pub after_kill: std::time::Duration,
+}
+
+impl Default for InterruptDeadlines {
+    fn default() -> Self {
+        Self {
+            plain: std::time::Duration::from_secs(2),
+            atomic: std::time::Duration::from_secs(8),
+            after_kill: std::time::Duration::from_secs(2),
+        }
+    }
+}
+
 /// The per-participant driver state.
 struct Driver {
     client: Arc<CodexClient>,
@@ -452,6 +476,15 @@ struct Driver {
     agent_name: String,
     rendered: RenderedHook,
     cwd: Option<String>,
+    deadlines: InterruptDeadlines,
+}
+
+/// Where an interrupt stands.
+enum Escalation {
+    /// `turn/interrupt` sent; waiting for `turn/completed`.
+    Waiting,
+    /// The command's tree was killed; waiting a last time.
+    Killed,
 }
 
 impl Driver {
@@ -475,8 +508,37 @@ impl Driver {
         let mut queued: Vec<String> = Vec::new();
         let mut inputs_open = true;
         let mut controls_open = true;
+        // The command running right now (its process id, and whether it is
+        // an atomic git/migration step), for the interrupt deadline.
+        let mut running: Option<(Option<u32>, bool)> = None;
+        // An interrupt in flight: when it fires, and what has been done.
+        let mut escalation: Option<(tokio::time::Instant, Escalation)> = None;
         loop {
+            let deadline = escalation.as_ref().map(|(at, _)| *at);
             tokio::select! {
+                _ = async { tokio::time::sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
+                    match escalation.take() {
+                        Some((_, Escalation::Waiting)) => {
+                            // Stage 1: the running command's tree.
+                            if let Some((Some(pid), _)) = running {
+                                warn!(agent = %self.agent_name, pid, "turn did not end after the interrupt; killing the command's process tree");
+                                crate::process::kill_process_tree(pid);
+                            }
+                            escalation = Some((tokio::time::Instant::now() + self.deadlines.after_kill, Escalation::Killed));
+                        }
+                        Some((_, Escalation::Killed)) => {
+                            // Stage 2: the server itself — the driver ends, the
+                            // lifecycle reaps it, the next message resumes the thread.
+                            warn!(agent = %self.agent_name, "turn did not end after the kill; giving the app-server up");
+                            let _ = event_tx.send(AgentEvent::Notice(format!(
+                                "{} did not stop after an interrupt; its Codex app-server was reaped and the next message resumes its thread.",
+                                self.agent_name
+                            ))).await;
+                            break;
+                        }
+                        None => {}
+                    }
+                }
                 msg = input_rx.recv(), if inputs_open => {
                     let Some(msg) = msg else { inputs_open = false; continue };
                     let text = msg.message.content;
@@ -524,6 +586,10 @@ impl Driver {
                 ctl = control_rx.recv(), if controls_open => {
                     let Some(_ctl) = ctl else { controls_open = false; continue };
                     self.interrupt();
+                    if active_turn.is_some() && escalation.is_none() {
+                        let wait = if running.is_some_and(|(_, atomic)| atomic) { self.deadlines.atomic } else { self.deadlines.plain };
+                        escalation = Some((tokio::time::Instant::now() + wait, Escalation::Waiting));
+                    }
                 }
                 inc = incoming.recv() => {
                     let Some(inc) = inc else { break };
@@ -537,9 +603,12 @@ impl Driver {
                         self.interrupt();
                         let _ = event_tx.send(AgentEvent::Health(AgentHealth::Stalled)).await;
                     }
+                    track_running_command(&inc, &mut running);
                     for ev in self.translator.translate(&inc) {
                         if let AgentEvent::TurnComplete { .. } = &ev {
                             active_turn = None;
+                            escalation = None;
+                            running = None;
                             if !queued.is_empty() {
                                 match self.start_queued(&mut queued).await {
                                     Ok(turn_id) => {
@@ -621,6 +690,27 @@ impl Driver {
             )
             .await
             .map(|_| ())
+    }
+}
+
+/// Keep `running` at the command executing now: set on a started
+/// `commandExecution` (its `processId`, and whether it is an atomic step
+/// the interrupt should give more time), cleared when it completes.
+fn track_running_command(inc: &Incoming, running: &mut Option<(Option<u32>, bool)>) {
+    let Incoming::Notification(n) = inc else { return };
+    let item = &n.params["item"];
+    if item["type"].as_str() != Some("commandExecution") {
+        return;
+    }
+    match n.method.as_str() {
+        "item/started" => {
+            let pid = item["processId"].as_str().and_then(|p| p.parse::<u32>().ok());
+            let command = item["command"].as_str().unwrap_or("");
+            let atomic = command.contains("git commit") || command.contains("git push") || command.contains("migrate");
+            *running = Some((pid, atomic));
+        }
+        "item/completed" => *running = None,
+        _ => {}
     }
 }
 
@@ -824,6 +914,7 @@ mod tests {
             agent_name: "eyes".into(),
             rendered: RenderedHook::new(Path::new("/h"), &std::env::current_exe().unwrap(), Path::new("/data")),
             cwd: Some("/tmp/repo".into()),
+            deadlines: InterruptDeadlines { plain: std::time::Duration::from_millis(400), atomic: std::time::Duration::from_millis(800), after_kill: std::time::Duration::from_millis(600) },
         };
         tokio::spawn(driver.run(incoming, event_tx, input_rx, control_rx));
         Harness { fake: Fake { lines: tokio::io::BufReader::new(s_read).lines(), writer: s_write }, events, input, control }
@@ -962,6 +1053,75 @@ mod tests {
         h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "blocked", "sourcePath": "/h/hooks.json"}}})).await;
         h.fake.write(json!({"method": "turn/started", "params": {}})).await;
         assert!(tokio::time::timeout(std::time::Duration::from_millis(300), h.fake.lines.next_line()).await.is_err(), "no interrupt for a block");
+    }
+
+    /// G2/P7: an interrupt is given a deadline. Codex answers `turn/interrupt`
+    /// at once but lets the running command finish (measured: `sleep 100`
+    /// lived 70 s past it), so a user message, a stray-turn stop or a halt
+    /// would wait out a `cargo build`. When no `turn/completed` arrives in
+    /// time the driver kills the running command's process tree (its
+    /// `processId`); when the turn still does not end, the driver ends and the
+    /// app-server is reaped — the next message resumes the thread.
+    #[tokio::test]
+    async fn an_unanswered_interrupt_kills_the_command_tree_then_the_server() {
+        let mut h = harness();
+        // A turn with a long command running: a real child so the kill has a tree to walk.
+        h.input.send(OutgoingUserMessage::text("build it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let mut sleeper = crate::process::command("sh").args(["-c", "sleep 300 & wait"]).spawn().unwrap();
+        let pid = sleeper.id();
+        h.fake.write(json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "exec-1", "command": "/bin/zsh -lc 'cargo build'", "processId": pid.to_string(), "status": "inProgress"}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
+        let req = h.fake.read().await;
+        assert_eq!(req["method"], "turn/interrupt");
+        h.fake.answer(&req, json!({})).await;
+        // Stage 1 (after the deadline): the command's tree is dead; the server lives.
+        // (`kill(pid, 0)` would still find the zombie: ask `try_wait` instead.)
+        let t0 = std::time::Instant::now();
+        loop {
+            if sleeper.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(5), "the command was not killed at the deadline");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(300), "not before the deadline");
+        // Stage 2 (still no completion): a notice, then the driver ends → the
+        // server is reaped and the event stream closes.
+        let mut saw_notice = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(6), h.events.recv()).await.unwrap() {
+                Some(AgentEvent::Notice(n)) if n.contains("reaped") => saw_notice = true,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(saw_notice, "the stage-2 notice was posted before the driver ended");
+    }
+
+    /// The deadline is cleared by a completion: an interrupt that ends the turn
+    /// in time kills nothing and the driver goes on.
+    #[tokio::test]
+    async fn an_interrupt_answered_by_a_completion_kills_nothing() {
+        let mut h = harness();
+        h.input.send(OutgoingUserMessage::text("quick")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        h.control.send(ControlRequest::interrupt("cancel")).await.unwrap();
+        let req = h.fake.read().await;
+        assert_eq!(req["method"], "turn/interrupt");
+        h.fake.answer(&req, json!({})).await;
+        h.fake.write(json!({"method": "turn/completed", "params": {"threadId": "thr", "turn": {"id": "t1", "status": "interrupted", "items": [], "error": null}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Still alive: a new page starts a turn.
+        h.input.send(OutgoingUserMessage::text("again")).await.unwrap();
+        h.fake.hooks_armed().await;
+        assert_eq!(h.fake.read().await["method"], "turn/start");
     }
 
     #[tokio::test]

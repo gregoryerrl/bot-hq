@@ -31,6 +31,59 @@ pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
     cmd
 }
 
+/// Every live descendant of `pid` (children, grandchildren, …), deepest
+/// first, from one `ps` listing. Empty when `ps` cannot be read or `pid` has
+/// no children. Unix only; Windows has no cheap tree walk here and its
+/// single-PID `kill_child` stands in (the job-object reaping follow-up).
+#[cfg(unix)]
+pub fn descendants(pid: u32) -> Vec<u32> {
+    let Ok(out) = command("ps").args(["-axo", "pid=,ppid="]).output() else {
+        return Vec::new();
+    };
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut words = line.split_whitespace();
+        if let (Some(p), Some(pp)) = (
+            words.next().and_then(|w| w.parse::<u32>().ok()),
+            words.next().and_then(|w| w.parse::<u32>().ok()),
+        ) {
+            children.entry(pp).or_default().push(p);
+        }
+    }
+    // Breadth-first, then reversed: a parent is listed after its children.
+    let mut order = Vec::new();
+    let mut frontier = vec![pid];
+    while let Some(next) = frontier.pop() {
+        if let Some(kids) = children.get(&next) {
+            for &kid in kids {
+                order.push(kid);
+                frontier.push(kid);
+            }
+        }
+    }
+    order.reverse();
+    order
+}
+
+/// SIGKILL `pid` and every descendant it has, children first — a running
+/// tool command's whole tree (`zsh -lc cargo build` → `cargo` → `rustc`),
+/// which killing the shell alone would orphan (EYES P7). Best-effort: a pid
+/// that is already gone is skipped. Unix only; see [`descendants`].
+#[cfg(unix)]
+pub fn kill_process_tree(pid: u32) {
+    for p in descendants(pid).into_iter().chain(std::iter::once(pid)) {
+        // SAFETY: kill(2) is thread-safe; a stale pid is refused by the kernel.
+        unsafe {
+            libc::kill(p as i32, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn kill_process_tree(pid: u32) {
+    crate::agents::spawn::kill_child(pid);
+}
+
 /// A `tokio::process::Command` for `program` that opens no console window.
 pub fn tokio_command(program: impl AsRef<OsStr>) -> tokio::process::Command {
     #[allow(unused_mut)]
@@ -58,6 +111,37 @@ mod tests {
         let out = tokio_command("git").arg("--version").output().await.expect("git runs");
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
+    }
+
+    /// The tree, not the leader: a shell with two sleeping children is listed
+    /// children-first and all three die on the kill (EYES P7).
+    #[cfg(unix)]
+    #[test]
+    fn the_process_tree_is_walked_and_killed_children_first() {
+        let mut shell = command("sh")
+            .args(["-c", "sleep 300 & sleep 300 & wait"])
+            .spawn()
+            .expect("sh runs");
+        let pid = shell.id();
+        // Give the shell a moment to fork its children.
+        let mut kids = Vec::new();
+        for _ in 0..50 {
+            kids = descendants(pid);
+            if kids.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(kids.len() >= 2, "two sleeping children expected, got {kids:?}");
+        kill_process_tree(pid);
+        let _ = shell.wait();
+        for _ in 0..50 {
+            if kids.iter().all(|k| unsafe { libc::kill(*k as i32, 0) } != 0) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("a child survived the tree kill: {kids:?}");
     }
 
     /// `Command` has no getter for its creation flags, so the flag itself can

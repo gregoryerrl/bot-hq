@@ -55,7 +55,7 @@ pub fn reap_all_children() {
 /// already gone, access denied) is skipped, matching the unix kill(2)
 /// semantics of ignoring the return value.
 #[cfg(unix)]
-fn kill_child(pid: u32) {
+pub(crate) fn kill_child(pid: u32) {
     // SAFETY: libc::kill is async-signal-safe + thread-safe; valid pids are
     // u32 from std/tokio's child.id() which fits in i32 for every realistic
     // process number on darwin/linux. We signal `-pid` — the process GROUP
@@ -74,7 +74,7 @@ fn kill_child(pid: u32) {
 /// has no kill-children-on-parent-exit semantics, so this walk is just
 /// as load-bearing here as the unix one (Ghost-Brian).
 #[cfg(windows)]
-fn kill_child(pid: u32) {
+pub(crate) fn kill_child(pid: u32) {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{
         OpenProcess, TerminateProcess, PROCESS_TERMINATE,
