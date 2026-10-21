@@ -72,6 +72,7 @@ try {
         --test phase_vote_wiring_test `
         --test policy_check_test `
         --test portable_home_test `
+        --test relaunch_script_test `
         --test retired_identifier_test `
         --test retired_symbol_prose_test `
         --test signaling_test `
