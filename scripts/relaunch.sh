@@ -108,4 +108,21 @@ fi
 log "running ./start --release (stop → frontend → release build → launch)"
 # `start` stays as the app's parent and forwards a termination; this process
 # is that parent now, detached, like a terminal that nobody closes.
-exec ./start --release
+if ./start --release; then
+  log "the app exited"
+  exit 0
+fi
+# A failed build must not leave the app down while nobody is watching: the
+# binary that ran before is still there (a failed compile does not remove it)
+# — launch it the way `start` does, and say so where the caller will look.
+BIN=target/release/bot-hq
+if pgrep -f 'target/(debug|release)/bot-hq$' >/dev/null; then
+  log "start failed after the app came up; leaving it running"
+  exit 1
+fi
+[[ -x "$BIN" ]] || { log "start failed and $BIN is missing — the app is DOWN"; exit 1; }
+log "start failed (build or launch, see above); launching the previous $BIN so the app is not left down"
+rm -f "$DATA_DIR/.local/lock"
+"$BIN" 2>&1 | tee -a "$DATA_DIR/.local/bot-hq.log"
+log "the previous binary exited"
+exit 1
