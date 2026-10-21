@@ -1,6 +1,7 @@
 //! Models registry + app settings (default model) commands. Backs the
 //! Settings → Models subtab and the session-create model pickers.
 
+use crate::agents::runtime::Runtime;
 use crate::storage::{Model, Storage};
 use crate::tauri_cmd::error::AppError;
 use serde::{Deserialize, Serialize};
@@ -40,8 +41,28 @@ pub struct ModelView {
     /// The Claude config dir (`CLAUDE_CONFIG_DIR`) a participant on this row is
     /// spawned with — which subscription it bills when the row has no gateway
     /// credential. `null`/blank = the CLI's default `~/.claude`. An absolute
-    /// path; one signed-in account per dir (0090).
+    /// path; one signed-in account per dir (0090). For a `codex` row this is
+    /// the Codex home (`CODEX_HOME`); `null`/blank = `~/.codex`.
     pub claude_config_dir: Option<String>,
+    /// The connector a participant on this row runs through: `claude_code`
+    /// (claude-code) or `codex` (OpenAI's Codex CLI), 0102. Save refuses any
+    /// other value; blank is stored as `claude_code`.
+    pub runtime: String,
+}
+
+/// The connector a dialog value names, or a validation error the dialog
+/// shows inline. Blank is claude-code (a row the dialog never touched); any
+/// value this build does not know is refused by name, so a typo cannot be
+/// stored and later read back as claude-code by the fail-safe column read.
+pub(crate) fn validate_runtime(raw: &str) -> Result<Runtime, AppError> {
+    if raw.is_empty() {
+        return Ok(Runtime::ClaudeCode);
+    }
+    Runtime::parse(raw).ok_or_else(|| {
+        AppError::Validation(format!(
+            "Unknown runtime {raw:?} — a model runs through claude_code or codex"
+        ))
+    })
 }
 
 /// The stored form of a model row's Claude config dir, or a validation error
@@ -56,35 +77,48 @@ pub struct ModelView {
 pub(crate) fn validate_config_dir(
     raw: Option<&str>,
     home: Option<&std::path::Path>,
+    runtime: Runtime,
 ) -> Result<Option<String>, AppError> {
     let Some(dir) = crate::storage::normalize_config_dir(raw) else {
         return Ok(None);
     };
+    // What the field is called and which CLI default it must not name: the
+    // Codex home is the same kind of slot (one signed-in account per
+    // `CODEX_HOME`), with `~/.codex` as the default the CLI uses unprompted.
+    let (field, default_leaf, example_leaf) = match runtime {
+        Runtime::ClaudeCode => ("Claude config dir", ".claude", ".claude-acct-2"),
+        Runtime::Codex => ("Codex home", ".codex", ".codex-bot-hq"),
+    };
     // The examples are this platform's: a Windows path needs its drive.
     let (home_example, dir_example) = if cfg!(windows) {
-        (r"C:\Users\<you>\…", r"C:\Users\<you>\.claude-acct-2")
+        (r"C:\Users\<you>\…".to_string(), format!(r"C:\Users\<you>\{example_leaf}"))
     } else {
-        ("/Users/<you>/…", "/Users/<you>/.claude-acct-2")
+        ("/Users/<you>/…".to_string(), format!("/Users/<you>/{example_leaf}"))
     };
     if dir.starts_with('~') {
         return Err(AppError::Validation(format!(
-            "Claude config dir must be an absolute path — the CLI does not expand `~`; \
+            "{field} must be an absolute path — the CLI does not expand `~`; \
              write {home_example} in full"
         )));
     }
     if !std::path::Path::new(&dir).is_absolute() {
         return Err(AppError::Validation(format!(
-            "Claude config dir must be an absolute path (e.g. {dir_example})"
+            "{field} must be an absolute path (e.g. {dir_example})"
         )));
     }
     if let Some(home) = home {
-        if std::path::Path::new(&dir) == home.join(".claude") {
-            return Err(AppError::Validation(
-                "That is the CLI's default dir — leave the field blank for it. Naming it \
-                 explicitly makes claude-code treat it as a separate account and ask for a \
-                 new login."
+        if std::path::Path::new(&dir) == home.join(default_leaf) {
+            return Err(AppError::Validation(match runtime {
+                Runtime::ClaudeCode => "That is the CLI's default dir — leave the field blank for it. \
+                     Naming it explicitly makes claude-code treat it as a separate account and ask \
+                     for a new login."
                     .into(),
-            ));
+                Runtime::Codex => format!(
+                    "That is Codex's default home (~/{default_leaf}) — bot-hq writes its hooks \
+                     into the Codex home it is given, so give it a home of its own \
+                     (e.g. {dir_example})"
+                ),
+            }));
         }
     }
     Ok(Some(dir))
@@ -122,6 +156,7 @@ impl From<Model> for ModelView {
             context_window: m.context_window,
             cli_settings: m.cli_settings,
             claude_config_dir: m.claude_config_dir,
+            runtime: m.runtime,
         }
     }
 }
@@ -140,6 +175,7 @@ impl From<ModelView> for Model {
             context_window: v.context_window,
             cli_settings: v.cli_settings,
             claude_config_dir: v.claude_config_dir,
+            runtime: v.runtime,
         }
     }
 }
@@ -164,9 +200,14 @@ pub async fn upsert_model(
     model: ModelView,
 ) -> Result<(), AppError> {
     let mut m: Model = model.into();
+    let runtime = validate_runtime(&m.runtime)?;
+    m.runtime = runtime.as_str().to_string();
     m.cli_settings = validate_cli_settings(m.cli_settings.take())?;
-    m.claude_config_dir =
-        validate_config_dir(m.claude_config_dir.as_deref(), crate::paths::home_dir().ok().as_deref())?;
+    m.claude_config_dir = validate_config_dir(
+        m.claude_config_dir.as_deref(),
+        crate::paths::home_dir().ok().as_deref(),
+        runtime,
+    )?;
     storage
         .upsert_model(&m)
         .await
@@ -184,22 +225,33 @@ pub async fn upsert_model(
 #[specta::specta]
 pub async fn account_setup_commands(
     dir: String,
+    runtime: String,
 ) -> Result<crate::agents::account_setup::AccountSetupCommands, AppError> {
     let home = crate::paths::home_dir()
         .map_err(|e| AppError::Internal(format!("can't find your home folder: {e:#}")))?;
-    account_setup_commands_for(&dir, &home)
+    account_setup_commands_for(&dir, &home, validate_runtime(&runtime)?)
 }
 
 fn account_setup_commands_for(
     dir: &str,
     home: &std::path::Path,
+    runtime: Runtime,
 ) -> Result<crate::agents::account_setup::AccountSetupCommands, AppError> {
-    use crate::agents::account_setup::{commands, Shell};
-    let Some(dir) = validate_config_dir(Some(dir), Some(home))? else {
-        return Err(AppError::Validation("Type the Claude config dir first".into()));
+    use crate::agents::account_setup::{codex_commands, commands, Shell};
+    let Some(dir) = validate_config_dir(Some(dir), Some(home), runtime)? else {
+        let field = match runtime {
+            Runtime::ClaudeCode => "Claude config dir",
+            Runtime::Codex => "Codex home",
+        };
+        return Err(AppError::Validation(format!("Type the {field} first")));
     };
-    let default_dir = home.join(".claude");
-    Ok(commands(Shell::host(), &dir, &default_dir.to_string_lossy()))
+    Ok(match runtime {
+        Runtime::ClaudeCode => {
+            let default_dir = home.join(".claude");
+            commands(Shell::host(), &dir, &default_dir.to_string_lossy())
+        }
+        Runtime::Codex => codex_commands(Shell::host(), &dir),
+    })
 }
 
 #[tauri::command]
@@ -293,9 +345,88 @@ mod tests {
             context_window: Some(200_000),
             cli_settings: None,
             claude_config_dir: None,
+            runtime: "claude_code".into(),
         };
         let back: ModelView = Model::from(view.clone()).into();
         assert_eq!(back, view);
+    }
+
+    /// 0102: Save accepts the two connectors by their column value and refuses
+    /// anything else by name — a typo must not be stored and then read back as
+    /// claude-code by the fail-safe column read.
+    #[test]
+    fn save_accepts_the_two_runtimes_and_refuses_the_rest() {
+        use crate::agents::runtime::Runtime;
+        assert_eq!(validate_runtime("claude_code").unwrap(), Runtime::ClaudeCode);
+        assert_eq!(validate_runtime("codex").unwrap(), Runtime::Codex);
+        // Blank is a row the dialog never touched: claude-code, as before 0102.
+        assert_eq!(validate_runtime("").unwrap(), Runtime::ClaudeCode);
+        match validate_runtime("gemini") {
+            Err(AppError::Validation(msg)) => assert!(msg.contains("gemini"), "{msg}"),
+            other => panic!("must be refused, got {other:?}"),
+        }
+    }
+
+    /// The Codex home follows the same rules as the Claude config dir — absolute,
+    /// no `~`, never the CLI's own default spelled out — but the default it
+    /// refuses is `~/.codex`, and the wording names the Codex home, not Claude.
+    #[test]
+    fn validate_config_dir_knows_the_codex_default_home() {
+        use crate::agents::runtime::Runtime;
+        let home = if cfg!(windows) {
+            std::path::Path::new(r"C:\Users\me")
+        } else {
+            std::path::Path::new("/Users/me")
+        };
+        let codex_default = home.join(".codex");
+        let codex_default = codex_default.to_str().unwrap();
+        let managed = home.join(".codex-bot-hq");
+        let managed = managed.to_str().unwrap();
+        let refusal = |dir: &str, rt: Runtime| match validate_config_dir(Some(dir), Some(home), rt) {
+            Err(AppError::Validation(msg)) => msg,
+            other => panic!("{dir:?} must be refused, got {other:?}"),
+        };
+        assert_eq!(
+            validate_config_dir(Some(managed), Some(home), Runtime::Codex).unwrap().as_deref(),
+            Some(managed)
+        );
+        let msg = refusal(codex_default, Runtime::Codex);
+        assert!(msg.contains("default"), "{msg}");
+        assert!(msg.contains("Codex"), "names the Codex home: {msg}");
+        assert!(!msg.contains("Claude"), "must not talk about Claude: {msg}");
+        let msg = refusal("~/.codex-bot-hq", Runtime::Codex);
+        assert!(msg.contains("Codex home"), "{msg}");
+        // The Claude default is NOT the Codex default, and vice versa.
+        let claude_default = home.join(".claude");
+        assert!(validate_config_dir(Some(claude_default.to_str().unwrap()), Some(home), Runtime::Codex).is_ok());
+        assert!(validate_config_dir(Some(codex_default), Some(home), Runtime::ClaudeCode).is_ok());
+    }
+
+    /// A Codex row's dialog command signs the account in to its home with
+    /// `CODEX_HOME`, and shares nothing: a bot-hq-managed home carries no user
+    /// config to link, and the hooks bot-hq writes there are its own.
+    #[test]
+    fn account_setup_commands_for_a_codex_row_sign_in_with_codex_home() {
+        use crate::agents::account_setup::Shell;
+        use crate::agents::runtime::Runtime;
+        let home = if cfg!(windows) {
+            std::path::Path::new(r"C:\Users\me")
+        } else {
+            std::path::Path::new("/Users/me")
+        };
+        let managed = home.join(".codex-bot-hq");
+        let ok = account_setup_commands_for(managed.to_str().unwrap(), home, Runtime::Codex).unwrap();
+        assert_eq!(ok.shell, Shell::host());
+        let quoted = crate::agents::account_setup::quote(ok.shell, managed.to_str().unwrap());
+        assert!(ok.setup.contains("CODEX_HOME"), "{}", ok.setup);
+        assert!(ok.setup.contains("codex login"), "{}", ok.setup);
+        assert!(ok.setup.contains(&quoted), "{}", ok.setup);
+        assert!(!ok.setup.contains("claude"), "{}", ok.setup);
+        assert_eq!(ok.share, "", "nothing to share into a managed Codex home");
+        match account_setup_commands_for(home.join(".codex").to_str().unwrap(), home, Runtime::Codex) {
+            Err(AppError::Validation(msg)) => assert!(msg.contains("default"), "{msg}"),
+            other => panic!("the default home must be refused, got {other:?}"),
+        }
     }
 
     /// 0090: the dialog's config dir is an absolute path or nothing. `~` is
@@ -313,6 +444,7 @@ mod tests {
     /// Windows.
     #[test]
     fn validate_config_dir_accepts_absolute_paths_only() {
+        use crate::agents::runtime::Runtime;
         let home = if cfg!(windows) {
             std::path::Path::new(r"C:\Users\me")
         } else {
@@ -322,15 +454,15 @@ mod tests {
         let acct2 = acct2.to_str().unwrap();
         let default_dir = home.join(".claude");
         let default_dir = default_dir.to_str().unwrap();
-        let refusal = |dir: &str, home: Option<&std::path::Path>| match validate_config_dir(Some(dir), home) {
+        let refusal = |dir: &str, home: Option<&std::path::Path>| match validate_config_dir(Some(dir), home, Runtime::ClaudeCode) {
             Err(AppError::Validation(msg)) => msg,
             other => panic!("{dir:?} must be refused, got {other:?}"),
         };
 
-        assert_eq!(validate_config_dir(None, Some(home)).unwrap(), None);
-        assert_eq!(validate_config_dir(Some("  "), Some(home)).unwrap(), None);
+        assert_eq!(validate_config_dir(None, Some(home), Runtime::ClaudeCode).unwrap(), None);
+        assert_eq!(validate_config_dir(Some("  "), Some(home), Runtime::ClaudeCode).unwrap(), None);
         assert_eq!(
-            validate_config_dir(Some(&format!("{acct2}/")), Some(home))
+            validate_config_dir(Some(&format!("{acct2}/")), Some(home), Runtime::ClaudeCode)
                 .unwrap()
                 .as_deref(),
             Some(acct2)
@@ -351,7 +483,7 @@ mod tests {
         }
         // Without a known home the default-dir check cannot run; the absolute
         // rule still does.
-        assert!(validate_config_dir(Some(default_dir), None).is_ok());
+        assert!(validate_config_dir(Some(default_dir), None, Runtime::ClaudeCode).is_ok());
         assert!(refusal("relative", None).contains("must be an absolute path"));
     }
 
@@ -367,7 +499,8 @@ mod tests {
         } else {
             std::path::Path::new("/Users/me")
         };
-        let refused = |dir: &str| match account_setup_commands_for(dir, home) {
+        use crate::agents::runtime::Runtime;
+        let refused = |dir: &str| match account_setup_commands_for(dir, home, Runtime::ClaudeCode) {
             Err(AppError::Validation(msg)) => msg,
             other => panic!("{dir:?} must be refused, got {other:?}"),
         };
@@ -376,7 +509,7 @@ mod tests {
         assert!(refused("  ").contains("Type the Claude config dir first"));
 
         let acct2 = home.join(".claude-acct-2");
-        let ok = account_setup_commands_for(&format!("{}/", acct2.display()), home).unwrap();
+        let ok = account_setup_commands_for(&format!("{}/", acct2.display()), home, Runtime::ClaudeCode).unwrap();
         assert_eq!(ok.shell, Shell::host());
         let quoted = crate::agents::account_setup::quote(ok.shell, acct2.to_str().unwrap());
         assert!(ok.setup.contains(&quoted), "the trailing slash is stripped: {}", ok.setup);

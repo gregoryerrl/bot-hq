@@ -2188,6 +2188,7 @@ mod tests {
                 context_window: None,
                 cli_settings: None,
                 claude_config_dir: None,
+                runtime: String::new(),
             },
             system_prompt_path: Path::new("/tmp/bot-hq-test-prompt.txt").to_path_buf(),
             mcp_config_path: Some(Path::new("/tmp/mcp.json").to_path_buf()),

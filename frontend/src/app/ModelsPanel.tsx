@@ -136,13 +136,22 @@ export function ModelsPanel() {
           </div>
           <div className="divide-y divide-outline-variant/40">
             {models.map((m) => (
-              <div key={m.id}>
+              <div key={m.id} data-testid="model-row">
                 <div className={cn(rowGridClass, "py-2.5")}>
                   <span className="truncate font-body-md text-body-md text-on-surface">
                     {m.display_name || "Untitled model"}
                   </span>
-                  <span className="truncate font-code-sm text-code-sm text-on-surface-variant">
-                    {m.provider || "—"}
+                  <span className="flex min-w-0 items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant">
+                    <span className="truncate">{m.provider || "—"}</span>
+                    {m.runtime === "codex" && (
+                      <span
+                        data-testid="model-runtime"
+                        className="shrink-0 rounded border border-outline-variant px-1 font-label-caps text-label-caps text-on-surface-variant"
+                        title="Spawned through the Codex CLI (codex app-server)"
+                      >
+                        codex
+                      </span>
+                    )}
                   </span>
                   <span
                     className="flex min-w-0 items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant"
@@ -153,7 +162,7 @@ export function ModelsPanel() {
                       <span
                         data-testid="model-account"
                         className="shrink-0 rounded border border-outline-variant px-1 font-label-caps text-label-caps text-on-surface-variant"
-                        title={`Claude config dir: ${m.claude_config_dir}`}
+                        title={`${accountDirLabel(m.runtime)}: ${m.claude_config_dir}`}
                       >
                         {accountLabelOf(m)}
                       </span>
@@ -321,7 +330,15 @@ function emptyDraft(): ModelView {
     context_window: null,
     cli_settings: null,
     claude_config_dir: null,
+    runtime: "claude_code",
   };
+}
+
+/** What the account-dir field is called per connector: the column is one
+ *  (`claude_config_dir`), the slot it names is the CLI's — `CLAUDE_CONFIG_DIR`
+ *  for claude-code, `CODEX_HOME` for Codex. */
+function accountDirLabel(runtime: string): string {
+  return runtime === "codex" ? "Codex home" : "Claude config dir";
 }
 
 // The account and limit-mark rules live in `lib/accounts` (shared with the
@@ -368,9 +385,10 @@ function ModelDialog({
   // cleared field or a token typed since.
   const setupDir = (draft.claude_config_dir ?? "").trim();
   const wantsSetup = setupDir.length > 0 && !draft.auth_token && !draft.base_url;
+  const codex = draft.runtime === "codex";
   const setup = useTauriQuery<AccountSetupCommands>(
     "account_setup_commands",
-    { dir: setupDir },
+    { dir: setupDir, runtime: draft.runtime },
     { enabled: wantsSetup, placeholderData: keepPreviousData, retry: false },
   );
   const powershell = setup.data?.shell === "powershell";
@@ -479,6 +497,23 @@ function ModelDialog({
           </label>
 
           <label className="block">
+            <FieldLabel>Runtime</FieldLabel>
+            <select
+              value={draft.runtime}
+              onChange={(e) => setDraft({ ...draft, runtime: e.target.value })}
+              className={fieldClass}
+            >
+              <option value="claude_code">Claude Code (claude CLI)</option>
+              <option value="codex">Codex (OpenAI Codex CLI)</option>
+            </select>
+            <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+              Which agent CLI a participant on this model runs through. A session
+              mixes them freely — pick this row for one role and a Claude row for
+              another.
+            </span>
+          </label>
+
+          <label className="block">
             <FieldLabel>Model id</FieldLabel>
             <input
               type="text"
@@ -486,7 +521,7 @@ function ModelDialog({
               onChange={(e) =>
                 setDraft({ ...draft, model_name: e.target.value })
               }
-              placeholder="claude-opus-5"
+              placeholder={codex ? "gpt-6-astra" : "claude-opus-5"}
               className={fieldClass}
             />
           </label>
@@ -560,36 +595,59 @@ function ModelDialog({
               used to make still has a consequence the user has to be able to
               see, which is what this says. Test lives on the saved row:
               `validate_model` checks a stored row, never this draft. */}
-          <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-muted">
-            Every saved model is spawned through the <strong>claude CLI</strong>,
-            so its endpoint has to speak the Anthropic Messages API. A gateway
-            that does not will fail at spawn — save it, then press{" "}
-            <strong>Test</strong> on its row to find out now instead of
-            mid-session.
-          </p>
+          {codex ? (
+            <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-muted">
+              This model is spawned through the <strong>Codex CLI</strong>{" "}
+              (<code>codex app-server</code>) and bills the ChatGPT account signed
+              in to its Codex home. The base URL and auth token are not used;
+              the model id is one the account can run (<code>gpt-6-astra</code>,{" "}
+              <code>gpt-6.1-sol</code>). Save it, then press <strong>Test</strong>{" "}
+              on its row to confirm the sign-in and the model.
+            </p>
+          ) : (
+            <p className="break-words rounded border border-outline-variant/60 bg-surface-container-lowest p-2 font-body-md text-body-md text-muted">
+              Every saved model is spawned through the <strong>claude CLI</strong>,
+              so its endpoint has to speak the Anthropic Messages API. A gateway
+              that does not will fail at spawn — save it, then press{" "}
+              <strong>Test</strong> on its row to find out now instead of
+              mid-session.
+            </p>
+          )}
         </div>
 
         <div className="min-h-0 min-w-0 space-y-4 overflow-x-hidden md:flex-1 md:overflow-y-auto md:pr-1">
           <label className="block">
-            <FieldLabel>Claude config dir (second account)</FieldLabel>
+            <FieldLabel>{codex ? "Codex home" : "Claude config dir (second account)"}</FieldLabel>
             <input
               type="text"
               value={draft.claude_config_dir ?? ""}
               onChange={(e) =>
                 setDraft({ ...draft, claude_config_dir: e.target.value || null })
               }
-              placeholder="(blank = the default ~/.claude)"
+              placeholder={codex ? "/Users/<you>/.codex-bot-hq" : "(blank = the default ~/.claude)"}
               spellCheck={false}
               className={fieldClass}
             />
-            <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
-              Which Claude subscription a participant on this model bills. Leave
-              it blank for the account signed in to <code>~/.claude</code>. To run
-              a second subscription beside it, give it its own absolute path (one
-              signed-in account per dir); a participant is spawned into that dir
-              and stays there for its whole life. Ignored for a gateway model —
-              its token bills the gateway.
-            </span>
+            {codex ? (
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+                The <code>CODEX_HOME</code> a participant on this model is spawned
+                with — the ChatGPT account signed in there is the one it bills.
+                Give bot-hq a home of its own (an absolute path, not{" "}
+                <code>~/.codex</code>): bot-hq writes the hooks that enforce the
+                Tool Gate into it, and its threads live there. One signed-in
+                account per home; a participant stays in its home for its whole
+                life.
+              </span>
+            ) : (
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+                Which Claude subscription a participant on this model bills. Leave
+                it blank for the account signed in to <code>~/.claude</code>. To run
+                a second subscription beside it, give it its own absolute path (one
+                signed-in account per dir); a participant is spawned into that dir
+                and stays there for its whole life. Ignored for a gateway model —
+                its token bills the gateway.
+              </span>
+            )}
           </label>
 
           {wantsSetup && setup.isError && (
@@ -604,8 +662,9 @@ function ModelDialog({
             <div className="rounded border border-outline-variant/60 bg-surface-container-lowest p-2">
               <p className="mb-1 break-words font-body-md text-body-md text-muted">
                 One-time setup, in {powershell ? "PowerShell" : "your own terminal"} —
-                sign the second account in to this dir (bot-hq never runs it), then
-                press <strong>Test</strong> on the saved row to confirm:
+                sign the {codex ? "ChatGPT" : "second"} account in to this{" "}
+                {codex ? "home" : "dir"} (bot-hq never runs it), then press{" "}
+                <strong>Test</strong> on the saved row to confirm:
               </p>
               <pre
                 data-testid="account-setup-command"
@@ -613,6 +672,8 @@ function ModelDialog({
               >
                 {setup.data.setup}
               </pre>
+              {setup.data.share && (
+              <>
               <p className="mb-1 mt-2 break-words font-body-md text-body-md text-muted">
                 Optional: share the default dir&apos;s CLAUDE.md, settings
                 (plugins, model overrides), skills and commands with it. Session
@@ -632,9 +693,12 @@ function ModelDialog({
               >
                 {setup.data.share}
               </pre>
+              </>
+              )}
             </div>
           )}
 
+          {!codex && (
           <label className="block">
             <FieldLabel>Claude CLI settings (JSON)</FieldLabel>
             <textarea
@@ -661,6 +725,7 @@ function ModelDialog({
               role&apos;s own Claude-config override wins on any key both set.
             </span>
           </label>
+          )}
         </div>
       </div>
     </Dialog>

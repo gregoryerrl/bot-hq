@@ -6823,6 +6823,11 @@ mod tests {
                 "account_dir_at_spawn",
                 "account_email_at_spawn",
                 "account_org_at_spawn",
+                // Migration 0102 — the connector's own version string, written
+                // at SPAWN like the 0090 trio; both roster paths leave it at the
+                // column default (''), because a roster carries no connector
+                // version until something has run.
+                "runtime_version_at_spawn",
             ],
             "session_participants grew a column; roster parity has to cover it"
         );

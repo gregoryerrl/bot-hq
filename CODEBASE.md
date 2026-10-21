@@ -69,15 +69,17 @@ table is §14.
 per session participant: argv/env/`--settings` assembly, stream-json stdout →
 `AgentEvent`, stdin writes, retry supervision, the capability model, and the
 hardcoded prompt layers (general rules, role prose, capability prose). Since rc3
-D9 the claude CLI is the only connector; everything past `AgentHandle` is
-runtime-agnostic. `llm_proxy` is LIVE (not D9 debt): it normalises claude-code's
+D9 the claude CLI was the only connector; the Codex connector (2026-10-21,
+the D9 amendment the user ratified) is chosen per model row by `Runtime`, and
+everything past `AgentHandle` is runtime-agnostic. `llm_proxy` is LIVE (not D9 debt): it normalises claude-code's
 request body for non-Anthropic gateways when a model has a `base_url`.
 
 | path | role | size |
 |---|---|---|
 | `src/agents/mod.rs` | re-export hub | S |
 | `src/agents/spawn.rs` | `SpawnConfig`/`AgentHandle`/`AgentEvent`; `build_command` (argv/env/settings, permission posture by capability); `spawn_supervised_agent` retry supervisor; `ParticipantInput::{deliver,deliver_batch}` (receipt-gated stdin); child reaping (`CHILD_PIDS`) | XL |
-| `src/agents/account_setup.rs` | the second account's terminal commands — sign-in (spawn refusal + Model dialog) and the optional config share — in the host's shell (`Shell::host()`: sh, or Windows PowerShell 5.1); pure generators + tests that RUN them (unix in `sh`, Windows in `powershell.exe`) | M |
+| `src/agents/account_setup.rs` | the second account's terminal commands — sign-in (spawn refusal + Model dialog) and the optional config share — in the host's shell (`Shell::host()`: sh, or Windows PowerShell 5.1); pure generators + tests that RUN them (unix in `sh`, Windows in `powershell.exe`); `codex_commands`/`codex_login_command` for a Codex row's home (`CODEX_HOME=… codex login`, no share step) | M |
+| `src/agents/runtime.rs` | `Runtime` — the CONNECTOR a model row spawns through (`claude_code` \| `codex`, column value of `models.runtime`, 0102); `parse` refuses the unknown (Save), `from_column` reads it as claude-code (a pre-0102 row) | S |
 | `src/agents/events.rs` | stdout/stderr pumps; `translate` stream-json → `AgentEvent`; context-window arithmetic (`parse_context_usage`) | L |
 | `src/agents/protocol.rs` | stream-json wire types both directions | M |
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |

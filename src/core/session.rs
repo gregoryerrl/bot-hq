@@ -2500,6 +2500,7 @@ fn default_agent_config(name: &str) -> AgentConfig {
         context_window: None,
         cli_settings: None,
         claude_config_dir: None,
+        runtime: crate::agents::runtime::Runtime::ClaudeCode.as_str().into(),
     }
 }
 
@@ -2988,6 +2989,7 @@ pub(crate) async fn resolve_spawn_config(
                 context_window: m.context_window,
                 cli_settings: m.cli_settings,
                 claude_config_dir: m.claude_config_dir,
+                runtime: m.runtime,
             };
         }
         tracing::warn!(
@@ -3029,6 +3031,7 @@ pub(crate) async fn resolve_spawn_config(
             context_window: m.context_window,
             cli_settings: m.cli_settings,
             claude_config_dir: m.claude_config_dir,
+            runtime: m.runtime,
         };
     }
     default_agent_config(agent_name)
@@ -3127,6 +3130,46 @@ mod tests {
         sqlx::query("DELETE FROM models").execute(s.pool()).await.unwrap();
         let cfg = super::resolve_spawn_config(&s, "agent", None).await;
         assert_eq!(cfg.model_name, "claude-opus-5");
+    }
+
+    /// 0102: the connector rides the model row through every tier of
+    /// `resolve_spawn_config` — the picked row, the `agent_configs` fallback
+    /// (whose table has no such column and therefore means claude-code), and
+    /// the registry default. A Codex row that lost its runtime on the way to
+    /// `SpawnConfig` would be spawned through `claude -p` on a GPT model id.
+    #[tokio::test]
+    async fn the_spawn_config_carries_the_model_rows_runtime() {
+        use crate::agents::runtime::Runtime;
+        let s = crate::storage::Storage::memory_bare().await.unwrap();
+        let mut astra = crate::storage::Model {
+            id: "astra".into(),
+            display_name: "Astra".into(),
+            provider: "openai".into(),
+            model_name: "gpt-6-astra".into(),
+            base_url: None,
+            auth_token: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            context_window: None,
+            cli_settings: None,
+            claude_config_dir: Some("/Users/me/.codex-bot-hq".into()),
+            runtime: "codex".into(),
+        };
+        s.upsert_model(&astra).await.unwrap();
+        let cfg = super::resolve_spawn_config(&s, "agent", Some("astra")).await;
+        assert_eq!(cfg.runtime(), Runtime::Codex);
+        assert_eq!(cfg.claude_config_dir.as_deref(), Some("/Users/me/.codex-bot-hq"));
+
+        astra.runtime = "claude_code".into();
+        s.upsert_model(&astra).await.unwrap();
+        assert_eq!(
+            super::resolve_spawn_config(&s, "agent", Some("astra")).await.runtime(),
+            Runtime::ClaudeCode
+        );
+        // The seeded default and the compiled constant are claude-code.
+        assert_eq!(super::resolve_spawn_config(&s, "agent", None).await.runtime(), Runtime::ClaudeCode);
+        sqlx::query("DELETE FROM models").execute(s.pool()).await.unwrap();
+        assert_eq!(super::resolve_spawn_config(&s, "agent", None).await.runtime(), Runtime::ClaudeCode);
     }
 
     /// **The restore stays mounted.** The third wire round 5 added, guarded the
@@ -3784,6 +3827,7 @@ mod tests {
             context_window: None,
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         };
         cfg.model_name = "kimi-k3".into();
         cfg.base_url = Some("https://gw.example/anthropic".into());
@@ -4392,6 +4436,7 @@ mod tests {
             context_window: None,
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         };
         cfg.model_name = "from-the-agent-row".into();
         cfg.auth_token = Some("agent-row-token".into());
@@ -4409,6 +4454,7 @@ mod tests {
             context_window: None,
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         })
         .await
         .unwrap();
@@ -4437,6 +4483,7 @@ mod tests {
             context_window: Some(1_000_000),
             cli_settings: Some(FABLE_CLI.into()),
             claude_config_dir: None,
+            runtime: String::new(),
         }
     }
 
@@ -4913,6 +4960,7 @@ mod tests {
             context_window: None,
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         })
         .await
         .unwrap();
@@ -4933,6 +4981,7 @@ mod tests {
             context_window: None,
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         })
         .await
         .unwrap();

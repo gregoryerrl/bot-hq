@@ -7,6 +7,22 @@ and in `docs/rebuild-archive/`.
 
 ## [Unreleased]
 
+A second connector is on its way in: OpenAI's Codex CLI beside claude-code,
+chosen per saved model, so one session can run a Claude model and a GPT
+model side by side. Migration 0102 applies on first launch.
+
+### Added
+
+- **A saved model names the CLI it runs through.** The Model dialog has a
+  **Runtime** field — Claude Code (the claude CLI, as before) or Codex
+  (OpenAI's Codex CLI). For a Codex row the account field is its **Codex
+  home** (the `CODEX_HOME` whose ChatGPT sign-in it bills; give bot-hq a
+  home of its own, never `~/.codex`), the dialog shows the one-time
+  `codex login` command for it, and the Claude CLI settings field is
+  hidden. The list marks Codex rows. The New Session dialog's account
+  quick-select stays a Claude-account swap and leaves Codex rows where you
+  put them. Spawning through Codex lands in the next entries.
+
 ## [1.0.10] — 2026-10-19
 
 One look across the app: the chat reads as a conversation, the session header

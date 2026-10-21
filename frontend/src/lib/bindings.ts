@@ -509,9 +509,9 @@ async upsertModel(model: ModelView) : Promise<Result<null, AppError>> {
  * Save's refusal, never a command that signs the account in somewhere else
  * before Save is pressed (a quoted `~` is a literal folder name).
  */
-async accountSetupCommands(dir: string) : Promise<Result<AccountSetupCommands, AppError>> {
+async accountSetupCommands(dir: string, runtime: string) : Promise<Result<AccountSetupCommands, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("account_setup_commands", { dir }) };
+    return { status: "ok", data: await TAURI_INVOKE("account_setup_commands", { dir, runtime }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2036,9 +2036,16 @@ cli_settings: string | null;
  * The Claude config dir (`CLAUDE_CONFIG_DIR`) a participant on this row is
  * spawned with — which subscription it bills when the row has no gateway
  * credential. `null`/blank = the CLI's default `~/.claude`. An absolute
- * path; one signed-in account per dir (0090).
+ * path; one signed-in account per dir (0090). For a `codex` row this is
+ * the Codex home (`CODEX_HOME`); `null`/blank = `~/.codex`.
  */
-claude_config_dir: string | null }
+claude_config_dir: string | null; 
+/**
+ * The connector a participant on this row runs through: `claude_code`
+ * (claude-code) or `codex` (OpenAI's Codex CLI), 0102. Save refuses any
+ * other value; blank is stored as `claude_code`.
+ */
+runtime: string }
 /**
  * One open session's halt, for the cross-session surfaces — the dashboard
  * cards and the header bell (the user, 2026-09-25: a halted session showed

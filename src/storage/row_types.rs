@@ -163,6 +163,13 @@ pub struct AgentConfig {
     #[serde(default)]
     #[sqlx(default)]
     pub claude_config_dir: Option<String>,
+    /// The connector, copied from the chosen [`Model`] (`claude_code` |
+    /// `codex`, 0102). `agent_configs` has no such column, so a row from that
+    /// tier carries `""`, which [`AgentConfig::runtime`] reads as claude-code —
+    /// the only connector that tier has ever spawned.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub runtime: String,
 }
 
 /// A saved model in the user-managed registry (`models` table). Bundles the
@@ -205,6 +212,29 @@ pub struct Model {
     #[serde(default)]
     #[sqlx(default)]
     pub claude_config_dir: Option<String>,
+    /// The connector a participant on this row runs through — a
+    /// `agents::runtime::Runtime` column value (`claude_code` | `codex`),
+    /// `NOT NULL DEFAULT 'claude_code'` since 0102. Kept as the raw string
+    /// here (the row is the wire shape); `Model::runtime()` parses it, with
+    /// blank or unknown reading as claude-code. For a `codex` row
+    /// `claude_config_dir` is the Codex home (`CODEX_HOME`).
+    #[serde(default)]
+    #[sqlx(default)]
+    pub runtime: String,
+}
+
+impl Model {
+    /// The connector this row spawns through (blank / unknown = claude-code).
+    pub fn runtime(&self) -> crate::agents::runtime::Runtime {
+        crate::agents::runtime::Runtime::from_column(&self.runtime)
+    }
+}
+
+impl AgentConfig {
+    /// The connector this config spawns through (blank / unknown = claude-code).
+    pub fn runtime(&self) -> crate::agents::runtime::Runtime {
+        crate::agents::runtime::Runtime::from_column(&self.runtime)
+    }
 }
 
 /// Surface type of a question parked for the user.

@@ -9,7 +9,7 @@ use super::*;
 /// upsert now leaves it at the column default. Dropping it needs a migration
 /// this phase does not write.
 const MODEL_COLUMNS: &str = "id, display_name, provider, model_name, base_url, auth_token, \
-     created_at, updated_at, context_window, cli_settings, claude_config_dir";
+     created_at, updated_at, context_window, cli_settings, claude_config_dir, runtime";
 
 /// Key in `app_settings`: "0" = repo-backed sessions run directly in the repo
 /// by default instead of an isolated git worktree. Resolved via
@@ -81,8 +81,8 @@ impl Storage {
         sqlx::query(
             "INSERT INTO models \
                 (id, display_name, provider, model_name, base_url, auth_token, created_at, updated_at, \
-                 context_window, cli_settings, claude_config_dir) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 context_window, cli_settings, claude_config_dir, runtime) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
                 display_name = excluded.display_name, \
                 provider = excluded.provider, \
@@ -92,7 +92,8 @@ impl Storage {
                 updated_at = excluded.updated_at, \
                 context_window = excluded.context_window, \
                 cli_settings = excluded.cli_settings, \
-                claude_config_dir = excluded.claude_config_dir",
+                claude_config_dir = excluded.claude_config_dir, \
+                runtime = excluded.runtime",
         )
         .bind(&m.id)
         .bind(&m.display_name)
@@ -105,6 +106,10 @@ impl Storage {
         .bind(m.context_window)
         .bind(&m.cli_settings)
         .bind(normalize_config_dir(m.claude_config_dir.as_deref()))
+        // Stored as the connector's column value: a blank (a caller that never
+        // set it) is the pre-0102 meaning, claude-code, written out in full so
+        // the column never holds an empty string.
+        .bind(m.runtime().as_str())
         .execute(&self.pool)
         .await
         .with_context(|| format!("upserting model {}", m.id))?;
@@ -243,6 +248,7 @@ mod tests {
             context_window: None,
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         }
     }
 
@@ -375,6 +381,36 @@ mod tests {
             None,
             "blank is the default dir, stored as NULL"
         );
+    }
+
+    /// 0102: the connector a row spawns through round-trips through upsert →
+    /// get / list and the `SELECT *` path, and a row written by a build that
+    /// knew no such column reads as claude-code — the only connector it could
+    /// have run (the column default).
+    #[tokio::test]
+    async fn runtime_roundtrips_and_a_pre_0102_row_reads_as_claude_code() {
+        let s = Storage::memory().await.unwrap();
+        let mut m = model("m1", "Astra");
+        m.provider = "openai".into();
+        m.model_name = "gpt-6-astra".into();
+        m.runtime = "codex".into();
+        s.upsert_model(&m).await.unwrap();
+        assert_eq!(s.get_model("m1").await.unwrap().unwrap().runtime, "codex");
+        let listed = s.list_models().await.unwrap();
+        assert_eq!(listed.iter().find(|x| x.id == "m1").unwrap().runtime, "codex");
+        let star = sqlx::query_as::<_, Model>("SELECT * FROM models WHERE id = 'm1'")
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
+        assert_eq!(star.runtime, "codex");
+
+        // The seeded rows predate the column: they carry the default.
+        let seeded = listed.iter().find(|x| x.id != "m1").expect("0016/0073 seed rows");
+        assert_eq!(seeded.runtime, "claude_code");
+        // And an edit that goes back to claude-code is stored, not ignored.
+        m.runtime = "claude_code".into();
+        s.upsert_model(&m).await.unwrap();
+        assert_eq!(s.get_model("m1").await.unwrap().unwrap().runtime, "claude_code");
     }
 
     #[test]

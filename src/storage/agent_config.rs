@@ -87,6 +87,7 @@ mod tests {
             context_window: Some(200_000),
             cli_settings: None,
             claude_config_dir: None,
+            runtime: crate::agents::runtime::Runtime::ClaudeCode.as_str().into(),
         };
         storage.upsert_agent_config(&cfg).await.unwrap();
 
@@ -140,6 +141,7 @@ mod tests {
                 context_window: None,
                 cli_settings: None,
                 claude_config_dir: None,
+                runtime: String::new(),
             };
             storage.upsert_agent_config(&cfg).await.unwrap_or_else(|e| {
                 panic!("`{slug}` was refused ({e}) — the legacy CHECK is back, and \

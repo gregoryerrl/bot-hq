@@ -12,6 +12,7 @@ pub mod handoff;
 pub mod input;
 pub mod llm_proxy;
 pub mod prompts;
+pub mod runtime;
 pub mod protocol;
 pub mod spawn;
 

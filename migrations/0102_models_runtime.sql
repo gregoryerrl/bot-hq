@@ -1,0 +1,25 @@
+-- 0102: a saved model names the CONNECTOR a participant on it runs through,
+-- and a participant records the connector's version at spawn.
+--
+-- `models.runtime` is `claude_code` (claude-code, `claude -p`, the only
+-- connector since rc3 D9) or `codex` (OpenAI's Codex CLI, `codex app-server`,
+-- added 2026-10-21 with the user's ratification of the D9 amendment). The
+-- choice rides the model row, like the account dir (0090): a session mixes
+-- `claude-fable-5-1` and `gpt-6-astra` by picking rows per role, with no new
+-- picker. For a Codex row `claude_config_dir` holds the Codex home
+-- (`CODEX_HOME`); the column keeps its name.
+--
+-- `session_participants.runtime` already exists (0044, DEFAULT 'claude_code')
+-- and was never read; from here it is written from the model row at the
+-- participant's first spawn and PINNED like `account_dir_at_spawn` — the
+-- stored `claude_session_id` is a claude-code session id or a Codex thread
+-- id, and must never be handed to the other connector on a resume.
+-- `runtime_version_at_spawn` is the connector's own version string as it
+-- reported it (`initialize.userAgent` for Codex), kept because the Codex
+-- app-server protocol is labelled experimental and a wire change between
+-- versions should be readable against the version a participant ran.
+--
+-- Every existing row is claude-code: the column defaults say so, and no
+-- backfill is needed.
+ALTER TABLE models ADD COLUMN runtime TEXT NOT NULL DEFAULT 'claude_code';
+ALTER TABLE session_participants ADD COLUMN runtime_version_at_spawn TEXT NOT NULL DEFAULT '';

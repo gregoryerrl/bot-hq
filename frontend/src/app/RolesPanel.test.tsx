@@ -52,6 +52,7 @@ const MODELS: ModelView[] = [
     context_window: null,
     cli_settings: null,
     claude_config_dir: null,
+  runtime: "claude_code",
   },
 ];
 

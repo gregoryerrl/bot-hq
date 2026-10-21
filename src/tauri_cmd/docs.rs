@@ -659,6 +659,7 @@ rename to new";
             context_window: Some(1_000_000),
             cli_settings: None,
             claude_config_dir: None,
+            runtime: String::new(),
         };
         let cmd = headless_claude_cmd(&cfg, "ping");
         let env: std::collections::HashMap<String, String> = cmd
@@ -703,6 +704,7 @@ rename to new";
                 context_window: window,
                 cli_settings: None,
                 claude_config_dir: None,
+                runtime: String::new(),
             };
             let cmd = headless_claude_cmd(&cfg, "ping");
             let set = cmd
@@ -730,6 +732,7 @@ rename to new";
             context_window: None,
             cli_settings: None,
             claude_config_dir: Some("/Users/me/.claude-acct-2".into()),
+            runtime: String::new(),
         };
         let cmd = headless_claude_cmd(&cfg, "ping");
         let ops: Vec<(String, Option<String>)> = cmd
@@ -787,6 +790,7 @@ rename to new";
                 context_window: None,
                 cli_settings: None,
                 claude_config_dir: None,
+                runtime: String::new(),
             };
             let cmd = headless_claude_cmd(&cfg, "ping");
             let names: Vec<String> = cmd

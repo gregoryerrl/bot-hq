@@ -193,6 +193,42 @@ pub fn commands(shell: Shell, dir: &str, default_dir: &str) -> AccountSetupComma
     }
 }
 
+/// Sign the OpenAI account in to the Codex home `dir`, which exists — the
+/// spawn refusal's command for a Codex row. `codex login` opens the browser;
+/// the ChatGPT sign-in is the only one bot-hq bills a subscription through.
+pub fn codex_login_command(shell: Shell, dir: &str) -> String {
+    match shell {
+        Shell::Sh => format!("CODEX_HOME={} codex login", quote(shell, dir)),
+        Shell::Powershell => format!("& {{ {} }}", powershell_codex_login(dir)),
+    }
+}
+
+/// The PowerShell sign-in, unscoped, with the previous `CODEX_HOME` put back
+/// in a `finally` — the same shape as the Claude one.
+fn powershell_codex_login(dir: &str) -> String {
+    format!(
+        "$p = $env:CODEX_HOME; try {{ $env:CODEX_HOME = {}; codex login }} \
+         finally {{ $env:CODEX_HOME = $p }}",
+        quote(Shell::Powershell, dir)
+    )
+}
+
+/// The Model dialog's commands for a Codex row: create the home, then sign
+/// the account in to it. There is no share step — a bot-hq-managed Codex home
+/// carries no user config to link (bot-hq writes its own `hooks.json` there),
+/// so `share` is empty and the dialog shows nothing for it.
+pub fn codex_commands(shell: Shell, dir: &str) -> AccountSetupCommands {
+    let setup = match shell {
+        Shell::Sh => format!("mkdir -p {} && {}", quote(shell, dir), codex_login_command(shell, dir)),
+        Shell::Powershell => format!(
+            "& {{ $null = New-Item -ItemType Directory -Force -Path {} -ErrorAction Stop; {} }}",
+            quote(shell, dir),
+            powershell_codex_login(dir)
+        ),
+    };
+    AccountSetupCommands { shell, setup, share: String::new() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,4 +585,24 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&out.stdout).contains("after:prev|True"), "{}", String::from_utf8_lossy(&out.stdout));
     }
+    /// A Codex row's commands sign in with `CODEX_HOME` on both shells; the
+    /// PowerShell form restores the previous value in a `finally` like the
+    /// Claude one, and neither shell gets a share step.
+    #[test]
+    fn codex_commands_sign_in_with_codex_home_and_share_nothing() {
+        let sh = codex_commands(Shell::Sh, "/Users/me/.codex-bot-hq");
+        assert_eq!(
+            sh.setup,
+            "mkdir -p '/Users/me/.codex-bot-hq' && CODEX_HOME='/Users/me/.codex-bot-hq' codex login"
+        );
+        assert_eq!(sh.share, "");
+        assert_eq!(codex_login_command(Shell::Sh, "/Users/me/it's"), "CODEX_HOME='/Users/me/it'\\''s' codex login");
+
+        let ps = codex_commands(Shell::Powershell, r"C:\Users\me\.codex-bot-hq");
+        assert!(ps.setup.starts_with("& { $null = New-Item -ItemType Directory -Force -Path 'C:\\Users\\me\\.codex-bot-hq' -ErrorAction Stop; "), "{}", ps.setup);
+        assert!(ps.setup.contains("$p = $env:CODEX_HOME; try { $env:CODEX_HOME = 'C:\\Users\\me\\.codex-bot-hq'; codex login } finally { $env:CODEX_HOME = $p }"), "{}", ps.setup);
+        assert!(!ps.setup.contains("claude"), "{}", ps.setup);
+        assert_eq!(ps.share, "");
+    }
+
 }

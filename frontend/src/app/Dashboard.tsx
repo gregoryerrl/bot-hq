@@ -154,7 +154,9 @@ export function rowLimit(
 export function accountChoices(models: ModelView[]): { dir: string; label: string }[] {
   const seen = new Map<string, string>();
   for (const m of models) {
-    if (!billsASubscription(m)) continue;
+    // 0102: a Codex row bills a ChatGPT account in its own home — not a
+    // Claude account, so not a choice here.
+    if (!billsASubscription(m) || m.runtime === "codex") continue;
     const dir = normalizeConfigDir(m.claude_config_dir);
     if (!seen.has(dir)) {
       seen.set(dir, dir ? accountLabelOf(m) : "default (~/.claude)");
@@ -177,7 +179,8 @@ export function remapRowsToAccount(
   const missing: number[] = [];
   const next = rows.map((row, index) => {
     const current = effectiveModel(row, roles, models);
-    if (!current || !billsASubscription(current)) return row;
+    // A Codex row is left where the user put it, like a gateway row (0102).
+    if (!current || !billsASubscription(current) || current.runtime === "codex") return row;
     if (normalizeConfigDir(current.claude_config_dir) === want) return row;
     const twin = models.find(
       (m) =>

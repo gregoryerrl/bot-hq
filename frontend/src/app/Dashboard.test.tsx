@@ -33,6 +33,7 @@ const MODELS: ModelView[] = [
     context_window: null,
     cli_settings: null,
     claude_config_dir: null,
+  runtime: "claude_code",
   },
 ];
 
@@ -425,6 +426,32 @@ describe("account helpers (0090)", () => {
     expect(accountLabelFor(rows[0], roles, [opus, opusB, gateway])).toBe("default");
     expect(accountLabelFor(rows[2], roles, [opus, opusB, gateway])).toBe(".claude-acct-2");
     expect(accountLabelFor(rows[1], roles, [opus, opusB, gateway])).toBe("deepseek");
+  });
+
+  /// 0102: the quick-select is a CLAUDE-account swap. A Codex row bills a
+  /// ChatGPT account in its own home, so it is neither offered as a choice nor
+  /// moved by one — like a gateway row, it stays where the user put it.
+  it("a Codex row is not an account choice and is left alone by the swap", () => {
+    const astra: ModelView = {
+      ...opus,
+      id: "m-astra",
+      provider: "openai",
+      model_name: "gpt-6-astra",
+      claude_config_dir: "/Users/me/.codex-bot-hq",
+      runtime: "codex",
+    };
+    expect(accountChoices([opus, opusB, astra])).toEqual([
+      { dir: "", label: "default (~/.claude)" },
+      { dir: "/Users/me/.claude-acct-2", label: ".claude-acct-2" },
+    ]);
+    const rows = [
+      { key: 1, roleId: 1, modelId: "m-opus", effort: null, ultracode: null, color: null, label: "" },
+      { key: 2, roleId: 2, modelId: "m-astra", effort: null, ultracode: null, color: null, label: "" },
+    ];
+    const toB = remapRowsToAccount(rows, "/Users/me/.claude-acct-2", roles, [opus, opusB, astra]);
+    expect(toB.rows.map((r) => r.modelId)).toEqual(["m-opus-b", "m-astra"]);
+    expect(toB.missing).toEqual([]);
+    expect(accountLabelFor(rows[1], roles, [opus, opusB, astra])).toBe(".codex-bot-hq");
   });
 });
 

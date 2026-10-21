@@ -20,13 +20,31 @@ const OPUS: ModelView = {
   context_window: null,
   cli_settings: null,
   claude_config_dir: null,
+  runtime: "claude_code",
+};
+
+const ASTRA: ModelView = {
+  ...OPUS,
+  id: "m-astra",
+  display_name: "Astra",
+  provider: "openai",
+  model_name: "gpt-6-astra",
+  claude_config_dir: "/Users/me/.codex-bot-hq",
+  runtime: "codex",
 };
 
 /** What the backend's `account_setup_commands` returns for a dir — the text
  *  itself is the backend's (agents::account_setup, pinned in Rust); here it is
  *  only something recognisable per dir and shell. */
-function setupFor(dir: string, shell: AccountSetupCommands["shell"] = "sh"): AccountSetupCommands {
-  return { shell, setup: `SETUP ${shell} ${dir}`, share: `SHARE ${shell} ${dir}` };
+function setupFor(
+  dir: string,
+  shell: AccountSetupCommands["shell"] = "sh",
+  runtime: string = "claude_code",
+): AccountSetupCommands {
+  // A Codex home has no share step (the backend returns an empty string).
+  return runtime === "codex"
+    ? { shell, setup: `CODEX_HOME=${dir} codex login`, share: "" }
+    : { shell, setup: `SETUP ${shell} ${dir}`, share: `SHARE ${shell} ${dir}` };
 }
 
 function mockBackend(
@@ -40,8 +58,10 @@ function mockBackend(
         return models;
       case "list_account_marks":
         return marks;
-      case "account_setup_commands":
-        return setupFor((args as { dir: string }).dir, shell);
+      case "account_setup_commands": {
+        const a = args as { dir: string; runtime: string };
+        return setupFor(a.dir, shell, a.runtime);
+      }
       case "clear_account_mark":
         return true;
       case "upsert_model":
@@ -106,7 +126,10 @@ describe("Settings → Models — a model row's Claude config dir (0090)", () =>
       "SETUP sh /Users/me/.claude-acct-2",
     );
     expect(screen.getByTestId("account-share-command")).toHaveTextContent("SHARE sh /Users/me/.claude-acct-2");
-    expect(mockInvoke).toHaveBeenCalledWith("account_setup_commands", { dir: "/Users/me/.claude-acct-2" });
+    expect(mockInvoke).toHaveBeenCalledWith("account_setup_commands", {
+      dir: "/Users/me/.claude-acct-2",
+      runtime: "claude_code",
+    });
     expect(dialog.textContent).toContain("in your own terminal");
     expect(dialog.textContent).not.toMatch(/Developer Mode/);
     // The subscription sign-in, never the interactive menu (which offers
@@ -369,5 +392,64 @@ describe("Settings → Models — the second account's setup commands", () => {
 
     fireEvent.change(screen.getByLabelText(/claude config dir/i), { target: { value: "" } });
     expect(screen.queryByTestId("account-setup-command")).toBeNull();
+  });
+});
+
+describe("Settings → Models — a Codex row (0102)", () => {
+  it("the dialog's Runtime select relabels the account dir, drops the Claude CLI settings and shows the Codex sign-in", async () => {
+    mockBackend([]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /add model/i }));
+    const dialog = await screen.findByRole("dialog", { name: /add model/i });
+    // claude-code is the default: the Claude fields are the ones shown.
+    const runtime = within(dialog).getByLabelText(/^runtime/i) as HTMLSelectElement;
+    expect(runtime.value).toBe("claude_code");
+    expect(within(dialog).getByLabelText(/claude config dir/i)).toBeInTheDocument();
+    expect(within(dialog).getByLabelText(/claude cli settings/i)).toBeInTheDocument();
+
+    fireEvent.change(runtime, { target: { value: "codex" } });
+    expect(within(dialog).getByLabelText(/^codex home/i)).toBeInTheDocument();
+    expect(within(dialog).queryByLabelText(/claude config dir/i)).toBeNull();
+    expect(within(dialog).queryByLabelText(/claude cli settings/i)).toBeNull();
+    // The connector note names the Codex CLI, not the claude CLI (the select's
+    // own option text also says it, so match the note's wording).
+    expect(within(dialog).getByText(/spawned through the/i)).toHaveTextContent(/codex cli/i);
+    expect(within(dialog).getByText(/spawned through the/i)).not.toHaveTextContent(/claude cli/i);
+
+    fireEvent.change(within(dialog).getByLabelText(/^codex home/i), {
+      target: { value: "/Users/me/.codex-bot-hq" },
+    });
+    const command = await within(dialog).findByTestId("account-setup-command");
+    expect(command).toHaveTextContent("CODEX_HOME=/Users/me/.codex-bot-hq codex login");
+    // No share step for a Codex home.
+    expect(within(dialog).queryByTestId("account-share-command")).toBeNull();
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "account_setup_commands",
+        expect.objectContaining({ dir: "/Users/me/.codex-bot-hq", runtime: "codex" }),
+      ),
+    );
+
+    fireEvent.change(within(dialog).getByLabelText(/display name/i), { target: { value: "Astra" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /^save$/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "upsert_model",
+        expect.objectContaining({
+          model: expect.objectContaining({ runtime: "codex", claude_config_dir: "/Users/me/.codex-bot-hq" }),
+        }),
+      ),
+    );
+  });
+
+  it("the list names a Codex row's home as its account, and a Codex row shows its runtime", async () => {
+    mockBackend([OPUS, ASTRA]);
+    renderPanel();
+    const row = (await screen.findByText("Astra")).closest("[data-testid='model-row']") as HTMLElement;
+    expect(row).not.toBeNull();
+    expect(within(row).getByText(".codex-bot-hq")).toBeInTheDocument();
+    expect(within(row).getByText(/codex/i, { selector: "[data-testid='model-runtime']" })).toBeInTheDocument();
+    expect(accountLabelOf(ASTRA)).toBe(".codex-bot-hq");
+    expect(accountLabelOf({ ...ASTRA, claude_config_dir: null })).toBe("default");
   });
 });
