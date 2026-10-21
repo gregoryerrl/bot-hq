@@ -13,6 +13,11 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **A gate id quoted in chat shows how its run ended.** The chip beside a
+  gate id read "approved" even when the approved command then failed, timed
+  out or was refused at run time; it now reads "ran", "exit N", "timed out"
+  or "refused" (with the reason in its tooltip), and "approved" only while
+  the run has not ended.
 - **A respawned participant's first turn counts.** When a session's roster
   came back (opening the session, a relaunch) a Codex participant announced
   itself before any turn was dealt, and that announcement was taken for the

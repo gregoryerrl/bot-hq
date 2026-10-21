@@ -34,16 +34,17 @@ function InlineCode({ children }: { children: React.ReactNode }) {
       {chip && (
         <span
           data-testid="gate-chip"
-          title={`gate ${chip.choiceId}: ${chip.state}`}
+          title={`gate ${chip.choiceId}: ${chip.label}${chip.detail ? ` — ${chip.detail}` : ""}`}
           className={cn(
             "ml-1 rounded px-1 py-0.5 align-middle font-label-caps text-label-caps",
-            chip.state === "approved" && "bg-primary/15 text-primary",
+            (chip.state === "approved" || chip.state === "ran") && "bg-primary/15 text-primary",
             chip.state === "pending" && "bg-tertiary-container/40 text-on-surface",
-            chip.state === "rejected" && "bg-error-container/40 text-on-error-container",
+            (chip.state === "rejected" || chip.state === "failed" || chip.state === "refused") &&
+              "bg-error-container/40 text-on-error-container",
             chip.state === "withdrawn" && "bg-surface-container-high text-on-surface-variant",
           )}
         >
-          {chip.state}
+          {chip.label}
         </span>
       )}
     </>

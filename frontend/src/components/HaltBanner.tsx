@@ -31,6 +31,10 @@ export type TrayRow = {
   run_not_before?: string | null;
   run_not_after?: string | null;
   scheduled?: boolean;
+  /** How an approved gate's run ended (feedback #104): the exit code once it
+   *  ran, or why the run was refused; both absent until then. */
+  exit_code?: number | null;
+  run_refusal?: string | null;
 };
 
 /**

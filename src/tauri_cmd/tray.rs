@@ -237,6 +237,13 @@ pub struct SessionTrayView {
     /// UI warns + requires confirm. Computed at list time from the live in-memory
     /// pending map (false from the bare `From` conversion; the list commands set it).
     pub stale: bool,
+    /// How an APPROVED gate's run ended (feedback #104): the command's exit
+    /// code once it ran (124 = bot-hq's timeout), or why the run was refused
+    /// (its body changed, its window passed). Both null while it has not run
+    /// yet, and on rows from before 0085/0087. The chat's gate chip reads
+    /// these so "approved" is never shown over a run that failed.
+    pub exit_code: Option<i64>,
+    pub run_refusal: Option<String>,
 }
 
 impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
@@ -261,6 +268,8 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
             run_not_before: e.run_not_before,
             run_not_after: e.run_not_after,
             stale: false,
+            exit_code: e.exit_code,
+            run_refusal: e.run_refusal,
         }
     }
 }
@@ -379,6 +388,8 @@ mod tests {
             run_not_after: None,
             scheduled: false,
             stale: false,
+            exit_code: None,
+            run_refusal: None,
         }
     }
 

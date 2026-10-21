@@ -32,6 +32,8 @@ describe("gate chips in chat markdown", () => {
   const chips = gateChipsOf([
     { choice_id: "236473a7-0000-4000-8000-000000000001", status: "answered", command_text: "gh pr merge 5", picked_option: "Approve" },
     { choice_id: "c2d52757-0000-4000-8000-000000000003", status: "pending", command_text: "psql -h prod -c x", picked_option: null },
+    { choice_id: "e1e1e1e1-0000-4000-8000-000000000004", status: "answered", command_text: "cargo test", picked_option: "Approve", exit_code: 1 },
+    { choice_id: "f2f2f2f2-0000-4000-8000-000000000005", status: "answered", command_text: "gh issue edit 5", picked_option: "Approve", run_refusal: "its body changed after review" },
   ]);
 
   it("marks a resolving token with the gate's state and leaves the rest alone", () => {
@@ -43,6 +45,17 @@ describe("gate chips in chat markdown", () => {
     const marks = screen.getAllByTestId("gate-chip");
     expect(marks.map((m) => m.textContent)).toEqual(["approved", "pending"]);
     expect(marks[0]).toHaveAttribute("title", "gate 236473a7-0000-4000-8000-000000000001: approved");
+  });
+
+  it("shows the run's outcome over the approval — a failed run never reads as approved (feedback #104)", () => {
+    render(
+      <GateChipsContext.Provider value={chips}>
+        <Markdown>{"gate `e1e1e1e1` ran; `f2f2f2f2` was approved."}</Markdown>
+      </GateChipsContext.Provider>,
+    );
+    const marks = screen.getAllByTestId("gate-chip");
+    expect(marks.map((m) => m.textContent)).toEqual(["exit 1", "refused"]);
+    expect(marks[1]).toHaveAttribute("title", "gate f2f2f2f2-0000-4000-8000-000000000005: refused — its body changed after review");
   });
 
   it("shows nothing outside a session", () => {
