@@ -203,6 +203,16 @@ pub(crate) fn co_author_marker() -> String {
 
 /// The trailer the claude CLI asks an agent to end commit messages with (the
 /// model name varies; the rest is fixed — probed on CLI 2.1.284, s-d43b3630).
+/// Codex's own commit trailer (0.163.0 base instructions, measured): built
+/// at run time so the trailer never appears as a literal in this source —
+/// the pre-commit hook screens added lines for it.
+fn codex_commit_trailer() -> String {
+    format!("{}: Codex <noreply@openai.com>", co_author_marker())
+}
+
+/// Codex's own pull-request footer line.
+const CODEX_PR_FOOTER: &str = "Generated with [Codex](https://openai.com/codex/).";
+
 pub fn cli_commit_trailer() -> String {
     format!("{}: Claude <noreply@anthropic.com>", co_author_marker())
 }
@@ -325,7 +335,7 @@ impl Policy {
     /// #90): otherwise an agent's context holds "end git commit messages with"
     /// that trailer beside a policy whose hook refuses the commit.
     pub fn forbids_cli_attribution(&self) -> bool {
-        [cli_commit_trailer().as_str(), CLI_PR_FOOTER]
+        [cli_commit_trailer().as_str(), CLI_PR_FOOTER, codex_commit_trailer().as_str(), CODEX_PR_FOOTER]
             .iter()
             .any(|text| self.first_forbidden_word(text).is_some())
     }

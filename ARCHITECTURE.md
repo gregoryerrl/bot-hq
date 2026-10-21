@@ -40,7 +40,7 @@ prose and the Tool Gate, not by the deny-list.
 
 **There used to be a second backend** — bot-hq's own native Rust agent loop,
 opted into per saved model. rc3 D9 deleted it (2026-08-12): the claude CLI is
-the only model connector, "for uniformity", and the native connector returns
+the default model connector (the Codex CLI joined it 2026-10-21, per model row — D9 amended), "for uniformity", and the native connector returns
 later as a plugin. Git history is the archive — `git show
 c7bba28:src/agents/native/` is where it starts from.
 
@@ -1881,7 +1881,7 @@ removal above.
   One subprocess per **CLI-backed** agent.
 - **Native loop:** *removed.* bot-hq's own in-process Rust agent loop,
   a second backend opted into per saved model, EYES-only. Deleted by rc3
-  D9 (2026-08-12) so the claude CLI is the only model connector; it
+  D9 (2026-08-12) so the claude CLI is the default model connector (the Codex CLI joined it 2026-10-21, per model row — D9 amended); it
   returns later as a plugin, starting from `git show
   c7bba28:src/agents/native/`. Its two data files
   (`.local/native-accounting.jsonl`, `.local/native-history/`), the

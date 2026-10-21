@@ -166,7 +166,9 @@ or the Context Library's decisions log:
 
 - Rust stable toolchain (rustup, latest stable).
 - Node.js 22+ and npm (for the React frontend; pnpm works too).
-- `claude-code` CLI installed and authed. It is the ONLY model connector
+- `claude-code` CLI installed and authed. It is the default model connector
+  (since 2026-10-21 a model row may name OpenAI's Codex CLI instead —
+  `models.runtime`; see `src/agents/codex/`) —
   (rc3 D9) — every agent is a subprocess, whatever model it runs — and it
   is needed for live tests.
 - macOS (primary), with Windows + Linux supported since 1.0.1 (their

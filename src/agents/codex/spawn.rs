@@ -322,7 +322,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
 
     let (client, incoming) = CodexClient::start(stdout, stdin);
     let started = start_thread(&client, &cfg, &rendered).await;
-    let Started { thread_id, version, resume_failed } = match started {
+    let Started { thread_id, version, resume_failed, limit } = match started {
         Ok(v) => v,
         Err(e) => {
             // The child is useless without a thread; reap it before failing.
@@ -338,7 +338,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let _ = event_tx
         .send(AgentEvent::Init { session_id: Some(thread_id.clone()), api_key_source: Some("none".into()) })
         .await;
-    if let Some(text) = resume_failed {
+    for text in [resume_failed, limit].into_iter().flatten() {
         let _ = event_tx.send(AgentEvent::Notice(text)).await;
     }
 
@@ -357,6 +357,8 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         cwd: cfg.working_dir.as_ref().map(|d| d.display().to_string()),
         deadlines: InterruptDeadlines::default(),
         server_pid: child_pid,
+        data_dir: cfg.data_dir.clone(),
+        session_id: cfg.session_id.clone(),
     };
     let event_tx_for_lifecycle = event_tx.clone();
     let agent_name = cfg.agent_name.clone();
@@ -439,7 +441,13 @@ async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &Render
         .as_str()
         .ok_or_else(|| anyhow!("{}: thread/start returned no thread id", cfg.agent_name))?
         .to_string();
-    Ok(Started { thread_id, version, resume_failed })
+    // The usage window, advisory: a failed read says nothing.
+    let limit = client
+        .request("account/rateLimits/read", json!({}))
+        .await
+        .ok()
+        .and_then(|r| rate_limit_notice(&r, &cfg.agent_name, &cfg.config.model_name));
+    Ok(Started { thread_id, version, resume_failed, limit })
 }
 
 /// What the start sequence produced.
@@ -448,6 +456,31 @@ struct Started {
     version: String,
     /// N1: a resume that fell back to a fresh thread, said in the channel.
     resume_failed: Option<String>,
+    /// The account's usage window is exhausted: said once, where the session
+    /// starts, and the spawn goes ahead (advisory, like the Claude mark).
+    limit: Option<String>,
+}
+
+/// The advisory notice for an `account/rateLimits/read` answer whose primary
+/// window is used up (or whose backend says a limit was reached), or `None`.
+/// Codex gives the reset as epoch seconds; it is shown in UTC.
+pub fn rate_limit_notice(result: &Value, agent: &str, model: &str) -> Option<String> {
+    let limits = &result["rateLimits"];
+    let used = limits["primary"]["usedPercent"].as_u64();
+    let reached = limits["rateLimitReachedType"].as_str();
+    if used.is_none_or(|u| u < 100) && reached.is_none() {
+        return None;
+    }
+    let reset = limits["primary"]["resetsAt"]
+        .as_i64()
+        .and_then(|secs| chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0))
+        .map(|t| format!(", resets at {}", t.format("%Y-%m-%d %H:%MZ")))
+        .unwrap_or_default();
+    Some(format!(
+        "ℹ [bot-hq] {agent} starts on {model} with its ChatGPT usage window at {}%{reset}{} — it may not answer until then.",
+        used.unwrap_or(100),
+        reached.map(|r| format!(" ({r})")).unwrap_or_default()
+    ))
 }
 
 /// How long an interrupt waits for the turn to end before the driver gives
@@ -483,6 +516,10 @@ struct Driver {
     /// The app-server child bot-hq spawned — the ONLY pid the driver ever
     /// signals (its tree holds the running commands). `None` in tests.
     server_pid: Option<u32>,
+    /// Where the handoff files live, and whose they are — for the text put
+    /// back after a compaction.
+    data_dir: std::path::PathBuf,
+    session_id: String,
 }
 
 impl Driver {
@@ -594,7 +631,29 @@ impl Driver {
                         let _ = event_tx.send(AgentEvent::Health(AgentHealth::Stalled)).await;
                     }
                     track_running_command(&inc, &mut running_atomic);
-                    for ev in self.translator.translate(&inc) {
+                    // Codex compacted the thread: put the handoff document and
+                    // the user's words since back into the model-visible history
+                    // (`thread/inject_items`); when that fails, they go in front
+                    // of the next page instead (plan B3 / P5).
+                    let compacted = matches!(&inc, Incoming::Notification(n) if n.method == "thread/compacted");
+                    let mut reinjected = Vec::new();
+                    if compacted {
+                        if let Some((text, has_doc, words)) = self.compaction_text() {
+                            match self.inject(&text).await {
+                                Ok(()) => {
+                                    reinjected.push(AgentEvent::HandoffInjected { has_doc });
+                                    if let Some(count) = words {
+                                        reinjected.push(AgentEvent::UserWordsInjected { count });
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(agent = %self.agent_name, %e, "thread/inject_items failed; the handoff rides the next page");
+                                    queued.insert(0, text);
+                                }
+                            }
+                        }
+                    }
+                    for ev in self.translator.translate(&inc).into_iter().chain(reinjected) {
                         if let AgentEvent::TurnComplete { .. } = &ev {
                             active_turn = None;
                             deadline = None;
@@ -628,6 +687,38 @@ impl Driver {
         let turn_id = self.start_turn(&text).await?;
         queued.clear();
         Ok(turn_id)
+    }
+
+    /// The text put back after a compaction: the participant's rendered
+    /// handoff file (`policy-check compact-handoff`'s text, age-stamped now)
+    /// and the user's words since it was written (`compact-user-words`'s);
+    /// `None` when there is nothing rendered for this participant. Returns
+    /// the text, whether a real doc was in it, and how many user messages.
+    fn compaction_text(&self) -> Option<(String, bool, Option<usize>)> {
+        let sid = Some(self.session_id.as_str());
+        let handoff = crate::policy::hooks::compact_handoff_text(&self.data_dir, sid, &self.agent_name, chrono::Utc::now())?;
+        let has_doc = !handoff.contains(crate::agents::handoff::NO_DOC_MARKER);
+        let words = crate::policy::hooks::compact_user_words_text(&self.data_dir, sid, &self.agent_name);
+        let count = words.as_ref().map(|w| w.matches("\n[").count());
+        let text = match words {
+            Some(w) => format!("{handoff}\n\n{w}"),
+            None => handoff,
+        };
+        Some((text, has_doc, count))
+    }
+
+    /// Append one user message to the thread's model-visible history.
+    async fn inject(&self, text: &str) -> Result<(), RequestFailure> {
+        self.client
+            .request(
+                "thread/inject_items",
+                json!({
+                    "threadId": self.thread_id,
+                    "items": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": text }] }],
+                }),
+            )
+            .await
+            .map(|_| ())
     }
 
     /// `turn/interrupt`, fire-and-forget — the response says nothing the
@@ -832,6 +923,21 @@ mod tests {
         assert_eq!(version_from_user_agent("odd"), "odd");
     }
 
+    /// The measured `account/rateLimits/read` shape (s-de77e2f0): a window at
+    /// 0% says nothing; one used up, or a reached-type, is one advisory line
+    /// with the reset in UTC.
+    #[test]
+    fn a_used_up_usage_window_is_an_advisory_notice() {
+        let fresh = json!({"ordinaryUsageAllowed": true, "rateLimits": {"limitId": "codex", "primary": {"usedPercent": 0, "windowDurationMins": 10080, "resetsAt": 1793152132}, "secondary": null, "planType": "pro", "rateLimitReachedType": null}});
+        assert_eq!(rate_limit_notice(&fresh, "eyes", "gpt-6-astra"), None);
+        let used = json!({"rateLimits": {"primary": {"usedPercent": 100, "windowDurationMins": 10080, "resetsAt": 1793152132}, "rateLimitReachedType": null}});
+        let n = rate_limit_notice(&used, "eyes", "gpt-6-astra").unwrap();
+        assert!(n.contains("eyes") && n.contains("gpt-6-astra") && n.contains("100%") && n.contains("2026-10-28"), "{n}");
+        let reached = json!({"rateLimits": {"primary": {"usedPercent": 97}, "rateLimitReachedType": "rate_limit_reached"}});
+        assert!(rate_limit_notice(&reached, "eyes", "m").unwrap().contains("rate_limit_reached"));
+        assert_eq!(rate_limit_notice(&json!({}), "eyes", "m"), None);
+    }
+
     #[test]
     fn hooks_list_entries_are_read_into_listed_hooks() {
         let v = json!({"data": [{"cwd": "/tmp/repo", "hooks": [{"key": "/h/hooks.json:pre_tool_use:0:0", "eventName": "preToolUse", "handlerType": "command", "command": "\"/opt/bot-hq\" policy-check codex-gate --data-dir \"/data\"", "matcher": ".*", "sourcePath": "/h/hooks.json", "source": "user", "enabled": true, "currentHash": "sha256:abc", "trustStatus": "trusted"}], "warnings": [], "errors": []}]});
@@ -906,6 +1012,8 @@ mod tests {
             cwd: Some("/tmp/repo".into()),
             deadlines: InterruptDeadlines { plain: std::time::Duration::from_millis(400), atomic: std::time::Duration::from_millis(800) },
             server_pid: SERVER_PID.with(|p| p.get()),
+            data_dir: DATA_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-data-dir")),
+            session_id: "s-test".into(),
         };
         tokio::spawn(driver.run(incoming, event_tx, input_rx, control_rx));
         Harness { fake: Fake { lines: tokio::io::BufReader::new(s_read).lines(), writer: s_write }, events, input, control }
@@ -914,6 +1022,45 @@ mod tests {
     thread_local! {
         /// A stand-in app-server pid for one test's harness (`None` otherwise).
         static SERVER_PID: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+        /// A data dir with rendered handoff files, for the compaction test.
+        static DATA_DIR: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// A compaction puts the rendered handoff file (and the user's words)
+    /// back through `thread/inject_items`, then reports what it put back;
+    /// when the injection is refused, the text rides the next page instead.
+    #[tokio::test]
+    async fn a_compaction_puts_the_handoff_back_or_prefixes_the_next_page() {
+        let data = tempfile::tempdir().unwrap();
+        let local = crate::paths::Paths::for_data_dir(data.path().to_path_buf()).local_dir;
+        let dir = crate::agents::handoff::dir_under(&local);
+        let path = crate::agents::handoff::file_path(&dir, "s-test", "eyes").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[bot-hq] Your context was just compacted.\nHANDOFF BODY HERE\n").unwrap();
+        DATA_DIR.with(|d| *d.borrow_mut() = Some(data.path().to_path_buf()));
+        let mut h = harness();
+        DATA_DIR.with(|d| *d.borrow_mut() = None);
+        h.fake.write(json!({"method": "thread/compacted", "params": {"threadId": "thr", "turnId": "t0"}})).await;
+        let req = h.fake.read().await;
+        assert_eq!(req["method"], "thread/inject_items");
+        assert_eq!(req["params"]["threadId"], "thr");
+        let text = req["params"]["items"][0]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("HANDOFF BODY HERE"), "{text}");
+        assert_eq!(req["params"]["items"][0]["role"], "user");
+        h.fake.answer(&req, json!({})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Compacted { .. }));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::HandoffInjected { has_doc: true }));
+        // Refused: the text goes in front of the next page.
+        h.fake.write(json!({"method": "thread/compacted", "params": {"threadId": "thr", "turnId": "t1"}})).await;
+        let req = h.fake.read().await;
+        assert_eq!(req["method"], "thread/inject_items");
+        h.fake.write(json!({"id": req["id"], "error": {"code": -32600, "message": "no"}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Compacted { .. }));
+        h.input.send(OutgoingUserMessage::text("next page")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        let text = start["params"]["input"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("[bot-hq] Your context was just compacted.") && text.ends_with("next page"), "{text}");
     }
 
     async fn next_event(h: &mut Harness) -> AgentEvent {

@@ -45,6 +45,15 @@ model side by side. Migration 0102 applies on first launch.
   sessions (which could carry commands past the hook), Codex's own
   sub-agents, app connectors, plugins, goals, image generation, worktrees,
   browsers and memories are switched off for participants.
+- **Interrupting a Codex participant does not wait for its command.** Codex
+  answers an interrupt at once but lets the running command finish, so a
+  message typed during a long build would have waited for the build. bot-hq
+  now gives the turn a moment (longer mid-commit or push), then stops the
+  participant's own Codex process and resumes its thread on the next
+  message. After Codex compacts a participant's context, bot-hq puts its
+  handoff document and your words since back, as it does for a Claude
+  participant; a used-up ChatGPT usage window is said where the session
+  starts.
 
 ## [1.0.10] — 2026-10-19
 

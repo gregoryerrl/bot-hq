@@ -171,6 +171,13 @@ Consequence to keep in view: this retires D6 (`## Observations only` on the
 native EYES prompt) and every "the native loop cannot keep this promise"
 carve-out, because there is no native loop.
 
+**Amended 2026-10-21 (s-de77e2f0, tray 87c5309d):** a second connector, OpenAI's
+Codex CLI, lands IN CORE (`src/agents/codex/`), chosen per model row
+(`models.runtime`, migration 0102). D9's "as a plugin" deferral could not hold:
+today's plugin runtime is sandboxed iframes with no process spawn. The
+uniformity D9 bought is kept at the `AgentHandle` / `AgentEvent` seam — nothing
+past it knows which connector it has — and the native loop stays deleted.
+
 ### D10 — Brian and Rain are gone, data included. History stays legacy.
 
 The user: *"I already said multiple times that I'm dropping the names, only the

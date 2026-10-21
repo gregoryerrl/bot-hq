@@ -615,7 +615,7 @@ fn hook_agent() -> String {
 /// `None` — and the hook prints nothing and still exits 0 — when there is no
 /// session id, the names are not path-safe, or the file is missing or
 /// unreadable. A hook that fails here must never get in a compaction's way.
-fn compact_handoff_text(
+pub(crate) fn compact_handoff_text(
     data_dir: &Path,
     session_id: Option<&str>,
     agent: &str,
@@ -655,7 +655,7 @@ fn handoff_due_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> O
 /// unknown (`BOT_HQ_AGENT` unset) or a render failed, and the no-doc header
 /// would then be a false claim — so nothing is printed, as `pre_compact_text`
 /// does (EYES a81491d5). File reads only, like `compact_handoff_text`.
-fn compact_user_words_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+pub(crate) fn compact_user_words_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
     use crate::agents::handoff;
     let session_id = session_id?;
     let dir = handoff::dir_under(&crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir);
