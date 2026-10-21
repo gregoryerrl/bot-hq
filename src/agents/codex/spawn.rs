@@ -1209,6 +1209,7 @@ mod tests {
     /// random i32 PTY id), so the deadline never signals it — the tree killed
     /// is the app-server's own, the pid bot-hq spawned. A canary process
     /// holding the number Codex reported must survive.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_unanswered_interrupt_kills_the_servers_own_tree_and_never_the_reported_id() {
         // The stand-in app-server: a real tree (a shell with a sleeping child).
