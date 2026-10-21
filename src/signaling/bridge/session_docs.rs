@@ -737,7 +737,10 @@ impl SignalingBridge {
                     && doc_promotion_stale(d)
             })
             .collect();
-        docs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        // Oldest first; `created_at` is millisecond-resolution and a fast
+        // runner writes several docs in one millisecond, so the id (insertion
+        // order) breaks the tie — the card's order was otherwise the query's.
+        docs.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
         docs
     }
 
