@@ -46,19 +46,29 @@ pub fn descendants(pid: u32) -> Vec<u32> {
 /// read as clean is how a surviving command goes unnoticed (EYES, 2026-10-21).
 #[cfg(unix)]
 pub fn descendants_checked(pid: u32) -> Option<Vec<u32>> {
-    Some(descendants_named(pid)?.into_iter().map(|(p, _)| p).collect())
+    Some(descendants_named(pid)?.into_iter().map(|d| d.pid).collect())
 }
 
-/// [`descendants_checked`] with each process's program (the first word of
-/// its command line), deepest first.
+/// One process of a tree listing: its pid, its parent, and its program (the
+/// first word of its command line).
 #[cfg(unix)]
-pub fn descendants_named(pid: u32) -> Option<Vec<(u32, String)>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Descendant {
+    pub pid: u32,
+    pub ppid: u32,
+    pub program: String,
+}
+
+/// [`descendants_checked`] with each process's parent and program, deepest
+/// first.
+#[cfg(unix)]
+pub fn descendants_named(pid: u32) -> Option<Vec<Descendant>> {
     let out = command("ps").args(["-axo", "pid=,ppid=,command="]).output().ok()?;
     if !out.status.success() {
         return None;
     }
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
-    let mut program: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut info: std::collections::HashMap<u32, (u32, String)> = std::collections::HashMap::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut words = line.split_whitespace();
         if let (Some(p), Some(pp)) = (
@@ -66,7 +76,7 @@ pub fn descendants_named(pid: u32) -> Option<Vec<(u32, String)>> {
             words.next().and_then(|w| w.parse::<u32>().ok()),
         ) {
             children.entry(pp).or_default().push(p);
-            program.insert(p, words.next().unwrap_or("").to_string());
+            info.insert(p, (pp, words.next().unwrap_or("").to_string()));
         }
     }
     // Breadth-first, then reversed: a parent is listed after its children.
@@ -81,7 +91,27 @@ pub fn descendants_named(pid: u32) -> Option<Vec<(u32, String)>> {
         }
     }
     order.reverse();
-    Some(order.into_iter().map(|p| (p, program.remove(&p).unwrap_or_default())).collect())
+    Some(
+        order
+            .into_iter()
+            .map(|p| {
+                let (ppid, program) = info.remove(&p).unwrap_or_default();
+                Descendant { pid: p, ppid, program }
+            })
+            .collect(),
+    )
+}
+
+/// The program (first word of the command line) of one pid, when `ps` can
+/// tell.
+#[cfg(unix)]
+pub fn program_of(pid: u32) -> Option<String> {
+    let out = command("ps").args(["-o", "command=", "-p", &pid.to_string()]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().next().map(str::to_string)
 }
 
 /// Whether `pid` is finished: no such process, or a zombie its parent has

@@ -554,22 +554,47 @@ impl Default for InterruptDeadlines {
     }
 }
 
-/// Whether a program under the app-server is one of Codex's own helpers
-/// (`codex-code-mode-host`, any `codex-*` binary) rather than a command.
-fn is_codex_helper(program: &str) -> bool {
-    std::path::Path::new(program)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n == "codex" || n.starts_with("codex-"))
+/// The app-server's own processes at the driver's start, and where Codex's
+/// own binaries live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServerTree {
+    /// The pids of the server's own tree (the native binary under npm's
+    /// wrapper, whatever Codex started for itself before the first turn).
+    pids: Vec<u32>,
+    /// The directory of the server's own `codex` binary — the vendor `bin/`
+    /// under npm's package on macOS — where its helpers live too. `None`
+    /// when no process of the tree is a `codex` binary (then nothing is a
+    /// helper).
+    codex_dir: Option<std::path::PathBuf>,
+}
+
+impl ServerTree {
+    /// Whether a process found under the app-server later is one of Codex's
+    /// own helpers rather than a command: its program lives in the same
+    /// directory as the server's own `codex` binary AND its parent is one of
+    /// the server's own processes. A command named `codex-build` lives
+    /// elsewhere; a nested `codex` a command starts has a command for a
+    /// parent (EYES f3e7f82f) — both are stopped.
+    fn is_helper(&self, server_pid: u32, program: &str, ppid: u32) -> bool {
+        let Some(dir) = &self.codex_dir else { return false };
+        std::path::Path::new(program).parent() == Some(dir.as_path())
+            && (ppid == server_pid || self.pids.contains(&ppid))
+    }
 }
 
 /// The app-server's own process tree at the driver's start — see
 /// `Driver::server_baseline`. `None` when it could not be listed (and
 /// always where there is no tree walk).
-fn server_tree(pid: u32) -> Option<Vec<u32>> {
+fn server_tree(pid: u32) -> Option<ServerTree> {
     #[cfg(unix)]
     {
-        crate::process::descendants_checked(pid)
+        let own = crate::process::descendants_named(pid)?;
+        let is_codex = |program: &str| std::path::Path::new(program).file_name().and_then(|n| n.to_str()) == Some("codex");
+        let codex_dir = crate::process::program_of(pid)
+            .filter(|p| is_codex(p))
+            .or_else(|| own.iter().map(|d| d.program.clone()).find(|p| is_codex(p)))
+            .and_then(|p| std::path::Path::new(&p).parent().map(|d| d.to_path_buf()));
+        Some(ServerTree { pids: own.into_iter().map(|d| d.pid).collect(), codex_dir })
     }
     #[cfg(not(unix))]
     {
@@ -609,8 +634,11 @@ struct Driver {
     /// from a fresh listing, never signalled on its own. `None` when the
     /// listing failed at start: an unknown tree is never "clean", and never
     /// an empty baseline that would make the native binary look like a
-    /// command (EYES 37ff33f6).
-    server_baseline: Option<Vec<u32>>,
+    /// command (EYES 37ff33f6). Carries the directory of Codex's own native
+    /// binary, so a helper it starts later from the same directory
+    /// (`codex-code-mode-host`) is told from a command by where it lives and
+    /// who started it — not by its name (EYES f3e7f82f).
+    server_baseline: Option<ServerTree>,
     /// Where the handoff files live, and whose they are — for the text put
     /// back after a compaction.
     data_dir: std::path::PathBuf,
@@ -897,20 +925,21 @@ impl Driver {
         }
         #[cfg(unix)]
         {
-            let Some(baseline) = self.server_baseline.as_deref() else {
+            let Some(baseline) = self.server_baseline.as_ref() else {
                 return Err("the app-server's own processes were never listed (ps failed at its start)".to_string());
             };
             // What is NOT a command: the app-server's own tree, and the helpers
             // Codex starts lazily under it — `codex-code-mode-host` appeared
             // only at the first `exec` call and was killed by this cleanup on
             // 2026-10-21T13:12Z ("1 process was stopped" with no command in
-            // flight). Anything whose program is a `codex-*` binary is Codex's.
+            // flight). A helper is known by where it lives and who started it
+            // (`ServerTree::is_helper`), never by its name alone.
             let list = || -> Result<Vec<u32>, String> {
                 let live = crate::process::descendants_named(pid).ok_or_else(|| "ps could not list the app-server's processes".to_string())?;
                 Ok(live
                     .into_iter()
-                    .filter(|(p, program)| !baseline.contains(p) && !is_codex_helper(program))
-                    .map(|(p, _)| p)
+                    .filter(|d| !baseline.pids.contains(&d.pid) && !baseline.is_helper(pid, &d.program, d.ppid))
+                    .map(|d| d.pid)
                     .collect())
             };
             let newer = loop {
@@ -1775,18 +1804,32 @@ mod tests {
 
     /// A helper Codex starts lazily under the app-server — `codex-code-mode-host`
     /// at the first `exec` call, after the baseline — is Codex's, not a
-    /// command: the cleanup leaves it alone and stops the command beside it.
+    /// command: it lives beside the server's own `codex` binary and the
+    /// server started it. The cleanup leaves it alone and stops everything
+    /// else beside it: a user's `codex-build` from another directory, and a
+    /// nested `codex` a command started (EYES f3e7f82f — never by name alone).
     #[cfg(unix)]
     #[tokio::test]
     async fn a_codex_helper_started_after_the_baseline_survives_the_cleanup() {
-        // The stand-in helper: `sleep` under Codex's helper name (a symlink —
-        // a COPY of a macOS system binary loses its signature and dies at exec).
-        let bin = tempfile::tempdir().unwrap();
         let sleep = String::from_utf8_lossy(&crate::process::command("sh").args(["-c", "command -v sleep"]).output().unwrap().stdout).trim().to_string();
-        let helper = bin.path().join("codex-code-mode-host");
-        std::os::unix::fs::symlink(&sleep, &helper).unwrap();
-        // The server starts the helper AND the command on SIGUSR1.
-        let script = format!("sleep 300 & trap '{} 400 & sleep 400 &' USR1; while :; do wait; done", helper.display());
+        // Codex's own directory: the server's `codex` binary and its helper
+        // (symlinks to `sleep` — a COPY of a macOS system binary loses its
+        // signature and dies at exec). A user's tool lives elsewhere.
+        let vendor = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        for (dir, name) in [(&vendor, "codex"), (&vendor, "codex-code-mode-host"), (&elsewhere, "codex-build")] {
+            std::os::unix::fs::symlink(&sleep, dir.path().join(name)).unwrap();
+        }
+        let codex = vendor.path().join("codex").display().to_string();
+        let helper = vendor.path().join("codex-code-mode-host").display().to_string();
+        let user_tool = elsewhere.path().join("codex-build").display().to_string();
+        // The stand-in server: a shell whose own child is the `codex` binary
+        // (so the tree has a codex directory). On SIGUSR1 it starts the lazy
+        // helper, a user's codex-build, and a command (`sh`) that runs a
+        // nested codex.
+        let script = format!(
+            "{codex} 300 & trap '{helper} 400 & {user_tool} 400 & sh -c \"{codex} 400; true\" &' USR1; while :; do wait; done"
+        );
         let shell = crate::process::command("sh").args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let server_pid = shell.id();
         let own = wait_for_descendants(server_pid, 1);
@@ -1801,32 +1844,41 @@ mod tests {
         unsafe {
             libc::kill(server_pid as i32, libc::SIGUSR1);
         }
-        let (mut helper_pid, mut command_pid) = (None, None);
+        // Wait for all four newcomers: the helper, codex-build, the sh, and
+        // the nested codex under the sh.
+        let (mut helper_pid, mut user_pid, mut nested_pid) = (None, None, None);
         for _ in 0..100 {
-            for (p, program) in crate::process::descendants_named(server_pid).unwrap_or_default() {
-                if own.contains(&p) {
+            for d in crate::process::descendants_named(server_pid).unwrap_or_default() {
+                if own.contains(&d.pid) {
                     continue;
                 }
-                if program.ends_with("codex-code-mode-host") {
-                    helper_pid = Some(p);
-                } else if program.ends_with("sleep") {
-                    command_pid = Some(p);
+                if d.program == helper {
+                    helper_pid = Some(d.pid);
+                } else if d.program == user_tool {
+                    user_pid = Some(d.pid);
+                } else if d.program == codex && d.ppid != server_pid {
+                    nested_pid = Some(d.pid);
                 }
             }
-            if helper_pid.is_some() && command_pid.is_some() {
+            if helper_pid.is_some() && user_pid.is_some() && nested_pid.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let (helper_pid, command_pid) = (helper_pid.expect("the helper started"), command_pid.expect("the command started"));
+        let helper_pid = helper_pid.expect("the helper started");
+        let user_pid = user_pid.expect("codex-build started");
+        let nested_pid = nested_pid.expect("the nested codex started under a command");
         h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
         let req = h.fake.read().await;
         h.fake.answer_interrupt(&req, "t1").await;
         h.fake.turn_interrupted("t1").await;
         let notice = next_event(&mut h).await;
-        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "only the command: {notice:?}");
-        assert!(!alive(command_pid), "the command is gone");
-        assert!(alive(helper_pid), "Codex's helper is left alone");
+        // codex-build, the sh and the nested codex: three stopped; the helper not.
+        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("3 processes were stopped")), "{notice:?}");
+        assert!(!alive(user_pid), "a user's codex-build is a command");
+        assert!(!alive(nested_pid), "a nested codex under a command is a command");
+        assert!(alive(helper_pid), "Codex's helper, beside its binary and started by it, is left alone");
+        assert!(own.iter().all(|p| alive(*p)), "the server's own codex binary is untouched");
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
         drop(server);
     }

@@ -42,7 +42,11 @@ describe("gateChipsOf", () => {
     expect(chips.get("bbbbbbbb")).toMatchObject({ state: "ran", label: "ran" });
     expect(chips.get("cccccccc")).toMatchObject({ state: "failed", label: "exit 1" });
     expect(chips.get("dddddddd")).toMatchObject({ state: "failed", label: "timed out" });
-    expect(chips.get("eeeeeeee")).toMatchObject({ state: "refused", label: "refused", detail: "the run window passed" });
+    expect(chips.get("eeeeeeee")).toMatchObject({ state: "refused", label: "not run", detail: "the run window passed" });
+    // A command that could not start (a launcher failure) is recorded the
+    // same way and reads the same: never "approved" (EYES 47818935).
+    const unstarted = gateChipsOf([approved("ffffffff-0000-4000-8000-000000000006", { run_refusal: "could not start: No such file or directory" })]);
+    expect(unstarted.get("ffffffff")).toMatchObject({ state: "refused", label: "not run" });
   });
 
   it("drops a prefix two gates share — a chip never guesses", () => {

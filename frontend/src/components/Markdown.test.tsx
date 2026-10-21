@@ -54,8 +54,8 @@ describe("gate chips in chat markdown", () => {
       </GateChipsContext.Provider>,
     );
     const marks = screen.getAllByTestId("gate-chip");
-    expect(marks.map((m) => m.textContent)).toEqual(["exit 1", "refused"]);
-    expect(marks[1]).toHaveAttribute("title", "gate f2f2f2f2-0000-4000-8000-000000000005: refused — its body changed after review");
+    expect(marks.map((m) => m.textContent)).toEqual(["exit 1", "not run"]);
+    expect(marks[1]).toHaveAttribute("title", "gate f2f2f2f2-0000-4000-8000-000000000005: not run — its body changed after review");
   });
 
   it("shows nothing outside a session", () => {

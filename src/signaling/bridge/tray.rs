@@ -1810,6 +1810,16 @@ impl SignalingBridge {
             }
             Err(e) => {
                 body.push_str(&format!("action_gate could not run `{command}`: {e}"));
+                // A command that never started is not "approved, waiting": the
+                // row says so where `gate_status` and the chat's gate chip
+                // read it (EYES 47818935), the way a refused run does.
+                if let Some(storage) = self.storage.lock().await.clone() {
+                    let why = format!("could not start: {e}");
+                    let why: String = why.chars().take(200).collect();
+                    if let Err(e) = storage.set_tray_run_refusal(choice_id, &why).await {
+                        tracing::warn!(?e, choice_id, "could not record that the gate's command never started");
+                    }
+                }
                 ran(None)
             }
         })

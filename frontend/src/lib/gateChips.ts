@@ -8,8 +8,9 @@ import { createContext } from "react";
 export type GateChip = {
   /** `approved` is an approval whose run has not ended (running, scheduled,
    *  or a row from before the outcome was recorded); `ran` ended with exit 0,
-   *  `failed` with another code, `refused` never ran after the approval
-   *  (feedback #104 — "approved" used to be shown over all of these). */
+   *  `failed` with another code, `refused` never ran after the approval —
+   *  refused at run time or unable to start (feedback #104 — "approved" used
+   *  to be shown over all of these). */
   state: "pending" | "approved" | "ran" | "failed" | "refused" | "rejected" | "withdrawn";
   /** What the chip shows: the state, or `exit N` for a failed run. */
   label: string;
@@ -59,7 +60,7 @@ function outcomeOf(r: {
   if (r.status === "pending") return { state: "pending", label: "pending" };
   if (r.status !== "answered") return { state: "withdrawn", label: "withdrawn" };
   if (r.picked_option !== "Approve") return { state: "rejected", label: "rejected" };
-  if (r.run_refusal) return { state: "refused", label: "refused", detail: r.run_refusal };
+  if (r.run_refusal) return { state: "refused", label: "not run", detail: r.run_refusal };
   if (r.exit_code === null || r.exit_code === undefined) return { state: "approved", label: "approved" };
   if (r.exit_code === 0) return { state: "ran", label: "ran" };
   return { state: "failed", label: r.exit_code === 124 ? "timed out" : `exit ${r.exit_code}` };
