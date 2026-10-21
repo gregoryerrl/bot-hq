@@ -1408,11 +1408,27 @@ pub async fn pump_agent(
         if turn_epoch.is_none() && !cfg.is_booting() {
             if let Some(cell) = &cfg.turn_epoch {
                 let live = cell.load(std::sync::atomic::Ordering::Acquire);
+                // **Nothing dealt yet in this ring = nothing to bind to.** The
+                // cell's initial 0 is "no epoch" to the sequencer, so a turn
+                // bound here completes with 0 and is discarded — and the first
+                // REAL deal's events then join that open turn and are
+                // discarded with it, one stalled turn per respawn. The boot
+                // flag covers the first spawn; a RESPAWN (a view, a relaunch's
+                // boot) is not a boot, yet its process also speaks before any
+                // deal — a Codex participant's `Init` and spawn notices
+                // (2026-10-21, the test bench's Astra HANDS: Init at
+                // 11:51:26Z, deal at 11:51:39Z, completion discarded with
+                // carried_epoch 0 at 11:54:49Z; EYES 211957d6).
+                if live == 0 {
+                    debug!(
+                        agent = %cfg.slug,
+                        "event before this ring dealt any turn; not opening a turn on it"
+                    );
                 // **Unchanged since this pump's last completion = no new turn.**
                 // Binding here would tie the NEXT turn to a retired epoch, and
                 // every completion after it would be discarded — see the field
                 // doc for the session that died this way.
-                if last_completed_epoch == Some(live) {
+                } else if last_completed_epoch == Some(live) {
                     debug!(
                         agent = %cfg.slug,
                         epoch = live,
@@ -2902,6 +2918,50 @@ mod tests {
     /// carries an epoch the ring never issued and discards. That is the
     /// `s-206e8921` wedge exactly, reached through boot instead of through a
     /// straggler.
+    /// **A respawned participant that speaks before any deal binds no turn**
+    /// (EYES 211957d6; the test bench's Astra HANDS, 2026-10-21). Not a boot:
+    /// the view or the relaunch respawned the roster, and a Codex process
+    /// sends its `Init` and spawn notices at once. Those must not open a
+    /// turn on the cell's initial 0 — the first real deal's completion would
+    /// carry 0 and the ring would discard it, one stalled turn per respawn.
+    /// The deal comes; the completion carries ITS epoch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_respawned_participants_init_before_any_deal_binds_no_turn() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("eyes");
+        let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        cfg.turn_epoch = Some(Arc::clone(&cell));
+        // Not booting, not orienting: a plain respawn.
+        cfg.booting = None;
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state.clone()));
+
+        ev_tx.send(AgentEvent::Init { session_id: Some("thr".into()), api_key_source: Some("none".into()) }).await.unwrap();
+        ev_tx.send(AgentEvent::Notice("eyes: the usage window is 10% used".into())).await.unwrap();
+        // Processed before the deal, as in the live log (the notice row is
+        // the synchronisation point).
+        for _ in 0..200 {
+            let rows = storage.messages_for_session("s1", None).await.unwrap();
+            if rows.iter().any(|m| m.content.contains("usage window")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        // The ring deals turn one; the model works and completes.
+        cell.store(1, std::sync::atomic::Ordering::Release);
+        ev_tx.send(AgentEvent::Text("reviewing the diff".into())).await.unwrap();
+        ev_tx.send(turn_end()).await.unwrap();
+
+        assert_eq!(
+            next_epoch(&mut ring_rx).await,
+            1,
+            "the completion carries the dealt epoch, not the 0 the Init arrived under"
+        );
+        drop(ev_tx);
+        let _ = task.await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch() {
         let (storage, state) = setup().await;

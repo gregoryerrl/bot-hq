@@ -13,6 +13,12 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **A respawned participant's first turn counts.** When a session's roster
+  came back (opening the session, a relaunch) a Codex participant announced
+  itself before any turn was dealt, and that announcement was taken for the
+  start of a turn — so its first real turn ended as a completion the ring
+  threw away, and the session sat stalled until the idle watchdog nudged
+  it. Nothing said before the ring deals a turn opens one now.
 - **Session Settings survive a relaunch.** The per-session policy snapshot
   (the gear tab's Tool-Gate keywords and push toggles) was wiped for every
   session at startup, so each relaunch reset what you had allowed in an
