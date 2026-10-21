@@ -1775,6 +1775,21 @@ fn gate_refusal_text(
             } else {
                 "bot-hq has PARKED it for the user's approval"
             };
+            // A `gh api` GET is ungated only as the SOLE command of the line
+            // (feedback #83); joined with anything else it parks — and the
+            // park halts the session, which an AFK user cannot answer. Said
+            // here because the agent's reflex was to write another joined
+            // line (feedback #107, s-0a3813c2: two such parks, one of them a
+            // 75-minute stall).
+            let joined_get = why.is_some_and(|w| w.keyword.eq_ignore_ascii_case("gh api"))
+                && command.contains("gh api")
+                && !crate::signaling::is_gh_api_read(command)
+                && (command.contains(';') || command.contains("&&") || command.contains("||"));
+            let joined_hint = if joined_get {
+                " A pure `gh api` GET runs ungated only as the SOLE command of the line — this line joined it with other commands, which is why it parked; next time give it a line of its own."
+            } else {
+                ""
+            };
             format!(
                 "PARKED for the user's approval (a Tool Gate stop, NOT an error): `{command}`{why_line}\n\
                  You do not need to do anything to queue it — {lead} \
@@ -1784,9 +1799,12 @@ fn gate_refusal_text(
                  output arrives as an out-of-band message; on reject you get a \
                  rejection notice. If you need the current state before \
                  continuing, call gate_status(\"{}\") — never re-issue the \
-                 command or assume it ran.\n\
+                 command or assume it ran. A pending gate HALTS the session until \
+                 the user answers; if you no longer need this command, \
+                 withdraw_question(\"{}\") unparks your own gate and the session \
+                 goes on.{joined_hint}\n\
                  {no_dodging}",
-                gate.gate_id, gate.gate_id
+                gate.gate_id, gate.gate_id, gate.gate_id
             )
         }
         None => format!(
@@ -3931,6 +3949,17 @@ mod tests {
         let msg = gate_refusal_text("gh pr create --title x", Some(&gate), None);
         assert!(msg.contains("gate_id: cid-7"), "got: {msg}");
         assert!(msg.contains("gate_status(\"cid-7\")"), "got: {msg}");
+        // The way out of a park nobody needs (feedback #107): the issuer's
+        // own withdrawal, named with the id.
+        assert!(msg.contains("withdraw_question(\"cid-7\")"), "got: {msg}");
+        assert!(!msg.contains("SOLE command"), "no joined-GET hint for a write: {msg}");
+        // A `gh api` GET joined with other commands: the hint says why it
+        // parked; the same GET alone never reaches this text (it is ungated).
+        let why = crate::policy::tool_gate::GateMatch { keyword: "gh api".into(), col: Some(14) };
+        let joined = gate_refusal_text("git status; gh api repos/o/r/actions/runs --jq '.x'", Some(&gate), Some(&why));
+        assert!(joined.contains("SOLE command of the line"), "got: {joined}");
+        let write = gate_refusal_text("gh api -X POST repos/o/r/issues -f title=x", Some(&gate), Some(&why));
+        assert!(!write.contains("SOLE command"), "a gh api write is gated on its own merits: {write}");
         assert!(
             msg.contains("Do NOT call `action_gate`"),
             "a parked command must not be parked a second time: {msg}"
