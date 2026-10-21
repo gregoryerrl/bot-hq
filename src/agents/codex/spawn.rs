@@ -535,6 +535,16 @@ impl Default for InterruptDeadlines {
     }
 }
 
+/// Arm the interrupt deadline for the turn in flight, once: a second
+/// interrupt (another control, a failed hook) while one is pending must not
+/// push the deadline back.
+fn arm_deadline(deadline: &mut Option<tokio::time::Instant>, running_atomic: Option<bool>, deadlines: &InterruptDeadlines) {
+    if deadline.is_none() {
+        let wait = if running_atomic == Some(true) { deadlines.atomic } else { deadlines.plain };
+        *deadline = Some(tokio::time::Instant::now() + wait);
+    }
+}
+
 /// The per-participant driver state.
 struct Driver {
     client: Arc<CodexClient>,
@@ -644,10 +654,9 @@ impl Driver {
                 }
                 ctl = control_rx.recv(), if controls_open => {
                     let Some(_ctl) = ctl else { controls_open = false; continue };
-                    self.interrupt();
-                    if active_turn.is_some() && deadline.is_none() {
-                        let wait = if running_atomic == Some(true) { self.deadlines.atomic } else { self.deadlines.plain };
-                        deadline = Some(tokio::time::Instant::now() + wait);
+                    self.interrupt(active_turn.as_deref());
+                    if active_turn.is_some() {
+                        arm_deadline(&mut deadline, running_atomic, &self.deadlines);
                     }
                 }
                 inc = incoming.recv() => {
@@ -657,9 +666,14 @@ impl Driver {
                     }
                     // A gate hook that failed to RUN (not one that blocked) leaves
                     // the participant unguarded: Codex lets the call through. The
-                    // turn is interrupted and the participant stalled (EYES 32a97dc5).
+                    // turn is interrupted and the participant stalled (EYES 32a97dc5),
+                    // under the same deadline as a user's interrupt — an unguarded
+                    // turn that ignores the interrupt must not run on.
                     if gate_hook_failed(&inc) {
-                        self.interrupt();
+                        self.interrupt(active_turn.as_deref());
+                        if active_turn.is_some() {
+                            arm_deadline(&mut deadline, running_atomic, &self.deadlines);
+                        }
                         let _ = event_tx.send(AgentEvent::Health(AgentHealth::Stalled)).await;
                     }
                     track_running_command(&inc, &mut running_atomic);
@@ -753,14 +767,20 @@ impl Driver {
             .map(|_| ())
     }
 
-    /// `turn/interrupt`, fire-and-forget — the response says nothing the
-    /// driver acts on (the turn's end arrives as `turn/completed`).
-    fn interrupt(&self) {
+    /// `turn/interrupt` for the turn in flight, fire-and-forget — the response
+    /// says nothing the driver acts on (the turn's end arrives as
+    /// `turn/completed`; the deadline covers a turn that does not end). The
+    /// request names the turn: `TurnInterruptParams` requires `turnId`, and
+    /// without it Codex 0.163.0 refuses every interrupt with `-32600 missing
+    /// field turnId` (so until 2026-10-21 only the deadline ever stopped a
+    /// participant). With no turn in flight there is nothing to send.
+    fn interrupt(&self, turn_id: Option<&str>) {
+        let Some(turn_id) = turn_id else { return };
         let client = Arc::clone(&self.client);
-        let thread_id = self.thread_id.clone();
+        let params = json!({ "threadId": self.thread_id, "turnId": turn_id });
         let name = self.agent_name.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.request("turn/interrupt", json!({ "threadId": thread_id })).await {
+            if let Err(e) = client.request("turn/interrupt", params).await {
                 warn!(agent = %name, %e, "turn/interrupt failed");
             }
         });
@@ -1037,6 +1057,22 @@ mod tests {
         async fn turn_completed(&mut self, turn_id: &str) {
             self.write(json!({"method": "turn/completed", "params": {"threadId": "thr", "turn": {"id": turn_id, "status": "completed", "items": [], "error": null}}})).await;
         }
+        async fn turn_interrupted(&mut self, turn_id: &str) {
+            self.write(json!({"method": "turn/completed", "params": {"threadId": "thr", "turn": {"id": turn_id, "status": "interrupted", "items": [], "error": null}}})).await;
+        }
+        /// The server's own check on `turn/interrupt`: `turnId` is required
+        /// and names the turn in flight (Codex 0.163.0 answers `-32600` to
+        /// anything else), so the fake insists on it before answering.
+        async fn answer_interrupt(&mut self, req: &Value, expected_turn: &str) {
+            assert_eq!(req["method"], "turn/interrupt");
+            assert_eq!(req["params"]["threadId"], "thr");
+            assert_eq!(req["params"]["turnId"], expected_turn, "the interrupt must name the turn in flight: {req}");
+            self.answer(req, json!({})).await;
+        }
+        /// Nothing reaches the server within the window.
+        async fn silent_for(&mut self, window: std::time::Duration) {
+            assert!(tokio::time::timeout(window, self.lines.next_line()).await.is_err(), "the server was sent a request");
+        }
     }
 
     struct Harness {
@@ -1238,26 +1274,70 @@ mod tests {
 
     /// EYES 32a97dc5: a gate hook that failed to RUN interrupts the turn and
     /// stalls the participant — Codex lets the call through when its hook
-    /// fails, so the participant is unguarded until it runs again.
+    /// fails, so the participant is unguarded until it runs again. The
+    /// interrupt names the turn in flight, and a completion in time clears
+    /// its deadline so nothing is reaped.
     #[tokio::test]
     async fn a_failed_gate_hook_run_interrupts_and_stalls() {
         let mut h = harness();
-        h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "failed", "sourcePath": "/h/hooks.json", "entries": [{"kind": "stderr", "text": "No such file or directory"}]}}})).await;
-        let req = h.fake.read().await;
-        assert_eq!(req["method"], "turn/interrupt");
-        h.fake.answer(&req, json!({})).await;
-        assert!(matches!(next_event(&mut h).await, AgentEvent::Health(AgentHealth::Stalled)));
-        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(n) if n.contains("FAILED")));
+        h.input.send(OutgoingUserMessage::text("run it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
         // A hook that BLOCKED is the gate working: nothing happens.
         h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "blocked", "sourcePath": "/h/hooks.json"}}})).await;
-        h.fake.write(json!({"method": "turn/started", "params": {}})).await;
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(300), h.fake.lines.next_line()).await.is_err(), "no interrupt for a block");
+        h.fake.silent_for(std::time::Duration::from_millis(300)).await;
+        // A hook that FAILED: the turn is interrupted, the participant stalled.
+        h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "failed", "sourcePath": "/h/hooks.json", "entries": [{"kind": "stderr", "text": "No such file or directory"}]}}})).await;
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Health(AgentHealth::Stalled)));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(n) if n.contains("FAILED")));
+        // The turn ends in time: the deadline is cleared, the driver lives on.
+        h.fake.turn_interrupted("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(900), h.events.recv()).await.is_err(), "nothing is reaped after a completion");
+        h.input.send(OutgoingUserMessage::text("again")).await.unwrap();
+        h.fake.hooks_armed().await;
+        assert_eq!(h.fake.read().await["method"], "turn/start");
     }
 
-    /// G2/P7: an interrupt is given a deadline. Codex answers `turn/interrupt`
-    /// at once but lets the running command finish (measured: `sleep 100`
-    /// lived 70 s past it), so a user message, a stray-turn stop or a halt
-    /// would wait out a `cargo build`. When no `turn/completed` arrives in
+    /// The failed-hook interrupt carries the same deadline as a user's: a turn
+    /// that ignores it is given up (the notice is posted and the driver ends)
+    /// instead of running on unguarded.
+    #[tokio::test]
+    async fn a_failed_gate_hook_whose_turn_does_not_end_reaches_the_deadline() {
+        let mut h = harness();
+        h.input.send(OutgoingUserMessage::text("run it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "failed", "sourcePath": "/h/hooks.json", "entries": []}}})).await;
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Health(AgentHealth::Stalled)));
+        assert!(reaped_then_closed(&mut h).await, "the deadline fired and the driver ended");
+    }
+
+    /// Drain the events until the driver ends; whether the reaped notice was
+    /// among them.
+    async fn reaped_then_closed(h: &mut Harness) -> bool {
+        let mut saw_notice = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(6), h.events.recv()).await.unwrap() {
+                Some(AgentEvent::Notice(n)) if n.contains("reaped") => saw_notice = true,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        saw_notice
+    }
+
+    /// G2/P7: an interrupt is given a deadline. The 2026-10-21 probe saw Codex
+    /// answer `turn/interrupt` at once and let the running command finish
+    /// (`sleep 100` lived 70 s past it; the probe's request shape was not
+    /// checked), so a user message, a stray-turn stop or a halt could wait
+    /// out a `cargo build`. When no `turn/completed` arrives in
     /// time the driver kills the running command's process tree (its
     /// `processId`); when the turn still does not end, the driver ends and the
     /// app-server is reaped — the next message resumes the thread.
@@ -1285,8 +1365,7 @@ mod tests {
         assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
         h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
         let req = h.fake.read().await;
-        assert_eq!(req["method"], "turn/interrupt");
-        h.fake.answer(&req, json!({})).await;
+        h.fake.answer_interrupt(&req, "t1").await;
         // After the deadline: the server's tree is dead, the driver posted the
         // notice and ended, and the canary is untouched.
         let t0 = std::time::Instant::now();
@@ -1298,15 +1377,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
         assert!(t0.elapsed() >= std::time::Duration::from_millis(300), "not before the deadline");
-        let mut saw_notice = false;
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_secs(6), h.events.recv()).await.unwrap() {
-                Some(AgentEvent::Notice(n)) if n.contains("reaped") => saw_notice = true,
-                Some(_) => {}
-                None => break,
-            }
-        }
-        assert!(saw_notice, "the notice was posted before the driver ended");
+        assert!(reaped_then_closed(&mut h).await, "the notice was posted before the driver ended");
         assert!(canary.try_wait().unwrap().is_none(), "the process holding Codex's reported id must survive");
         canary.kill().unwrap();
         let _ = canary.wait();
@@ -1323,9 +1394,8 @@ mod tests {
         h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
         h.control.send(ControlRequest::interrupt("cancel")).await.unwrap();
         let req = h.fake.read().await;
-        assert_eq!(req["method"], "turn/interrupt");
-        h.fake.answer(&req, json!({})).await;
-        h.fake.write(json!({"method": "turn/completed", "params": {"threadId": "thr", "turn": {"id": "t1", "status": "interrupted", "items": [], "error": null}}})).await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        h.fake.turn_interrupted("t1").await;
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         // Still alive: a new page starts a turn.
@@ -1334,14 +1404,57 @@ mod tests {
         assert_eq!(h.fake.read().await["method"], "turn/start");
     }
 
+    /// The interrupt names the turn in flight — the second turn's id, not the
+    /// first's — and with no turn in flight nothing is sent, nothing is
+    /// reaped, and the next page still starts a turn (EYES, plan review).
     #[tokio::test]
-    async fn an_interrupt_asks_the_server_to_interrupt_the_thread_and_a_closed_stream_ends_the_driver() {
+    async fn an_interrupt_names_the_turn_in_flight_and_an_idle_one_sends_nothing() {
         let mut h = harness();
+        h.input.send(OutgoingUserMessage::text("one")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        h.fake.turn_completed("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error: false, .. }));
+        h.input.send(OutgoingUserMessage::text("two")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t2", "status": "inProgress", "items": []}})).await;
+        h.control.send(ControlRequest::interrupt("cancel")).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t2").await;
+        h.fake.turn_interrupted("t2").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
+        // Idle: no request, no deadline, no reap.
+        h.control.send(ControlRequest::interrupt("cancel")).await.unwrap();
+        h.fake.silent_for(std::time::Duration::from_millis(300)).await;
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(900), h.events.recv()).await.is_err(), "an idle interrupt reaps nothing");
+        h.input.send(OutgoingUserMessage::text("three")).await.unwrap();
+        h.fake.hooks_armed().await;
+        assert_eq!(h.fake.read().await["method"], "turn/start");
+    }
+
+    /// A rejected interrupt (the server's `-32600`) is no reason to wait: the
+    /// deadline still gives the turn up.
+    #[tokio::test]
+    async fn a_rejected_interrupt_still_reaches_the_deadline() {
+        let mut h = harness();
+        h.input.send(OutgoingUserMessage::text("build it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
         h.control.send(ControlRequest::interrupt("cancel")).await.unwrap();
         let req = h.fake.read().await;
         assert_eq!(req["method"], "turn/interrupt");
-        assert_eq!(req["params"]["threadId"], "thr");
-        h.fake.answer(&req, json!({})).await;
+        h.fake.write(json!({"id": req["id"], "error": {"code": -32600, "message": "Invalid request: missing field `turnId`"}})).await;
+        assert!(reaped_then_closed(&mut h).await, "the deadline fired and the driver ended");
+    }
+
+    #[tokio::test]
+    async fn an_idle_interrupt_sends_nothing_and_a_closed_stream_ends_the_driver() {
+        let mut h = harness();
+        h.control.send(ControlRequest::interrupt("cancel")).await.unwrap();
+        h.fake.silent_for(std::time::Duration::from_millis(300)).await;
         drop(h.fake);
         assert!(tokio::time::timeout(std::time::Duration::from_secs(5), h.events.recv()).await.unwrap().is_none(), "the event stream closes when the driver ends");
     }

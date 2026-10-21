@@ -61,12 +61,16 @@ model side by side. Migration 0102 applies on first launch.
   message typed during a long build would have waited for the build. bot-hq
   now gives the turn a moment (longer mid-commit or push), then stops the
   participant's own Codex process and resumes its thread on the next
-  message. After Codex compacts a participant's context, bot-hq puts its
-  handoff document and your words since back, as it does for a Claude
-  participant; a used-up ChatGPT usage window is said where the session
-  starts. **Test** on a Codex row leaves nothing running: the probe's
-  short-lived app-server (the native binary under npm's `codex` wrapper)
-  is reaped with its whole process group, on every exit path.
+  message. The interrupt itself names the turn it stops: without that
+  Codex refused every interrupt and only the fallback ever stopped a
+  participant (found in the first live sessions, 2026-10-21); a gate hook
+  that fails to run now gets the same deadline, and an idle participant is
+  not asked to interrupt anything. After Codex compacts a participant's
+  context, bot-hq puts its handoff document and your words since back, as
+  it does for a Claude participant; a used-up ChatGPT usage window is said
+  where the session starts. **Test** on a Codex row leaves nothing running:
+  the probe's short-lived app-server (the native binary under npm's `codex`
+  wrapper) is reaped with its whole process group, on every exit path.
 
 ## [1.0.10] — 2026-10-19
 
