@@ -35,11 +35,43 @@ pub struct Translator {
     /// Where to send the user for a fresh sign-in when Codex says
     /// `unauthorized` (the row's home, for the notice).
     pub login_command: String,
+    /// The model row's context window, the one the spawn asked Codex to run
+    /// (`model_context_window`); `None` leaves Codex's default unchecked.
+    configured_window: Option<u64>,
+    /// The clamp notice is said once per thread.
+    clamp_said: bool,
 }
 
 impl Translator {
     pub fn new(model: impl Into<String>, login_command: impl Into<String>) -> Self {
-        Self { usage: None, model: model.into(), login_command: login_command.into() }
+        Self { usage: None, model: model.into(), login_command: login_command.into(), configured_window: None, clamp_said: false }
+    }
+
+    /// The window the row asked for, so a report below it can be named.
+    pub fn with_configured_window(mut self, window: Option<u64>) -> Self {
+        self.configured_window = window.filter(|w| *w > 0);
+        self
+    }
+
+    /// Codex clamps a `model_context_window` above the model's maximum and
+    /// says nothing, so the compaction point placed from the row
+    /// (`spawn::config_overrides`) sits above the window it runs. The first
+    /// report that shows it names the row value to use: the reported window is
+    /// the usable share of the clamped one, so the maximum is its inverse.
+    fn clamp_notice(&mut self, reported: u64) -> Option<String> {
+        let configured = self.configured_window?;
+        if self.clamp_said || reported == 0 || reported >= super::spawn::usable_window(configured) {
+            return None;
+        }
+        self.clamp_said = true;
+        let maximum = reported * 100 / super::spawn::USABLE_WINDOW_PERCENT;
+        Some(format!(
+            "{}: Codex runs this model at a {}-token window, less than the {} the model row asks for — Codex caps              the window at the model's maximum. Set the row's context window to {} so the compaction point lands              where the meter expects; until then the participant may fill its window before Codex compacts.",
+            self.model,
+            crate::core::pump::group_thousands(reported),
+            crate::core::pump::group_thousands(configured),
+            crate::core::pump::group_thousands(maximum),
+        ))
     }
 
     /// The context report for a turn completing now.
@@ -92,7 +124,9 @@ impl Translator {
                 match used {
                     Some(used) => {
                         self.usage = Some((used, window));
-                        vec![AgentEvent::AssistantUsage { used_tokens: used }]
+                        let mut out = vec![AgentEvent::AssistantUsage { used_tokens: used }];
+                        out.extend(window.and_then(|w| self.clamp_notice(w)).map(AgentEvent::Notice));
+                        out
                     }
                     None => Vec::new(),
                 }
@@ -370,6 +404,31 @@ mod tests {
         assert!(t.translate(&note("item/completed", json!({"item": {"type": "reasoning", "id": "r", "summary": ["thinking"]}}))).is_empty());
         assert!(t.translate(&note("item/started", json!({"item": {"type": "userMessage", "id": "u", "content": []}}))).is_empty());
         assert!(t.translate(&note("item/agentMessage/delta", json!({"delta": "x"}))).is_empty());
+    }
+
+    /// A row asking for more than Codex allows the model: Codex clamps the
+    /// window to the model's maximum and says nothing, so the compaction point
+    /// bot-hq placed from the row (`spawn::config_overrides`) sits above the
+    /// window Codex actually runs. The first report that shows the clamp says
+    /// so once, naming the value to put on the row.
+    #[test]
+    fn a_window_codex_clamped_below_the_row_is_said_once_with_the_row_value_to_use() {
+        let usage = |window: u64| {
+            note("thread/tokenUsage/updated", json!({"threadId": "x", "turnId": "y", "tokenUsage": {"total": {"totalTokens": 100, "inputTokens": 90, "cachedInputTokens": 0, "outputTokens": 10, "reasoningOutputTokens": 0}, "last": {"totalTokens": 100, "inputTokens": 90, "cachedInputTokens": 0, "outputTokens": 10, "reasoningOutputTokens": 0}, "modelContextWindow": window}}))
+        };
+        let mut t = Translator::new("gpt-6.1-sol", "").with_configured_window(Some(1_050_000));
+        let events = t.translate(&usage(828_400));
+        let [AgentEvent::AssistantUsage { used_tokens: 90 }, AgentEvent::Notice(notice)] = &events[..] else {
+            panic!("{events:?}");
+        };
+        assert!(notice.contains("828,400") && notice.contains("1,050,000") && notice.contains("872,000"), "{notice}");
+        assert!(matches!(&t.translate(&usage(828_400))[..], [AgentEvent::AssistantUsage { .. }]), "said once");
+        // The row at Codex's maximum: the report is exactly its 95%, nothing to say.
+        let mut t = Translator::new("gpt-6-astra", "").with_configured_window(Some(872_000));
+        assert!(matches!(&t.translate(&usage(828_400))[..], [AgentEvent::AssistantUsage { .. }]));
+        // No window on the row: Codex's default, nothing to compare.
+        let mut t = Translator::new("gpt-6-astra", "");
+        assert!(matches!(&t.translate(&usage(258_400))[..], [AgentEvent::AssistantUsage { .. }]));
     }
 
     /// P4: the meter's numerator is the LAST model call's prompt size, never

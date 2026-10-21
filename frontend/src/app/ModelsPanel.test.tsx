@@ -415,6 +415,11 @@ describe("Settings → Models — a Codex row (0102)", () => {
     // own option text also says it, so match the note's wording).
     expect(within(dialog).getByText(/spawned through the/i)).toHaveTextContent(/codex cli/i);
     expect(within(dialog).getByText(/spawned through the/i)).not.toHaveTextContent(/claude cli/i);
+    // The context window is the one Codex runs the model at (handed over as
+    // model_context_window, capped by Codex), not the claude CLI's variable.
+    expect(within(dialog).getByText(/model_context_window/)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/CLAUDE_CODE_MAX_CONTEXT_TOKENS/)).toBeNull();
+    expect((within(dialog).getByLabelText(/^context window/i) as HTMLInputElement).placeholder).toBe("872000");
 
     fireEvent.change(within(dialog).getByLabelText(/^codex home/i), {
       target: { value: "/Users/me/.codex-bot-hq" },

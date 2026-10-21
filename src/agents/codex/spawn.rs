@@ -127,9 +127,15 @@ pub fn config_overrides(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String> {
         hooks_state_override(&codex.hook_trust),
     ];
     if let Some(window) = cfg.config.context_window.filter(|w| *w > 0) {
-        // The meter warns before Codex compacts: Codex's own limit sits where
-        // the claude path's reserve does (`pump::COMPACT_RESERVE_TOKENS`).
-        let limit = (window as u64).saturating_sub(COMPACT_RESERVE_TOKENS);
+        // The row's window is the one Codex runs the model at: its registry
+        // defaults are small (272,000; 500,000 on gpt-6.1-sol) and the
+        // override is clamped to the model's `max_context_window` (872,000 on
+        // every model of the user's account, measured 2026-10-21). Codex keeps
+        // 5% of it back and reports the rest as the window the meter sees;
+        // the compaction point goes the claude path's reserve below that so
+        // the handoff rows come first (`pump::COMPACT_RESERVE_TOKENS`).
+        out.push(format!("model_context_window={window}"));
+        let limit = usable_window(window as u64).saturating_sub(COMPACT_RESERVE_TOKENS);
         out.push(format!("model_auto_compact_token_limit={limit}"));
     }
     out
@@ -139,6 +145,18 @@ pub fn config_overrides(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String> {
 /// rows fire (`core::pump::COMPACT_RESERVE_TOKENS`), applied to Codex's own
 /// compaction point so the handoff rows come first.
 pub const COMPACT_RESERVE_TOKENS: u64 = 33_000;
+
+/// The share of a model's context window Codex lets inference use — the rest
+/// is its headroom for prompts, tool overhead and output
+/// (`effective_context_window_percent`, 95 for every model of the user's
+/// account). What Codex reports as `modelContextWindow` is this share of the
+/// window it runs: 872,000 configured reports 828,400 (measured 2026-10-21).
+pub const USABLE_WINDOW_PERCENT: u64 = 95;
+
+/// The window Codex reports for a configured one.
+pub fn usable_window(window: u64) -> u64 {
+    window.saturating_mul(USABLE_WINDOW_PERCENT) / 100
+}
 
 fn toml_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -342,10 +360,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         let _ = event_tx.send(AgentEvent::Notice(text)).await;
     }
 
-    let translator = Translator::new(
-        cfg.config.model_name.clone(),
-        crate::agents::account_setup::codex_login_command(crate::agents::account_setup::Shell::host(), &home),
-    );
+    let translator = translator_for(&cfg, &home);
     let effort = codex_effort(cfg.overrides.effort.as_deref()).map(str::to_string);
     let driver = Driver {
         client: Arc::new(client),
@@ -399,6 +414,16 @@ fn kill_group(pid: Option<u32>) {
 
 /// initialize → hooks/list (the gate must be armed) → thread/start or
 /// thread/resume. Returns the thread id and the Codex version.
+/// The participant's translator: the row's model and window, and the home's
+/// sign-in command for the `unauthorized` notice.
+fn translator_for(cfg: &SpawnConfig, home: &str) -> Translator {
+    Translator::new(
+        cfg.config.model_name.clone(),
+        crate::agents::account_setup::codex_login_command(crate::agents::account_setup::Shell::host(), home),
+    )
+    .with_configured_window(cfg.config.context_window.and_then(|w| u64::try_from(w).ok()))
+}
+
 async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &RenderedHook) -> Result<Started> {
     let version = initialize(client).await?;
     let cwd = cfg.working_dir.as_ref().map(|d| d.display().to_string());
@@ -829,7 +854,7 @@ mod tests {
                 base_url: None,
                 auth_token: None,
                 updated_at: String::new(),
-                context_window: Some(475_000),
+                context_window: Some(872_000),
                 cli_settings: None,
                 claude_config_dir: Some("/h".into()),
                 runtime: "codex".into(),
@@ -890,7 +915,11 @@ mod tests {
             "history.persistence=\"none\"",
             "memories.generate_memories=false",
             "hooks.state={\"/h/hooks.json:pre_tool_use:0:0\"={enabled=true,trusted_hash=\"sha256:abc\"}}",
-            "model_auto_compact_token_limit=442000",
+            // The row's window is the one Codex runs the model at; Codex keeps
+            // 5% of it back (measured: 872,000 reports 828,400), and its
+            // compaction point sits the claude path's reserve below that.
+            "model_context_window=872000",
+            "model_auto_compact_token_limit=795400",
         ] {
             assert!(overrides.contains(&o), "missing {o}: {overrides:?}");
         }
@@ -908,6 +937,22 @@ mod tests {
             assert_eq!(get(scrubbed), Some(None), "{scrubbed} must be removed");
         }
         assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new("/tmp/repo")));
+    }
+
+    /// The row's window reaches the translator, so a thread Codex runs at a
+    /// smaller window than the row asked for is reported (events.rs).
+    #[test]
+    fn the_translator_knows_the_rows_window() {
+        let (cfg, _) = cfg();
+        let mut t = translator_for(&cfg, "/h");
+        let usage = crate::agents::codex::client::Incoming::Notification(crate::agents::codex::client::Notification {
+            method: "thread/tokenUsage/updated".into(),
+            params: serde_json::json!({"tokenUsage": {"last": {"inputTokens": 90}, "modelContextWindow": 258_400}}),
+        });
+        let events = t.translate(&usage);
+        assert!(matches!(&events[..], [AgentEvent::AssistantUsage { .. }, AgentEvent::Notice(n)] if n.contains("872,000")), "{events:?}");
+        assert_eq!(t.model, "gpt-6-astra");
+        assert!(t.login_command.contains("CODEX_HOME='/h'"), "{}", t.login_command);
     }
 
     #[test]

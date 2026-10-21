@@ -549,19 +549,33 @@ function ModelDialog({
                     : null,
                 })
               }
-              placeholder="(unknown — meter shows a gap)"
+              placeholder={codex ? "872000" : "(unknown — meter shows a gap)"}
               className={fieldClass}
             />
-            <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
-              The provider&apos;s published limit for this model, in tokens. For a
-              model id that is not Claude&apos;s own (OpenRouter, DeepSeek, …) this
-              IS the window the claude CLI runs it at — bot-hq hands it over as{" "}
-              <code>CLAUDE_CODE_MAX_CONTEXT_TOKENS</code>; leave it blank and the
-              CLI uses its own default. For a Claude id the CLI keeps its own
-              catalog and this value is only checked against what it reports:
-              when the two disagree, the session gets a notice naming both
-              numbers.
-            </span>
+            {codex ? (
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+                The window Codex runs this model at, in tokens — bot-hq hands it
+                over as <code>model_context_window</code> and places Codex&apos;s
+                compaction point below it so the handoff rows come first. Codex
+                keeps 5% of it back (the meter sees the rest) and caps it at the
+                model&apos;s maximum, which is smaller than the API&apos;s published
+                window: 872,000 on the ChatGPT models seen so far, against
+                defaults of 272,000 (500,000 on GPT-6.1 Sol). Leave it blank for
+                Codex&apos;s default; a value above the cap gets the session a
+                notice naming the value to use.
+              </span>
+            ) : (
+              <span className="mt-1 block break-words font-body-md text-body-md text-on-surface-variant">
+                The provider&apos;s published limit for this model, in tokens. For a
+                model id that is not Claude&apos;s own (OpenRouter, DeepSeek, …) this
+                IS the window the claude CLI runs it at — bot-hq hands it over as{" "}
+                <code>CLAUDE_CODE_MAX_CONTEXT_TOKENS</code>; leave it blank and the
+                CLI uses its own default. For a Claude id the CLI keeps its own
+                catalog and this value is only checked against what it reports:
+                when the two disagree, the session gets a notice naming both
+                numbers.
+              </span>
+            )}
           </label>
 
           <label className="block">

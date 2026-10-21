@@ -2037,7 +2037,8 @@ cli_settings: string | null;
  * spawned with — which subscription it bills when the row has no gateway
  * credential. `null`/blank = the CLI's default `~/.claude`. An absolute
  * path; one signed-in account per dir (0090). For a `codex` row this is
- * the Codex home (`CODEX_HOME`); `null`/blank = `~/.codex`.
+ * the Codex home (`CODEX_HOME`) and is REQUIRED — bot-hq never defaults
+ * to `~/.codex`, and Save refuses a dir a row of the other runtime uses.
  */
 claude_config_dir: string | null; 
 /**
