@@ -24,11 +24,11 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
-use super::client::{CodexClient, Incoming};
+use super::client::{CodexClient, Incoming, RequestFailure};
 use super::events::{Translator, CODEX_MCP_SERVER_NAME};
 use super::home::{hooks_state_override, write_hooks_json, HookTrust, ListedHook, RenderedHook};
 use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
-use crate::agents::spawn::{AgentEvent, AgentHandle, SpawnConfig, CHILD_PIDS};
+use crate::agents::spawn::{AgentEvent, AgentHandle, AgentHealth, SpawnConfig, CHILD_PIDS};
 
 /// What a Codex spawn needs beyond the shared [`SpawnConfig`]: resolved by
 /// `core::session::participant_spawn_config` for a `codex` row, `None` for a
@@ -88,6 +88,18 @@ pub const DISABLED_FEATURES: &[&str] = &[
 /// its own. Every inherited `CODEX_*` variable goes too (`CODEX_THREAD_ID`,
 /// `CODEX_CI`, … leak in when bot-hq is launched from a Codex shell).
 pub const CODEX_AUTH_ENV_SCRUB: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME"];
+/// The `CODEX_*` names a Codex shell exports, removed by name as well as by
+/// prefix so the removal is pinned whether or not the parent carries them.
+pub const CODEX_SHELL_EXPORTS: &[&str] = &[
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "CODEX_TOOL_CALL_ID",
+    "CODEX_CI",
+    "CODEX_VERSION",
+    "CODEX_MANAGED_BY_NPM",
+    "CODEX_MANAGED_PACKAGE_ROOT",
+    "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS",
+];
 
 /// The connector's name for the MCP server it registers.
 pub fn mcp_server_name() -> &'static str {
@@ -148,15 +160,17 @@ pub fn build_codex_command(cfg: &SpawnConfig, codex: &CodexSpawn) -> tokio::proc
     let bin = codex.bin.clone().unwrap_or_else(|| "codex".to_string());
     let mut cmd = crate::process::tokio_command(&bin);
     crate::appimage_env::scrub_tokio(&mut cmd);
-    // The inherited `CODEX_*` and credential variables, cleared by NAME: a
-    // prefix scrub would need the parent's environment read at build time
-    // and `Command` carries no view of it; the names below are the ones
-    // Codex reads for auth/billing plus the ones a Codex shell exports.
-    for name in CODEX_AUTH_ENV_SCRUB
-        .iter()
-        .chain(["CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID", "CODEX_CI", "CODEX_VERSION", "CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT", "CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS"].iter())
-    {
+    // The inherited credential variables by name, and every inherited
+    // `CODEX_*` by prefix (`CODEX_THREAD_ID`, `CODEX_CI`, … leak in when
+    // bot-hq is launched from a Codex shell): the parent's environment is
+    // read here, at build time.
+    for name in CODEX_AUTH_ENV_SCRUB.iter().chain(CODEX_SHELL_EXPORTS.iter()) {
         cmd.env_remove(name);
+    }
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("CODEX_") {
+            cmd.env_remove(&name);
+        }
     }
     cmd.arg("app-server").arg("--listen").arg("stdio://");
     for feature in DISABLED_FEATURES {
@@ -187,8 +201,11 @@ pub fn debug_codex_command(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String>
 }
 
 /// bot-hq's effort knob (`low|medium|high|max`, the claude vocabulary) on
-/// Codex's scale: the same four names exist; `ultra` (automatic task
-/// delegation) is never sent.
+/// Codex's scale: the same four names exist — `model/list` on 0.163.0
+/// advertises `low, medium, high, xhigh, max, ultra` for both `gpt-6-astra`
+/// and `gpt-6.1-sol` (measured, s-de77e2f0; an unadvertised value fails
+/// every `turn/start`) — and `ultra` (automatic task delegation) is never
+/// sent.
 pub fn codex_effort(effort: Option<&str>) -> Option<&'static str> {
     match effort?.trim().to_ascii_lowercase().as_str() {
         "low" => Some("low"),
@@ -230,12 +247,29 @@ pub fn version_from_user_agent(user_agent: &str) -> String {
         .unwrap_or_else(|| user_agent.to_string())
 }
 
+/// The notifications the translator never reads, suppressed at `initialize`
+/// (EYES 4295ae7d): the streamed deltas are the bulk of a turn's traffic and
+/// carry nothing the transcript shows.
+pub const OPT_OUT_NOTIFICATIONS: &[&str] = &[
+    "item/agentMessage/delta",
+    "item/reasoning/textDelta",
+    "item/reasoning/summaryTextDelta",
+    "item/reasoning/summaryPartAdded",
+    "item/commandExecution/outputDelta",
+    "item/fileChange/outputDelta",
+    "item/plan/delta",
+    "remoteControl/status/changed",
+];
+
 /// `initialize` + `initialized`, returning the version the server reports.
 pub async fn initialize(client: &CodexClient) -> Result<String> {
     let init = client
         .request(
             "initialize",
-            json!({ "clientInfo": { "name": "bot-hq", "title": "bot-hq", "version": env!("CARGO_PKG_VERSION") } }),
+            json!({
+                "clientInfo": { "name": "bot-hq", "title": "bot-hq", "version": env!("CARGO_PKG_VERSION") },
+                "capabilities": { "optOutNotificationMethods": OPT_OUT_NOTIFICATIONS },
+            }),
         )
         .await?;
     client.notify("initialized", json!({})).await?;
@@ -288,7 +322,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
 
     let (client, incoming) = CodexClient::start(stdout, stdin);
     let started = start_thread(&client, &cfg, &rendered).await;
-    let (thread_id, version) = match started {
+    let Started { thread_id, version, resume_failed } = match started {
         Ok(v) => v,
         Err(e) => {
             // The child is useless without a thread; reap it before failing.
@@ -304,6 +338,9 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let _ = event_tx
         .send(AgentEvent::Init { session_id: Some(thread_id.clone()), api_key_source: Some("none".into()) })
         .await;
+    if let Some(text) = resume_failed {
+        let _ = event_tx.send(AgentEvent::Notice(text)).await;
+    }
 
     let translator = Translator::new(
         cfg.config.model_name.clone(),
@@ -353,7 +390,7 @@ fn kill_group(pid: Option<u32>) {
 
 /// initialize → hooks/list (the gate must be armed) → thread/start or
 /// thread/resume. Returns the thread id and the Codex version.
-async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &RenderedHook) -> Result<(String, String)> {
+async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &RenderedHook) -> Result<Started> {
     let version = initialize(client).await?;
     let cwd = cfg.working_dir.as_ref().map(|d| d.display().to_string());
     let listed = client.request("hooks/list", json!({ "cwds": cwd.iter().collect::<Vec<_>>() })).await?;
@@ -371,6 +408,7 @@ async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &Render
     if let Some(cwd) = &cwd {
         params["cwd"] = json!(cwd);
     }
+    let mut resume_failed = None;
     let result = match &cfg.resume_session_id {
         Some(thread_id) => {
             let mut p = params.clone();
@@ -379,6 +417,11 @@ async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &Render
                 Ok(r) => r,
                 Err(e) => {
                     warn!(agent = %cfg.agent_name, %thread_id, %e, "thread/resume failed; starting a fresh thread");
+                    resume_failed = Some(format!(
+                        "{} could not resume its Codex thread {thread_id} ({e}); it starts a fresh one and \
+                         remembers nothing of the old — its handoff document is what carries over.",
+                        cfg.agent_name
+                    ));
                     client.request("thread/start", params).await?
                 }
             }
@@ -389,7 +432,15 @@ async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &Render
         .as_str()
         .ok_or_else(|| anyhow!("{}: thread/start returned no thread id", cfg.agent_name))?
         .to_string();
-    Ok((thread_id, version))
+    Ok(Started { thread_id, version, resume_failed })
+}
+
+/// What the start sequence produced.
+struct Started {
+    thread_id: String,
+    version: String,
+    /// N1: a resume that fell back to a fresh thread, said in the channel.
+    resume_failed: Option<String>,
 }
 
 /// The per-participant driver state.
@@ -407,66 +458,90 @@ impl Driver {
     /// Run until the server's stream closes or the input side is dropped.
     async fn run(
         mut self,
-        mut incoming: mpsc::Receiver<Incoming>,
+        mut incoming: mpsc::UnboundedReceiver<Incoming>,
         event_tx: mpsc::Sender<AgentEvent>,
         mut input_rx: mpsc::Receiver<OutgoingUserMessage>,
         mut control_rx: mpsc::Receiver<ControlRequest>,
     ) {
-        // The turn in flight, and the pages that arrived while one was and
-        // could not be steered in: they start the next turn the moment this
-        // one completes, and the completion is reported only once the queue
-        // is empty — the ring dealt ONE turn (plan-eyes P2).
+        // The turn in flight, and the pages the transport TOOK but no turn
+        // has carried yet: a page that arrived mid-turn and could not be
+        // steered in, or whose `turn/start` failed. They go out — all of them,
+        // oldest first — at the next chance (the next page, or the moment the
+        // running turn completes), and a completion is reported only once
+        // nothing is queued: the sequencer committed those rows when the
+        // handle took them, so a page is never dropped (EYES e264a387) and
+        // the ring dealt ONE turn (plan-eyes P2).
         let mut active_turn: Option<String> = None;
         let mut queued: Vec<String> = Vec::new();
         let mut inputs_open = true;
+        let mut controls_open = true;
         loop {
             tokio::select! {
                 msg = input_rx.recv(), if inputs_open => {
                     let Some(msg) = msg else { inputs_open = false; continue };
                     let text = msg.message.content;
                     match &active_turn {
-                        None => match self.start_turn(&text).await {
-                            Ok(turn_id) => active_turn = Some(turn_id),
-                            Err(e) => {
-                                let _ = event_tx.send(AgentEvent::Notice(format!("{}: {e:#}", self.agent_name))).await;
-                                let _ = event_tx.send(AgentEvent::TurnComplete {
-                                    stop_reason: Some("failed".into()), subtype: Some("failed".into()),
-                                    is_error: true, api_error_status: None,
-                                    context: crate::agents::spawn::ContextReport::none(crate::agents::spawn::ContextVerdict::NoUsage),
-                                }).await;
+                        None => {
+                            queued.push(text);
+                            match self.start_queued(&mut queued).await {
+                                Ok(turn_id) => active_turn = Some(turn_id),
+                                Err(e) => {
+                                    // The pages stay queued; the ring hears a failed
+                                    // turn and deals again once the cause is fixed.
+                                    let _ = event_tx.send(AgentEvent::Notice(format!("{}: {e:#}", self.agent_name))).await;
+                                    let _ = event_tx.send(AgentEvent::TurnComplete {
+                                        stop_reason: Some("failed".into()), subtype: Some("failed".into()),
+                                        is_error: true, api_error_status: None,
+                                        context: crate::agents::spawn::ContextReport::none(crate::agents::spawn::ContextVerdict::NoUsage),
+                                    }).await;
+                                }
                             }
-                        },
-                        Some(turn_id) => {
-                            if let Err(e) = self.steer(turn_id, &text).await {
-                                warn!(agent = %self.agent_name, %e, "turn/steer did not land; queued for the next turn");
+                        }
+                        Some(turn_id) => match self.steer(turn_id, &text).await {
+                            Ok(()) => {}
+                            // The server REFUSED the steer (the turn was ending):
+                            // the page is this participant's to read next.
+                            Err(RequestFailure::Rpc { error, .. }) => {
+                                warn!(agent = %self.agent_name, %error, "turn/steer refused; queued for the next turn");
                                 queued.push(text);
                             }
-                        }
+                            // Nothing heard: the server may have applied it. Not
+                            // re-sent (a duplicate page would be read twice) and
+                            // not dropped silently — said in the channel (EYES 4295ae7d).
+                            Err(e @ RequestFailure::Timeout { .. }) => {
+                                let _ = event_tx.send(AgentEvent::Notice(format!(
+                                    "{}: a page's delivery is of unknown outcome ({e}); if the participant does not act on it, send it again.",
+                                    self.agent_name
+                                ))).await;
+                            }
+                            Err(e @ RequestFailure::Closed { .. }) => {
+                                warn!(agent = %self.agent_name, %e, "turn/steer: the server is gone");
+                                queued.push(text);
+                            }
+                        },
                     }
                 }
-                ctl = control_rx.recv() => {
-                    let Some(_ctl) = ctl else { continue };
-                    let client = Arc::clone(&self.client);
-                    let thread_id = self.thread_id.clone();
-                    let name = self.agent_name.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = client.request("turn/interrupt", json!({ "threadId": thread_id })).await {
-                            warn!(agent = %name, %e, "turn/interrupt failed");
-                        }
-                    });
+                ctl = control_rx.recv(), if controls_open => {
+                    let Some(_ctl) = ctl else { controls_open = false; continue };
+                    self.interrupt();
                 }
                 inc = incoming.recv() => {
                     let Some(inc) = inc else { break };
                     if inc == Incoming::Closed {
                         break;
                     }
+                    // A gate hook that failed to RUN (not one that blocked) leaves
+                    // the participant unguarded: Codex lets the call through. The
+                    // turn is interrupted and the participant stalled (EYES 32a97dc5).
+                    if gate_hook_failed(&inc) {
+                        self.interrupt();
+                        let _ = event_tx.send(AgentEvent::Health(AgentHealth::Stalled)).await;
+                    }
                     for ev in self.translator.translate(&inc) {
                         if let AgentEvent::TurnComplete { .. } = &ev {
                             active_turn = None;
                             if !queued.is_empty() {
-                                let text = queued.join(crate::storage::WIRE_JOIN);
-                                queued.clear();
-                                match self.start_turn(&text).await {
+                                match self.start_queued(&mut queued).await {
                                     Ok(turn_id) => {
                                         active_turn = Some(turn_id);
                                         // Not reported: the dealt turn goes on.
@@ -485,6 +560,28 @@ impl Driver {
                 }
             }
         }
+    }
+
+    /// Start a turn with everything queued, oldest first. On success the
+    /// queue is empty; on failure it is untouched (nothing is lost).
+    async fn start_queued(&self, queued: &mut Vec<String>) -> Result<String> {
+        let text = queued.join(crate::storage::WIRE_JOIN);
+        let turn_id = self.start_turn(&text).await?;
+        queued.clear();
+        Ok(turn_id)
+    }
+
+    /// `turn/interrupt`, fire-and-forget — the response says nothing the
+    /// driver acts on (the turn's end arrives as `turn/completed`).
+    fn interrupt(&self) {
+        let client = Arc::clone(&self.client);
+        let thread_id = self.thread_id.clone();
+        let name = self.agent_name.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.request("turn/interrupt", json!({ "threadId": thread_id })).await {
+                warn!(agent = %name, %e, "turn/interrupt failed");
+            }
+        });
     }
 
     /// G7/M10: the gate hook is re-read before EVERY turn. The file sits in
@@ -516,7 +613,7 @@ impl Driver {
             .ok_or_else(|| anyhow!("turn/start returned no turn id"))
     }
 
-    async fn steer(&self, turn_id: &str, text: &str) -> Result<()> {
+    async fn steer(&self, turn_id: &str, text: &str) -> Result<(), RequestFailure> {
         self.client
             .request(
                 "turn/steer",
@@ -525,6 +622,16 @@ impl Driver {
             .await
             .map(|_| ())
     }
+}
+
+/// Whether an incoming message is a FAILED run of the gate hook
+/// (`hook/completed` with `status: failed` on `preToolUse`): Codex ran the
+/// call anyway, so the participant is unguarded from here.
+fn gate_hook_failed(inc: &Incoming) -> bool {
+    let Incoming::Notification(n) = inc else { return false };
+    n.method == "hook/completed"
+        && n.params["run"]["eventName"].as_str() == Some("preToolUse")
+        && n.params["run"]["status"].as_str() == Some("failed")
 }
 
 #[cfg(test)]
@@ -682,7 +789,7 @@ mod tests {
         async fn hooks_armed(&mut self) {
             let req = self.read().await;
             assert_eq!(req["method"], "hooks/list", "the gate is checked before every turn");
-            let rendered = RenderedHook::new(Path::new("/h"), Path::new("/opt/bot-hq"), Path::new("/data"));
+            let rendered = RenderedHook::new(Path::new("/h"), &std::env::current_exe().unwrap(), Path::new("/data"));
             self.answer(&req, json!({"data": [{"cwd": "/tmp/repo", "hooks": [{"key": rendered.key, "eventName": "preToolUse", "handlerType": "command", "command": rendered.command, "matcher": ".*", "sourcePath": rendered.source_path, "source": "user", "enabled": true, "currentHash": "sha256:abc", "trustStatus": "trusted"}], "warnings": [], "errors": []}]})).await;
         }
         async fn turn_completed(&mut self, turn_id: &str) {
@@ -704,7 +811,8 @@ mod tests {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
         let (c_read, c_write) = tokio::io::split(client_side);
         let (s_read, s_write) = tokio::io::split(server_side);
-        let (client, incoming) = CodexClient::start(c_read, c_write);
+        let (mut client, incoming) = CodexClient::start(c_read, c_write);
+        client.timeout = std::time::Duration::from_millis(400);
         let (event_tx, events) = mpsc::channel(64);
         let (input, input_rx) = mpsc::channel(8);
         let (control, control_rx) = mpsc::channel(8);
@@ -714,7 +822,7 @@ mod tests {
             translator: Translator::new("gpt-6-astra", ""),
             effort: Some("high".into()),
             agent_name: "eyes".into(),
-            rendered: RenderedHook::new(Path::new("/h"), Path::new("/opt/bot-hq"), Path::new("/data")),
+            rendered: RenderedHook::new(Path::new("/h"), &std::env::current_exe().unwrap(), Path::new("/data")),
             cwd: Some("/tmp/repo".into()),
         };
         tokio::spawn(driver.run(incoming, event_tx, input_rx, control_rx));
@@ -800,6 +908,60 @@ mod tests {
         h.input.send(OutgoingUserMessage::text("page 2")).await.unwrap();
         let req = h.fake.read().await;
         assert_eq!(req["method"], "hooks/list");
+    }
+
+    /// EYES e264a387: a page whose `turn/start` failed is not thrown away —
+    /// it goes out with the next page, oldest first; and EYES 4295ae7d: a
+    /// steer whose outcome is unknown (a timeout) is neither re-sent nor
+    /// dropped silently.
+    #[tokio::test]
+    async fn a_page_whose_start_failed_rides_the_next_start_and_a_timed_out_steer_is_said_not_resent() {
+        let mut h = harness();
+        // Page 1: the gate is unarmed → the start fails; the page is kept.
+        h.input.send(OutgoingUserMessage::text("page 1")).await.unwrap();
+        let req = h.fake.read().await;
+        assert_eq!(req["method"], "hooks/list");
+        h.fake.answer(&req, json!({"data": [{"cwd": "/tmp/repo", "hooks": [], "warnings": [], "errors": []}]})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(_)));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error: true, .. }));
+        // Page 2: the gate is back; the turn carries BOTH pages, oldest first.
+        h.input.send(OutgoingUserMessage::text("page 2")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        assert_eq!(start["method"], "turn/start");
+        let text = start["params"]["input"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("page 1") && text.ends_with("page 2"), "{text}");
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        // A steer the server never answers: said, not re-queued.
+        h.input.send(OutgoingUserMessage::text("page 3")).await.unwrap();
+        let steer = h.fake.read().await;
+        assert_eq!(steer["method"], "turn/steer");
+        // (the harness client's timeout is short — see `harness`)
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(n) if n.contains("unknown outcome")));
+        h.fake.turn_completed("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error: false, .. }), "no re-sent page starts a turn");
+        h.input.send(OutgoingUserMessage::text("page 4")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        assert_eq!(start["params"]["input"][0]["text"], "page 4", "page 3 was not re-sent");
+    }
+
+    /// EYES 32a97dc5: a gate hook that failed to RUN interrupts the turn and
+    /// stalls the participant — Codex lets the call through when its hook
+    /// fails, so the participant is unguarded until it runs again.
+    #[tokio::test]
+    async fn a_failed_gate_hook_run_interrupts_and_stalls() {
+        let mut h = harness();
+        h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "failed", "sourcePath": "/h/hooks.json", "entries": [{"kind": "stderr", "text": "No such file or directory"}]}}})).await;
+        let req = h.fake.read().await;
+        assert_eq!(req["method"], "turn/interrupt");
+        h.fake.answer(&req, json!({})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Health(AgentHealth::Stalled)));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(n) if n.contains("FAILED")));
+        // A hook that BLOCKED is the gate working: nothing happens.
+        h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "run": {"eventName": "preToolUse", "status": "blocked", "sourcePath": "/h/hooks.json"}}})).await;
+        h.fake.write(json!({"method": "turn/started", "params": {}})).await;
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(300), h.fake.lines.next_line()).await.is_err(), "no interrupt for a block");
     }
 
     #[tokio::test]

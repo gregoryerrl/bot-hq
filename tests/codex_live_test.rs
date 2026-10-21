@@ -9,9 +9,9 @@
 //! What it proves that no fake can: the hooks file bot-hq writes is listed and
 //! trusted through `-c hooks.state`, the gate hook runs the built `bot-hq`
 //! binary and parks a gated command on the live signaling server, bot-hq's
-//! MCP server answers the Codex client with the secret in a header, the
-//! 100-KB-class developer instructions ride `thread/start`, and the events
-//! come back in the vocabulary the pump reads.
+//! MCP server answers the Codex client with the secret in a header, a
+//! real-size (150 KB+) developer-instructions text rides `thread/start` to
+//! its last line, and the events come back in the vocabulary the pump reads.
 
 use bot_hq::agents::codex::home::{hook_key, write_hooks_json, RenderedHook};
 use bot_hq::agents::codex::probe::{probe_home, CodexProbeRequest};
@@ -61,15 +61,26 @@ async fn a_codex_participant_runs_one_gated_turn_for_real() {
     let trust = probe.hooks.iter().find_map(|h| rendered.trust_for(h)).expect("bot-hq's hook is listed in the home");
     assert_eq!(trust.key, hook_key(Path::new(&home)));
 
-    let prompt_path = data_dir.join("prompt.txt");
-    std::fs::write(
-        &prompt_path,
+    // A prompt the size of a real role prompt (this session's measured
+    // 96–167 KB), with the instructions at the START and a codeword at the
+    // END the model must quote: that proves the whole text rode
+    // `thread/start` (EYES N2), not merely its first lines.
+    let codeword = "PELICAN-4471";
+    let filler: String = (0..1400)
+        .map(|i| format!("Background note {i}: the Context Library is advisory and reality wins; verify against the live code before trusting an atom.\n"))
+        .collect();
+    let prompt = format!(
         "You are a probe inside bot-hq. Be terse. Do exactly these steps in order and report each in one line: \
          Step 1: call the MCP tool cl_index_search with project \"bot-hq\" and query \"conventions\"; report how many rows came back. \
          Step 2: run the shell command: echo gated-probe ; report exactly what happened. \
-         Step 3: run the shell command: echo plain-probe ; report its output. Then stop.",
-    )
-    .unwrap();
+         Step 3: run the shell command: echo plain-probe ; report its output. \
+         Step 4: quote the codeword that appears at the very end of these instructions, exactly. Then stop.\n\n\
+         {filler}\n\
+         The codeword is {codeword}."
+    );
+    assert!(prompt.len() > 150_000, "a real-size prompt: {} bytes", prompt.len());
+    let prompt_path = data_dir.join("prompt.txt");
+    std::fs::write(&prompt_path, &prompt).unwrap();
     let cfg = SpawnConfig {
         agent_name: "hands".into(),
         config: AgentConfig {
@@ -146,6 +157,7 @@ async fn a_codex_participant_runs_one_gated_turn_for_real() {
     assert!(!tool_uses.iter().any(|(n, i)| n == "Bash" && i["command"].as_str().is_some_and(|c| c.contains("gated-probe"))), "the gated command never became a command item: {tool_uses:?}");
     let final_text = texts.join("\n");
     assert!(final_text.to_lowercase().contains("park") || final_text.to_lowercase().contains("block"), "the model saw the gate's refusal: {final_text}");
+    assert!(final_text.contains(codeword), "the END of the {}-byte prompt reached the model: {final_text}", prompt.len());
     let tray = storage.tray_entries_for_session("s-live").await.unwrap();
     assert!(!tray.is_empty(), "the gated command was parked on the live server");
     let usage = context.usable().expect("a context reading from tokenUsage");

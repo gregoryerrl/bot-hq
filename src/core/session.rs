@@ -1640,8 +1640,16 @@ where
     Fut: std::future::Future<Output = crate::agents::spawn::AuthProbe>,
 {
     use crate::agents::spawn::{login_command, AuthProbe};
-    let first_spawn = p.account_dir_at_spawn.is_none();
-    let dir = match &p.account_dir_at_spawn {
+    // The pin is the runtime, the dir and the session id together (EYES
+    // d928bf99): a record made under Codex is a Codex home and a Codex
+    // thread, neither of which claude-code may run in or resume — such a row
+    // spawns as if for the first time, from the row, and the record is
+    // rewritten by the caller (`participant_spawn_config` drops the session
+    // id and posts the notice).
+    let recorded_here =
+        crate::agents::runtime::Runtime::from_column(&p.runtime) == crate::agents::runtime::Runtime::ClaudeCode;
+    let first_spawn = !recorded_here || p.account_dir_at_spawn.is_none();
+    let dir = match p.account_dir_at_spawn.as_ref().filter(|_| recorded_here) {
         Some(recorded) => recorded.clone(),
         None => crate::storage::normalize_config_dir(cfg.claude_config_dir.as_deref())
             .unwrap_or_default(),
@@ -1719,6 +1727,14 @@ where
             .await
         {
             warn!(participant = %p.slug, ?e, "recording the account at spawn failed");
+        }
+    }
+    if !recorded_here {
+        if let Err(e) = storage
+            .set_runtime_at_spawn(p.id, crate::agents::runtime::Runtime::ClaudeCode, "")
+            .await
+        {
+            warn!(participant = %p.slug, ?e, "recording the runtime at spawn failed");
         }
     }
     info!(
@@ -1799,8 +1815,15 @@ pub(crate) async fn resolve_codex_account(
     use crate::agents::codex::home::{write_hooks_json, RenderedHook};
     use crate::agents::runtime::Runtime;
     use crate::agents::spawn::AuthProbe;
-    let first_spawn = p.account_dir_at_spawn.as_deref().is_none_or(str::is_empty);
-    let home = match p.account_dir_at_spawn.as_deref().filter(|d| !d.is_empty()) {
+    // The pin is the RUNTIME, the dir and the session id together (EYES
+    // d928bf99): a record made under claude-code is a Claude dir and a claude
+    // session, neither of which is this connector's — a row that turned Codex
+    // spawns as if for the first time, from the row, and the record is
+    // rewritten. Only a record made under Codex is reused.
+    let recorded_runtime = Runtime::from_column(&p.runtime);
+    let recorded_here = recorded_runtime == Runtime::Codex;
+    let first_spawn = !recorded_here || p.account_dir_at_spawn.as_deref().is_none_or(str::is_empty);
+    let home = match p.account_dir_at_spawn.as_deref().filter(|d| !d.is_empty() && recorded_here) {
         Some(recorded) => recorded.to_string(),
         None => crate::storage::normalize_config_dir(cfg.claude_config_dir.as_deref()).unwrap_or_default(),
     };
@@ -1812,16 +1835,15 @@ pub(crate) async fn resolve_codex_account(
             cfg.model_name
         );
     }
-    // The runtime pin (P6): a session id recorded under the other connector is
-    // not this one's thread.
-    let recorded_runtime = Runtime::from_column(&p.runtime);
-    let (resume, notice) = match (&p.claude_session_id, recorded_runtime) {
-        (Some(id), Runtime::Codex) => (Some(id.clone()), None),
-        (Some(_), other) => (
+    // The session id half of the pin (P6): a session recorded under the
+    // other connector is not this one's thread.
+    let (resume, notice) = match (&p.claude_session_id, recorded_here) {
+        (Some(id), true) => (Some(id.clone()), None),
+        (Some(_), false) => (
             None,
             Some(format!(
-                "ℹ [bot-hq] {} starts a fresh Codex thread: its stored session belongs to {other}, which \
-                 cannot be resumed on Codex.",
+                "ℹ [bot-hq] {} starts a fresh Codex thread in {home}: its stored session and dir belong \
+                 to {recorded_runtime}, which Codex cannot resume.",
                 p.slug
             )),
         ),
@@ -1899,7 +1921,7 @@ pub(crate) async fn resolve_codex_account(
             warn!(participant = %p.slug, ?e, "recording the Codex account at spawn failed");
         }
     }
-    if first_spawn || recorded_runtime != Runtime::Codex {
+    if first_spawn {
         if let Err(e) = storage.set_runtime_at_spawn(p.id, Runtime::Codex, &probed.version).await {
             warn!(participant = %p.slug, ?e, "recording the runtime at spawn failed");
         }
@@ -2078,6 +2100,11 @@ async fn participant_spawn_config(
             return Err(e);
         }
     };
+    // The claude path's half of the runtime pin: a session recorded under
+    // Codex is a thread, not a claude session — dropped, with a notice.
+    let claude_resume_dropped = runtime == crate::agents::runtime::Runtime::ClaudeCode
+        && p.claude_session_id.is_some()
+        && crate::agents::runtime::Runtime::from_column(&p.runtime) != crate::agents::runtime::Runtime::ClaudeCode;
     let account = match &codex_account {
         Some(c) => c.account.clone(),
         None => match resolve_participant_account(storage, p, &config, auth_probe).await {
@@ -2096,7 +2123,18 @@ async fn participant_spawn_config(
             }
         },
     };
-    if let Some(text) = codex_account.as_ref().and_then(|c| c.notice.clone()) {
+    let pin_notice = codex_account.as_ref().and_then(|c| c.notice.clone()).or_else(|| {
+        claude_resume_dropped.then(|| {
+            format!(
+                "ℹ [bot-hq] {} starts a fresh claude-code session in {}: its stored session and dir belong to \
+                 {}, which claude-code cannot resume.",
+                p.slug,
+                if account.dir.is_empty() { "~/.claude".to_string() } else { account.dir.clone() },
+                crate::agents::runtime::Runtime::from_column(&p.runtime)
+            )
+        })
+    });
+    if let Some(text) = pin_notice {
         crate::core::post_system_notice(
             storage,
             Some(bridge),
@@ -2265,6 +2303,7 @@ async fn participant_spawn_config(
         // one recorded under the other connector; a claude row's is its own).
         resume_session_id: match &codex_account {
             Some(c) => c.resume.clone(),
+            None if claude_resume_dropped => None,
             None => p.claude_session_id.clone(),
         },
         project: project.clone(),
@@ -5088,6 +5127,99 @@ mod tests {
         assert_eq!(spawn_cfg.resume_session_id, None, "a claude session id is not a Codex thread id");
         let rows = s.messages_for_session("s1", None).await.unwrap();
         assert!(rows.iter().any(|m| m.content.contains("fresh") && m.content.contains("claude_code")), "a notice says why: {rows:?}");
+    }
+
+    /// EYES blocking d928bf99 (a): a participant first spawned on a CLAUDE
+    /// custom dir whose row turned Codex must not carry that dir into
+    /// `CODEX_HOME` — nothing of bot-hq's lands in the Claude dir, the Codex
+    /// home comes from the row, the session id is dropped, the record is
+    /// rewritten, and a notice says so.
+    #[tokio::test]
+    async fn a_claude_dir_never_becomes_a_codex_home_when_the_row_turns_codex() {
+        let s = Storage::memory().await.unwrap();
+        let dirs = TempDir::new().unwrap();
+        let claude_dir = dirs.path().join("claude-acct-b");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let claude_dir_str = claude_dir.to_str().unwrap().to_string();
+        let codex_home = dirs.path().join("codex-home");
+        let codex_home_str = codex_home.to_str().unwrap().to_string();
+        // First life: a claude row on a custom dir, spawned once.
+        let mut row = fable_row("m-row");
+        row.claude_config_dir = Some(claude_dir_str.clone());
+        s.upsert_model(&row).await.unwrap();
+        let p = seed_hands_on(&s, "m-row").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (probe, _) = fixed_probe(logged_in("b@example.com", "org-b"));
+        resolve_participant_account(&s, &p, &cfg, &probe).await.unwrap();
+        s.set_participant_claude_id(p.id, "claude-uuid-1").await.unwrap();
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some(claude_dir_str.as_str()));
+        // The row turns Codex.
+        s.upsert_model(&astra_row("m-row", &codex_home_str)).await.unwrap();
+        let p = reread(&s).await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let data_dir = TempDir::new().unwrap();
+        let (codex_probe, asked) = fixed_codex_probe(chatgpt_account("me@example.com", "acct-1"), Some((&codex_home_str, data_dir.path(), "sha256:x")));
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(s.clone()).await;
+        let spawn_cfg = participant_spawn_config(&s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp_temp.path(), None, &bridge, &*never_claude_probe(), &*codex_probe)
+            .await
+            .unwrap();
+        assert_eq!(spawn_cfg.account_dir.as_deref(), Some(codex_home_str.as_str()), "the home comes from the row, not the Claude record");
+        assert_eq!(spawn_cfg.resume_session_id, None);
+        assert!(!claude_dir.join("hooks.json").exists(), "nothing of bot-hq's lands in the Claude dir");
+        assert!(codex_home.join("hooks.json").is_file());
+        assert_eq!(asked.lock().unwrap()[0].home, codex_home_str, "the probe is asked about the Codex home");
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some(codex_home_str.as_str()), "the record is rewritten with the runtime");
+        assert_eq!(p.account_email_at_spawn.as_deref(), Some("me@example.com"));
+        assert_eq!(p.runtime, "codex");
+        let rows = s.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("fresh") && m.content.contains("claude_code")), "{rows:?}");
+    }
+
+    /// EYES blocking d928bf99 (c), the reverse: a participant first spawned on
+    /// Codex whose row turned claude-code must not resume the Codex thread or
+    /// run claude in the Codex home — the dir comes from the row, the session
+    /// id is dropped, the record and the runtime are rewritten, with a notice.
+    #[tokio::test]
+    async fn a_codex_home_never_becomes_a_claude_dir_when_the_row_turns_claude() {
+        let s = Storage::memory().await.unwrap();
+        let dirs = TempDir::new().unwrap();
+        let codex_home_str = dirs.path().join("codex-home").to_str().unwrap().to_string();
+        s.upsert_model(&astra_row("m-row", &codex_home_str)).await.unwrap();
+        let p = seed_hands_on(&s, "m-row").await;
+        // First life: spawned on Codex (recorded by the Codex branch).
+        s.set_account_at_spawn(p.id, &codex_home_str, Some("me@example.com"), Some("acct-1")).await.unwrap();
+        s.set_runtime_at_spawn(p.id, crate::agents::runtime::Runtime::Codex, "0.163.0").await.unwrap();
+        s.set_participant_claude_id(p.id, "01a15c48-thread").await.unwrap();
+        // The row turns claude-code, on a custom dir.
+        let mut row = fable_row("m-row");
+        row.claude_config_dir = Some("/tmp/bot-hq-acct-b".into());
+        s.upsert_model(&row).await.unwrap();
+        let p = reread(&s).await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let (probe, asked) = fixed_probe(logged_in("b@example.com", "org-b"));
+        let data_dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
+        let mcp_temp = TempDir::new().unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(s.clone()).await;
+        let spawn_cfg = participant_spawn_config(&s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp_temp.path(), None, &bridge, &probe, &*no_codex_probe())
+            .await
+            .unwrap();
+        assert_eq!(spawn_cfg.account_dir.as_deref(), Some("/tmp/bot-hq-acct-b"), "the dir comes from the row, not the Codex record");
+        assert_eq!(spawn_cfg.resume_session_id, None, "a Codex thread id is not a claude session");
+        assert!(spawn_cfg.codex.is_none());
+        assert_eq!(asked.lock().unwrap().as_slice(), [Some("/tmp/bot-hq-acct-b".to_string())], "the probe is asked about the row's dir");
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some("/tmp/bot-hq-acct-b"));
+        assert_eq!(p.account_email_at_spawn.as_deref(), Some("b@example.com"));
+        assert_eq!(p.runtime, "claude_code");
+        let rows = s.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("fresh") && m.content.contains("codex")), "{rows:?}");
     }
 
     /// The straddle notice is about CLAUDE accounts: a Codex participant beside

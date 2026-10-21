@@ -9,11 +9,19 @@
 //! and reported to the driver as a notification-shaped event so the
 //! transcript shows it happened.
 //!
+//! The incoming stream is UNBOUNDED on purpose (EYES 4295ae7d): the reader
+//! task routes responses AND notifications in order, so a reader blocked on
+//! a full notification channel while the driver awaits a response is a
+//! deadlock that only the request timeout ends — with the response lost and
+//! a page of unknown fate. Memory is bounded by what one turn streams, and
+//! the driver opts out of the delta notifications it never reads.
+//!
 //! Generic over the streams so the tests drive it through `tokio::io::duplex`
 //! without a child process; the driver hands it the child's stdout/stdin.
 
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +72,28 @@ impl std::fmt::Display for RpcError {
         write!(f, "{} (code {})", self.message, self.code)
     }
 }
+
+/// Why a request produced no result — the three are not the same fact: the
+/// server REFUSED (its error), the server is GONE, or nothing was heard in
+/// time (the outcome is UNKNOWN: the server may have applied the request).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequestFailure {
+    Rpc { method: String, error: RpcError },
+    Closed { method: String },
+    Timeout { method: String, after: Duration },
+}
+
+impl std::fmt::Display for RequestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rpc { method, error } => write!(f, "{method}: {error}"),
+            Self::Closed { method } => write!(f, "{method}: the app-server stream closed before it answered"),
+            Self::Timeout { method, after } => write!(f, "{method}: no answer from the app-server within {after:?}"),
+        }
+    }
+}
+
+impl std::error::Error for RequestFailure {}
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
 
@@ -122,13 +152,13 @@ impl CodexClient {
     /// Wire a client onto `reader` (the server's stdout) and `writer` (its
     /// stdin). Returns the client and the stream of everything the server
     /// sends that is not a response.
-    pub fn start<R, W>(reader: R, writer: W) -> (Self, mpsc::Receiver<Incoming>)
+    pub fn start<R, W>(reader: R, writer: W) -> (Self, mpsc::UnboundedReceiver<Incoming>)
     where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
-        let (in_tx, in_rx) = mpsc::channel::<Incoming>(1024);
+        let (in_tx, in_rx) = mpsc::unbounded_channel::<Incoming>();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
 
         // Writer: one line per message, flushed.
@@ -200,35 +230,25 @@ impl CodexClient {
                             }
                         };
                         let _ = reader_out.send(reply.to_string()).await;
-                        if in_tx
-                            .send(Incoming::Answered(AnsweredRequest { method, params, answer }))
-                            .await
-                            .is_err()
-                        {
+                        if in_tx.send(Incoming::Answered(AnsweredRequest { method, params, answer })).is_err() {
                             break;
                         }
                     }
                     // A notification.
                     (None, Some(method)) => {
                         let params = v.get("params").cloned().unwrap_or(Value::Null);
-                        if in_tx.send(Incoming::Notification(Notification { method, params })).await.is_err() {
+                        if in_tx.send(Incoming::Notification(Notification { method, params })).is_err() {
                             break;
                         }
                     }
                     (None, None) => {}
                 }
             }
-            // The stream ended: fail every waiter, tell the driver.
-            let waiters: Vec<_> = reader_pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .drain()
-                .map(|(_, tx)| tx)
-                .collect();
-            for tx in waiters {
-                let _ = tx.send(Err(RpcError { code: -32000, message: "the app-server stream closed".into() }));
-            }
-            let _ = in_tx.send(Incoming::Closed).await;
+            // The stream ended: drop every waiter (its request then fails as
+            // `Closed`, which is what happened — not a server error), and
+            // tell the driver.
+            reader_pending.lock().unwrap_or_else(|p| p.into_inner()).clear();
+            let _ = in_tx.send(Incoming::Closed);
         });
 
         (
@@ -238,22 +258,22 @@ impl CodexClient {
     }
 
     /// Send a request and wait for its response (or the timeout).
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value, RequestFailure> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap_or_else(|p| p.into_inner()).insert(id, tx);
         let line = json!({ "id": id, "method": method, "params": params }).to_string();
         if self.out_tx.send(line).await.is_err() {
             self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-            return Err(anyhow!("{method}: the app-server's stdin is closed"));
+            return Err(RequestFailure::Closed { method: method.to_string() });
         }
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(Ok(v))) => Ok(v),
-            Ok(Ok(Err(e))) => Err(anyhow!("{method}: {e}")),
-            Ok(Err(_)) => Err(anyhow!("{method}: the app-server stream closed before it answered")),
+            Ok(Ok(Err(error))) => Err(RequestFailure::Rpc { method: method.to_string(), error }),
+            Ok(Err(_)) => Err(RequestFailure::Closed { method: method.to_string() }),
             Err(_) => {
                 self.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
-                Err(anyhow!("{method}: no answer from the app-server within {:?}", self.timeout))
+                Err(RequestFailure::Timeout { method: method.to_string(), after: self.timeout })
             }
         }
     }
@@ -279,7 +299,7 @@ mod tests {
         writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
     }
 
-    fn pair() -> (CodexClient, mpsc::Receiver<Incoming>, FakeServer) {
+    fn pair() -> (CodexClient, mpsc::UnboundedReceiver<Incoming>, FakeServer) {
         let (client_side, server_side) = tokio::io::duplex(1 << 16);
         let (c_read, c_write) = tokio::io::split(client_side);
         let (s_read, s_write) = tokio::io::split(server_side);
@@ -320,8 +340,8 @@ mod tests {
         server
             .write(json!({"id": req["id"], "error": {"code": -32001, "message": "busy"}}))
             .await;
-        let err = ask.await.unwrap().unwrap_err().to_string();
-        assert!(err.contains("busy") && err.contains("-32001"), "{err}");
+        let err = ask.await.unwrap().unwrap_err();
+        assert!(matches!(&err, RequestFailure::Rpc { error, .. } if error.code == -32001 && error.message == "busy"), "{err}");
     }
 
     #[tokio::test]
@@ -379,6 +399,23 @@ mod tests {
         }
     }
 
+    /// EYES 4295ae7d: a flood of notifications nobody is draining must not
+    /// hold up the response behind them — the reader never blocks, so the
+    /// request answers at once and the pages' fate is never left to a timeout.
+    #[tokio::test]
+    async fn a_response_behind_an_undrained_notification_flood_still_arrives() {
+        let (mut client, _incoming_never_drained, mut server) = pair();
+        client.timeout = Duration::from_secs(2);
+        let ask = tokio::spawn(async move { client.request("turn/steer", json!({})).await });
+        let req = server.read().await;
+        for i in 0..5000 {
+            server.write(json!({"method": "item/agentMessage/delta", "params": {"delta": format!("chunk {i}")}})).await;
+        }
+        server.write(json!({"id": req["id"], "result": {"turnId": "t1"}})).await;
+        let got = ask.await.unwrap().expect("answered despite 5000 undrained notifications");
+        assert_eq!(got["turnId"], "t1");
+    }
+
     #[tokio::test]
     async fn a_closed_stream_fails_the_waiting_request() {
         let (mut client, _incoming, mut server) = pair();
@@ -386,15 +423,15 @@ mod tests {
         let ask = tokio::spawn(async move { client.request("thread/start", json!({})).await });
         let _ = server.read().await;
         drop(server);
-        let err = ask.await.unwrap().unwrap_err().to_string();
-        assert!(err.contains("closed"), "{err}");
+        let err = ask.await.unwrap().unwrap_err();
+        assert!(matches!(err, RequestFailure::Closed { .. }), "{err}");
     }
 
     #[tokio::test]
     async fn a_silent_server_times_the_request_out() {
         let (mut client, _incoming, mut server) = pair();
         client.timeout = Duration::from_millis(50);
-        let err = tokio::join!(client.request("hooks/list", json!({})), server.read()).0.unwrap_err().to_string();
-        assert!(err.contains("no answer"), "{err}");
+        let err = tokio::join!(client.request("hooks/list", json!({})), server.read()).0.unwrap_err();
+        assert!(matches!(err, RequestFailure::Timeout { .. }), "{err}");
     }
 }

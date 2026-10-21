@@ -500,7 +500,16 @@ function ModelDialog({
             <FieldLabel>Runtime</FieldLabel>
             <select
               value={draft.runtime}
-              onChange={(e) => setDraft({ ...draft, runtime: e.target.value })}
+              // A dir belongs to one runtime (a Claude dir must never become
+              // a Codex home, nor the reverse — the backend refuses it), so a
+              // runtime change starts the account field over.
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  runtime: e.target.value,
+                  claude_config_dir: e.target.value === draft.runtime ? draft.claude_config_dir : null,
+                })
+              }
               className={fieldClass}
             >
               <option value="claude_code">Claude Code (claude CLI)</option>

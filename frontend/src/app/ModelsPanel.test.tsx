@@ -442,6 +442,21 @@ describe("Settings → Models — a Codex row (0102)", () => {
     );
   });
 
+  it("changing the Runtime of a saved row clears its dir, so a Claude dir never rides into a Codex home", async () => {
+    // EYES d928bf99 (a): the dialog relabelling the field is not enough —
+    // the backend refuses the cross-runtime dir, and the dialog starts the
+    // user from an empty field rather than a refusal.
+    mockBackend([{ ...OPUS, claude_config_dir: "/Users/me/.claude-acct-2" }]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /^edit$/i }));
+    const dialog = await screen.findByRole("dialog", { name: /edit model/i });
+    expect((within(dialog).getByLabelText(/claude config dir/i) as HTMLInputElement).value).toBe("/Users/me/.claude-acct-2");
+    fireEvent.change(within(dialog).getByLabelText(/^runtime/i), { target: { value: "codex" } });
+    expect((within(dialog).getByLabelText(/^codex home/i) as HTMLInputElement).value).toBe("");
+    fireEvent.change(within(dialog).getByLabelText(/^runtime/i), { target: { value: "claude_code" } });
+    expect((within(dialog).getByLabelText(/claude config dir/i) as HTMLInputElement).value).toBe("");
+  });
+
   it("the list names a Codex row's home as its account, and a Codex row shows its runtime", async () => {
     mockBackend([OPUS, ASTRA]);
     renderPanel();

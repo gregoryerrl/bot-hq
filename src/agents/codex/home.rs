@@ -198,6 +198,10 @@ pub struct RenderedHook {
     pub key: String,
     pub source_path: String,
     pub command: String,
+    /// The binary the command runs — checked to exist before every turn: a
+    /// hook whose binary is gone FAILS OPEN on Codex (measured, M10), which
+    /// for a read-only role is write access (EYES 32a97dc5).
+    pub exe: PathBuf,
 }
 
 impl RenderedHook {
@@ -206,6 +210,7 @@ impl RenderedHook {
             key: hook_key(home),
             source_path: home.join("hooks.json").display().to_string(),
             command: gate_command(exe, data_dir),
+            exe: exe.to_path_buf(),
         }
     }
 
@@ -231,6 +236,13 @@ impl RenderedHook {
     /// Whether the gate will run: this hook is listed, enabled, and trusted
     /// (or managed). `Err` names what is wrong, for the refusal.
     pub fn armed(&self, listed: &[ListedHook]) -> Result<(), String> {
+        if !self.exe.is_file() {
+            return Err(format!(
+                "bot-hq's gate hook binary is missing at {} — a hook whose binary is gone lets every \
+                 call through",
+                self.exe.display()
+            ));
+        }
         let Some(entry) = listed.iter().find(|l| self.is_this_hook(l)) else {
             return Err(format!(
                 "bot-hq's gate hook is not listed by Codex at {} — the hooks file was changed \
@@ -377,7 +389,9 @@ mod tests {
     #[test]
     fn the_gate_is_armed_only_when_listed_enabled_and_trusted() {
         let home = Path::new("/Users/me/.codex-bot-hq");
-        let rendered = RenderedHook::new(home, Path::new("/opt/bot-hq"), Path::new("/data"));
+        // A binary that exists (this test's own), so the exe check passes.
+        let exe = std::env::current_exe().unwrap();
+        let rendered = RenderedHook::new(home, &exe, Path::new("/data"));
         let mut entry = ListedHook {
             key: hook_key(home),
             event_name: "preToolUse".into(),
@@ -399,6 +413,11 @@ mod tests {
         assert!(rendered.armed(&[]).unwrap_err().contains("not listed"));
         entry.enabled = true;
         entry.command = "/usr/local/bin/my-linter".into();
-        assert!(rendered.armed(&[entry]).unwrap_err().contains("not listed"), "a different hook at the key is not ours");
+        assert!(rendered.armed(&[entry.clone()]).unwrap_err().contains("not listed"), "a different hook at the key is not ours");
+        // The binary is gone (EYES 32a97dc5): refused before anything else.
+        let gone = RenderedHook::new(home, Path::new("/nonexistent/bot-hq"), Path::new("/data"));
+        let mut listed_for_gone = entry;
+        listed_for_gone.command = gone.command.clone();
+        assert!(gone.armed(&[listed_for_gone]).unwrap_err().contains("binary is missing"));
     }
 }

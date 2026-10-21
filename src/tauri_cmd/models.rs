@@ -42,7 +42,8 @@ pub struct ModelView {
     /// spawned with — which subscription it bills when the row has no gateway
     /// credential. `null`/blank = the CLI's default `~/.claude`. An absolute
     /// path; one signed-in account per dir (0090). For a `codex` row this is
-    /// the Codex home (`CODEX_HOME`); `null`/blank = `~/.codex`.
+    /// the Codex home (`CODEX_HOME`) and is REQUIRED — bot-hq never defaults
+    /// to `~/.codex`, and Save refuses a dir a row of the other runtime uses.
     pub claude_config_dir: Option<String>,
     /// The connector a participant on this row runs through: `claude_code`
     /// (claude-code) or `codex` (OpenAI's Codex CLI), 0102. Save refuses any
@@ -142,6 +143,50 @@ fn validate_cli_settings(raw: Option<String>) -> Result<Option<String>, AppError
     }
 }
 
+/// The cross-runtime dir rule (EYES d928bf99): a dir is one connector's
+/// credential slot and config home — bot-hq writes its hooks file into a
+/// Codex home, claude-code writes its own files into a Claude dir — so a dir
+/// a row of the OTHER runtime uses is refused, by that row's name. Rows of
+/// the same runtime may share one (one account, several models). A Codex
+/// row with no home is refused: bot-hq never defaults to `~/.codex`.
+pub(crate) fn validate_dir_against_rows(
+    id: &str,
+    runtime: Runtime,
+    dir: Option<&str>,
+    rows: &[Model],
+) -> Result<(), AppError> {
+    let dir = crate::storage::normalize_config_dir(dir);
+    let Some(dir) = dir else {
+        return match runtime {
+            Runtime::Codex => Err(AppError::Validation(
+                "A Codex row needs a Codex home of its own (an absolute path, never ~/.codex): bot-hq \
+                 writes its gate hook there and the ChatGPT account signed in there is the one it bills."
+                    .into(),
+            )),
+            Runtime::ClaudeCode => Ok(()),
+        };
+    };
+    // The row's OWN saved state counts too: editing a Claude row's Runtime to
+    // Codex while keeping its dir is the very case the rule exists for.
+    let same = |a: &str| crate::storage::normalize_config_dir(Some(a)).as_deref() == Some(dir.as_str());
+    if let Some(other) = rows
+        .iter()
+        .filter(|r| r.runtime() != runtime)
+        .find(|r| r.claude_config_dir.as_deref().is_some_and(same))
+    {
+        let (theirs, mine) = match other.runtime() {
+            Runtime::ClaudeCode => ("Claude config dir", "Codex home"),
+            Runtime::Codex => ("Codex home", "Claude config dir"),
+        };
+        let whose = if other.id == id { "this row's own saved".to_string() } else { format!("the saved model \"{}\" ({})'s", other.display_name, other.id) };
+        return Err(AppError::Validation(format!(
+            "{dir} is {whose} {theirs}; a dir belongs to one runtime — give this row's {mine} a path of \
+             its own.",
+        )));
+    }
+    Ok(())
+}
+
 impl From<Model> for ModelView {
     fn from(m: Model) -> Self {
         Self {
@@ -208,6 +253,11 @@ pub async fn upsert_model(
         crate::paths::home_dir().ok().as_deref(),
         runtime,
     )?;
+    let rows = storage
+        .list_models()
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    validate_dir_against_rows(&m.id, runtime, m.claude_config_dir.as_deref(), &rows)?;
     storage
         .upsert_model(&m)
         .await
@@ -400,6 +450,58 @@ mod tests {
         let claude_default = home.join(".claude");
         assert!(validate_config_dir(Some(claude_default.to_str().unwrap()), Some(home), Runtime::Codex).is_ok());
         assert!(validate_config_dir(Some(codex_default), Some(home), Runtime::ClaudeCode).is_ok());
+    }
+
+    /// EYES d928bf99 (a) + N3: Save refuses a dir that a row of the OTHER
+    /// runtime uses (a Claude dir as a Codex home would get bot-hq's hooks
+    /// file and a Codex sign-in; a Codex home as a Claude dir would get
+    /// claude's files), a row's own dir and same-runtime twins stay fine, and
+    /// a Codex row with no home is refused outright — bot-hq never defaults
+    /// to `~/.codex`.
+    #[test]
+    fn save_refuses_a_dir_the_other_runtime_uses_and_a_homeless_codex_row() {
+        use crate::agents::runtime::Runtime;
+        let row = |id: &str, runtime: &str, dir: Option<&str>| Model {
+            id: id.into(),
+            display_name: id.into(),
+            provider: "x".into(),
+            model_name: "m".into(),
+            base_url: None,
+            auth_token: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            context_window: None,
+            cli_settings: None,
+            claude_config_dir: dir.map(str::to_string),
+            runtime: runtime.into(),
+        };
+        let rows = vec![
+            row("c1", "claude_code", Some("/Users/me/.claude-acct-2")),
+            row("c2", "claude_code", None),
+            row("x1", "codex", Some("/Users/me/.codex-bot-hq")),
+        ];
+        let refused = |id: &str, runtime: Runtime, dir: Option<&str>| match validate_dir_against_rows(id, runtime, dir, &rows) {
+            Err(AppError::Validation(msg)) => msg,
+            other => panic!("{id} {runtime} {dir:?} must be refused, got {other:?}"),
+        };
+        // A new Codex row on account 2's Claude dir.
+        let msg = refused("new", Runtime::Codex, Some("/Users/me/.claude-acct-2"));
+        assert!(msg.contains("c1") && msg.contains("Claude"), "{msg}");
+        // The claude row c1 edited to Codex, keeping its dir.
+        let msg = refused("c1", Runtime::Codex, Some("/Users/me/.claude-acct-2/"));
+        assert!(msg.contains("Claude"), "{msg}");
+        // A Claude row on the Codex home.
+        let msg = refused("new", Runtime::ClaudeCode, Some("/Users/me/.codex-bot-hq"));
+        assert!(msg.contains("x1") && msg.contains("Codex"), "{msg}");
+        // A Codex row with no home.
+        let msg = refused("new", Runtime::Codex, None);
+        assert!(msg.contains("Codex home"), "{msg}");
+        // Fine: the row's own dir, a same-runtime twin, a fresh dir, a blank Claude dir.
+        assert!(validate_dir_against_rows("x1", Runtime::Codex, Some("/Users/me/.codex-bot-hq"), &rows).is_ok());
+        assert!(validate_dir_against_rows("new", Runtime::Codex, Some("/Users/me/.codex-bot-hq"), &rows).is_ok(), "two Codex rows may share a home (one account, two models)");
+        assert!(validate_dir_against_rows("new", Runtime::ClaudeCode, Some("/Users/me/.claude-acct-2"), &rows).is_ok());
+        assert!(validate_dir_against_rows("new", Runtime::ClaudeCode, None, &rows).is_ok());
+        assert!(validate_dir_against_rows("new", Runtime::Codex, Some("/Users/me/.codex-other"), &rows).is_ok());
     }
 
     /// A Codex row's dialog command signs the account in to its home with

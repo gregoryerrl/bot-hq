@@ -168,12 +168,35 @@ fn rule_for(tool: &str, args: &[String], depth: usize) -> Option<String> {
         "git" => git_rule(args),
         "gh" => gh_rule(args),
         _ if depth < 4 => {
-            let (inner, rest) = unwrap_wrapper(tool, args)?;
-            rule_for(&inner, rest, depth + 1)
+            if let Some((inner, rest)) = unwrap_wrapper(tool, args) {
+                return rule_for(&inner, rest, depth + 1);
+            }
+            // An UNKNOWN wrapper (`find … -exec git push`, `arch -arm64 git
+            // push`, `xcrun`, `flock`, `stdbuf`, `caffeinate`, …): any word
+            // whose basename is `git` or `gh` starts a command, except under
+            // a tool that only prints or searches its arguments — `echo git
+            // push` and `grep -rn git push` are text (EYES 80c076c8).
+            if DATA_TOOLS.contains(&tool) {
+                return None;
+            }
+            let at = args.iter().position(|a| {
+                let base = a.rsplit('/').next().unwrap_or(a);
+                base == "git" || base == "gh"
+            })?;
+            let inner = args[at].rsplit('/').next().unwrap_or(&args[at]).to_string();
+            rule_for(&inner, &args[at + 1..], depth + 1)
         }
         _ => None,
     }
 }
+
+/// Tools whose arguments are text, never a command to run.
+const DATA_TOOLS: &[&str] = &[
+    "echo", "printf", "cat", "grep", "egrep", "fgrep", "rg", "ag", "ack", "less", "more", "head",
+    "tail", "awk", "sed", "sort", "uniq", "wc", "tr", "cut", "tee", "diff", "jq", "yq", "man",
+    "which", "type", "whereis", "file", "stat", "ls", "basename", "dirname", "realpath", "test",
+    "true", "false", "sleep", "date", "env",
+];
 
 /// Wrapper options that take a value as the next word, per wrapper.
 const WRAPPER_VALUE_FLAGS: &[(&str, &[&str])] = &[
@@ -368,6 +391,14 @@ mod tests {
             "true && (git reset --hard HEAD)",
             "ls | xargs git rm",
             "$(git push)",
+            // Wrappers the splitter does not know (EYES 80c076c8).
+            "find . -name '*.rs' -exec git push \\;",
+            "arch -arm64 git push",
+            "xcrun git push origin main",
+            "flock /tmp/l git push",
+            "stdbuf -oL git push",
+            "caffeinate -i git push",
+            "nice -n 5 caffeinate gh pr merge 1",
         ];
         for cmd in denied {
             let d = command_denial(cmd);
@@ -390,6 +421,13 @@ mod tests {
             "grep -n 'git push' src/*.rs",
             "cat git-push.log",
             "ls",
+            // Text, not a command: a data tool's arguments. (`printf '%s' gh pr
+            // merge` is NOT here: the splitter starts a command at any `gh`
+            // word, the Tool Gate's own rule, so a read-only role is refused
+            // it too — a false positive worth less than a missed wrapper.)
+            "echo git push",
+            "grep -rn git push src",
+            "wc -l git-push.log",
         ];
         for cmd in allowed {
             assert_eq!(command_denial(cmd), None, "{cmd:?} is a read");
