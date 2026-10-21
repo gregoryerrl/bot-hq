@@ -412,8 +412,6 @@ fn kill_group(pid: Option<u32>) {
     let _ = pid;
 }
 
-/// initialize → hooks/list (the gate must be armed) → thread/start or
-/// thread/resume. Returns the thread id and the Codex version.
 /// The participant's translator: the row's model and window, and the home's
 /// sign-in command for the `unauthorized` notice.
 fn translator_for(cfg: &SpawnConfig, home: &str) -> Translator {
@@ -424,6 +422,8 @@ fn translator_for(cfg: &SpawnConfig, home: &str) -> Translator {
     .with_configured_window(cfg.config.context_window.and_then(|w| u64::try_from(w).ok()))
 }
 
+/// initialize → hooks/list (the gate must be armed) → thread/start or
+/// thread/resume. Returns the thread id and the Codex version.
 async fn start_thread(client: &CodexClient, cfg: &SpawnConfig, rendered: &RenderedHook) -> Result<Started> {
     let version = initialize(client).await?;
     let cwd = cfg.working_dir.as_ref().map(|d| d.display().to_string());

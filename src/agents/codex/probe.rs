@@ -76,7 +76,14 @@ pub fn model_ids(result: &Value) -> Vec<String> {
 /// (never "logged out": a spawn then goes ahead and Codex reports its own
 /// error), with no hooks and no version.
 pub async fn probe_home(req: &CodexProbeRequest) -> CodexProbe {
-    match tokio::time::timeout(PROBE_TIMEOUT, run(req)).await {
+    let mut child = match spawn(req) {
+        Ok(child) => child,
+        Err(e) => return unreadable(format!("{e:#}")),
+    };
+    let pid = child.id();
+    let outcome = tokio::time::timeout(PROBE_TIMEOUT, run(&mut child, req)).await;
+    reap(&mut child, pid).await;
+    match outcome {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => unreadable(format!("{e:#}")),
         Err(_) => unreadable(format!("the Codex probe did not finish within {PROBE_TIMEOUT:?}")),
@@ -87,7 +94,10 @@ fn unreadable(why: String) -> CodexProbe {
     CodexProbe { auth: AuthProbe::Unreadable(why), hooks: Vec::new(), version: String::new(), models: Vec::new() }
 }
 
-async fn run(req: &CodexProbeRequest) -> Result<CodexProbe> {
+/// The short-lived app-server, the leader of its own process group: the
+/// installed `codex` is npm's node wrapper and the native binary runs under
+/// it, so the group is what [`reap`] can kill once the wrapper is gone.
+fn spawn(req: &CodexProbeRequest) -> Result<tokio::process::Child> {
     let bin = req.bin.clone().unwrap_or_else(|| "codex".to_string());
     let mut cmd = crate::process::tokio_command(&bin);
     crate::appimage_env::scrub_tokio(&mut cmd);
@@ -106,7 +116,31 @@ async fn run(req: &CodexProbeRequest) -> Result<CodexProbe> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let mut child = cmd.spawn().with_context(|| format!("launching `{bin} app-server` for the probe"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
+    cmd.spawn().with_context(|| format!("launching `{bin} app-server` for the probe"))
+}
+
+/// Everything the probe started, on every exit path: the group the wrapper
+/// leads (where a reparented native binary still is), the live tree under
+/// the pid, then the child itself. Each Test click once left one app-server
+/// running on init (measured 2026-10-21: seven of them).
+async fn reap(child: &mut tokio::process::Child, pid: Option<u32>) {
+    if let Some(pid) = pid {
+        #[cfg(unix)]
+        // SAFETY: kill(2) is thread-safe; -pid targets the group the child leads.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+        crate::process::kill_process_tree(pid);
+    }
+    let _ = child.kill().await;
+}
+
+async fn run(child: &mut tokio::process::Child, req: &CodexProbeRequest) -> Result<CodexProbe> {
     let stdin = child.stdin.take().context("probe: missing stdin")?;
     let stdout = child.stdout.take().context("probe: missing stdout")?;
     let (mut client, _incoming) = CodexClient::start(stdout, stdin);
@@ -122,9 +156,7 @@ async fn run(req: &CodexProbeRequest) -> Result<CodexProbe> {
         .await
         .map(|v| model_ids(&v))
         .unwrap_or_default();
-    let probe = CodexProbe { auth: auth_from_account_read(&account), hooks: listed_hooks(&listed), version, models };
-    let _ = child.kill().await;
-    Ok(probe)
+    Ok(CodexProbe { auth: auth_from_account_read(&account), hooks: listed_hooks(&listed), version, models })
 }
 
 #[cfg(test)]
@@ -151,6 +183,37 @@ mod tests {
         assert!(matches!(auth_from_account_read(&json!({"account": {"email": "x"}})), AuthProbe::Unreadable(_)));
         assert_eq!(model_ids(&json!({"data": [{"id": "gpt-6.1-sol", "isDefault": true}, {"id": "gpt-6-astra"}]})), ["gpt-6.1-sol", "gpt-6-astra"]);
         assert!(model_ids(&json!({})).is_empty());
+    }
+
+    /// The installed `codex` is npm's node wrapper, which runs the native
+    /// binary as a grandchild. Killing the wrapper alone left one app-server
+    /// per Test click running on init (seven of them, measured 2026-10-21),
+    /// so the probe reaps its whole process group, on every exit path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_probe_reaps_the_grandchild_the_wrapper_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("grandchild.pid");
+        let fake = dir.path().join("codex");
+        // Answers `initialize`, then exits with the grandchild still running —
+        // the wrapper is gone when the probe fails on `account/read`.
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nsleep 300 >/dev/null 2>&1 </dev/null &\necho $! > '{}'\nread -r _req\nprintf '%s\\n' '{{\"id\":1,\"result\":{{\"userAgent\":\"fake/0.0.0\"}}}}'\n",
+                mark.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = probe_home(&CodexProbeRequest { bin: Some(fake.display().to_string()), home: dir.path().display().to_string(), cwd: None }).await;
+        assert!(matches!(&probe.auth, AuthProbe::Unreadable(_)), "{probe:?}");
+        let grandchild: i32 = std::fs::read_to_string(&mark).unwrap().trim().parse().unwrap();
+        // A SIGKILLed child of a dead parent is reaped by init at once; a live one answers kill(0).
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let alive = unsafe { libc::kill(grandchild, 0) } == 0;
+        assert!(!alive, "the grandchild {grandchild} outlived the probe");
     }
 
     /// A binary that is not there is `Unreadable`, never logged out.

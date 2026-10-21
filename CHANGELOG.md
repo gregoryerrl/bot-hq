@@ -61,7 +61,9 @@ model side by side. Migration 0102 applies on first launch.
   message. After Codex compacts a participant's context, bot-hq puts its
   handoff document and your words since back, as it does for a Claude
   participant; a used-up ChatGPT usage window is said where the session
-  starts.
+  starts. **Test** on a Codex row leaves nothing running: the probe's
+  short-lived app-server (the native binary under npm's `codex` wrapper)
+  is reaped with its whole process group, on every exit path.
 
 ## [1.0.10] — 2026-10-19
 
