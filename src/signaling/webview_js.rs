@@ -31,15 +31,22 @@ pub(super) fn type_js(selector: &str, text: &str) -> String {
            if (el instanceof HTMLSelectElement) {{ \
              const want = {txt}; \
              const opts = Array.from(el.options); \
-             const hit = opts.find(o => o.value === want) || opts.find(o => o.textContent.trim() === want) || opts.find(o => o.textContent.includes(want)); \
-             if (!hit) {{ console.warn('webview_type: no option matches', want, opts.map(o => o.value + ' | ' + o.textContent.trim())); return; }} \
+             const byValue = opts.filter(o => o.value === want); \
+             const byLabel = opts.filter(o => o.textContent.trim() === want); \
+             const hits = byValue.length ? byValue : byLabel; \
+             if (hits.length !== 1) {{ \
+               console.warn('webview_type: ' + (hits.length ? 'ambiguous option' : 'no option matches'), want, opts.map(o => o.value + ' | ' + o.textContent.trim())); \
+               return; \
+             }} \
              const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value'); \
-             if (desc && desc.set) {{ desc.set.call(el, hit.value); }} else {{ el.value = hit.value; }} \
+             if (desc && desc.set) {{ desc.set.call(el, hits[0].value); }} else {{ el.value = hits[0].value; }} \
              el.dispatchEvent(new Event('change', {{ bubbles: true }})); \
              return; \
            }} \
            if (el instanceof HTMLInputElement && el.type === 'checkbox') {{ \
-             const want = {txt} === 'true' || {txt} === 'on' || {txt} === '1'; \
+             const on = ['true', 'on', '1'], off = ['false', 'off', '0']; \
+             if (!on.includes({txt}) && !off.includes({txt})) {{ console.warn('webview_type: a checkbox takes true/false, got', {txt}); return; }} \
+             const want = on.includes({txt}); \
              if (el.checked !== want) {{ el.click(); }} \
              return; \
            }} \
@@ -140,6 +147,8 @@ mod tests {
         let js = type_js("select[aria-label=\"Participant 1 role\"]", "HANDS");
         assert!(js.contains("el instanceof HTMLSelectElement"));
         assert!(js.contains("o.value === want") && js.contains("o.textContent.trim() === want"));
+        assert!(js.contains("hits.length !== 1") && js.contains("ambiguous option"), "an ambiguous label does nothing");
+        assert!(js.contains("a checkbox takes true/false"), "an invalid checkbox value does nothing");
         assert!(js.contains("HTMLSelectElement.prototype, 'value'"));
         assert!(js.contains("el.type === 'checkbox'") && js.contains("el.click()"));
         assert!(js.contains("HTMLTextAreaElement.prototype"), "the text path stays");

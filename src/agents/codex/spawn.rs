@@ -570,15 +570,23 @@ struct ServerTree {
 
 impl ServerTree {
     /// Whether a process found under the app-server later is one of Codex's
-    /// own helpers rather than a command: its program lives in the same
-    /// directory as the server's own `codex` binary AND its parent is one of
-    /// the server's own processes. A command named `codex-build` lives
-    /// elsewhere; a nested `codex` a command starts has a command for a
-    /// parent (EYES f3e7f82f) — both are stopped.
+    /// own helpers rather than a command: a `codex-*` binary (never the
+    /// `codex` binary itself — a nested `codex` is a command, however it was
+    /// launched) that lives in the same directory as the server's own
+    /// `codex` AND whose parent is one of the server's own processes. A
+    /// command named `codex-build` lives elsewhere; a nested `codex` under a
+    /// shell has a command for a parent; a `codex` exec'd straight from the
+    /// installation directory is the bare binary (EYES f3e7f82f, dfcddc4e)
+    /// — all three are stopped. What stays indistinguishable: a command that
+    /// exec's the real `codex-code-mode-host` binary itself.
     fn is_helper(&self, server_pid: u32, program: &str, ppid: u32) -> bool {
         let Some(dir) = &self.codex_dir else { return false };
-        std::path::Path::new(program).parent() == Some(dir.as_path())
-            && (ppid == server_pid || self.pids.contains(&ppid))
+        let path = std::path::Path::new(program);
+        let helper_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("codex-"));
+        helper_name && path.parent() == Some(dir.as_path()) && (ppid == server_pid || self.pids.contains(&ppid))
     }
 }
 
@@ -1827,8 +1835,10 @@ mod tests {
         // (so the tree has a codex directory). On SIGUSR1 it starts the lazy
         // helper, a user's codex-build, and a command (`sh`) that runs a
         // nested codex.
+        // …and a `codex` launched straight from the installation directory
+        // by the server itself (EYES dfcddc4e): a command, not a helper.
         let script = format!(
-            "{codex} 300 & trap '{helper} 400 & {user_tool} 400 & sh -c \"{codex} 400; true\" &' USR1; while :; do wait; done"
+            "{codex} 300 & trap '{helper} 400 & {user_tool} 400 & {codex} 400 & sh -c \"{codex} 401; true\" &' USR1; while :; do wait; done"
         );
         let shell = crate::process::command("sh").args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
         let server_pid = shell.id();
@@ -1846,7 +1856,7 @@ mod tests {
         }
         // Wait for all four newcomers: the helper, codex-build, the sh, and
         // the nested codex under the sh.
-        let (mut helper_pid, mut user_pid, mut nested_pid) = (None, None, None);
+        let (mut helper_pid, mut user_pid, mut nested_pid, mut direct_pid) = (None, None, None, None);
         for _ in 0..100 {
             for d in crate::process::descendants_named(server_pid).unwrap_or_default() {
                 if own.contains(&d.pid) {
@@ -1858,9 +1868,11 @@ mod tests {
                     user_pid = Some(d.pid);
                 } else if d.program == codex && d.ppid != server_pid {
                     nested_pid = Some(d.pid);
+                } else if d.program == codex && d.ppid == server_pid {
+                    direct_pid = Some(d.pid);
                 }
             }
-            if helper_pid.is_some() && user_pid.is_some() && nested_pid.is_some() {
+            if helper_pid.is_some() && user_pid.is_some() && nested_pid.is_some() && direct_pid.is_some() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1868,15 +1880,18 @@ mod tests {
         let helper_pid = helper_pid.expect("the helper started");
         let user_pid = user_pid.expect("codex-build started");
         let nested_pid = nested_pid.expect("the nested codex started under a command");
+        let direct_pid = direct_pid.expect("the directly launched codex started");
         h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
         let req = h.fake.read().await;
         h.fake.answer_interrupt(&req, "t1").await;
         h.fake.turn_interrupted("t1").await;
         let notice = next_event(&mut h).await;
-        // codex-build, the sh and the nested codex: three stopped; the helper not.
-        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("3 processes were stopped")), "{notice:?}");
+        // codex-build, the sh, the nested codex and the directly launched
+        // codex: four stopped; the helper not.
+        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("4 processes were stopped")), "{notice:?}");
         assert!(!alive(user_pid), "a user's codex-build is a command");
         assert!(!alive(nested_pid), "a nested codex under a command is a command");
+        assert!(!alive(direct_pid), "a codex launched straight from the installation directory is a command");
         assert!(alive(helper_pid), "Codex's helper, beside its binary and started by it, is left alone");
         assert!(own.iter().all(|p| alive(*p)), "the server's own codex binary is untouched");
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
