@@ -65,7 +65,12 @@ model side by side. Migration 0102 applies on first launch.
   Codex refused every interrupt and only the fallback ever stopped a
   participant (found in the first live sessions, 2026-10-21); a gate hook
   that fails to run now gets the same deadline, and an idle participant is
-  not asked to interrupt anything. After Codex compacts a participant's
+  not asked to interrupt anything. And because Codex ends the interrupted
+  turn but lets its command run on (a Pause left a `sleep 180` running),
+  bot-hq now stops the command itself when the turn ends — at once, or
+  after the same grace mid-commit or push — before the next turn starts;
+  on Windows, where bot-hq cannot walk the process tree, the command still
+  runs on. After Codex compacts a participant's
   context, bot-hq puts its handoff document and your words since back, as
   it does for a Claude participant; a used-up ChatGPT usage window is said
   where the session starts. **Test** on a Codex row leaves nothing running:

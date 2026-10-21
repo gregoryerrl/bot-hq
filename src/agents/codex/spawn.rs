@@ -379,6 +379,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         cwd: cfg.working_dir.as_ref().map(|d| d.display().to_string()),
         deadlines: InterruptDeadlines::default(),
         server_pid: child_pid,
+        server_baseline: child_pid.map(server_tree).unwrap_or_default(),
         data_dir: cfg.data_dir.clone(),
         session_id: cfg.session_id.clone(),
     };
@@ -535,12 +536,26 @@ impl Default for InterruptDeadlines {
     }
 }
 
+/// The app-server's own process tree at the driver's start — see
+/// `Driver::server_baseline`. Empty where there is no tree walk.
+fn server_tree(pid: u32) -> Vec<u32> {
+    #[cfg(unix)]
+    {
+        crate::process::descendants(pid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        Vec::new()
+    }
+}
+
 /// Arm the interrupt deadline for the turn in flight, once: a second
 /// interrupt (another control, a failed hook) while one is pending must not
 /// push the deadline back.
-fn arm_deadline(deadline: &mut Option<tokio::time::Instant>, running_atomic: Option<bool>, deadlines: &InterruptDeadlines) {
+fn arm_deadline(deadline: &mut Option<tokio::time::Instant>, atomic: bool, deadlines: &InterruptDeadlines) {
     if deadline.is_none() {
-        let wait = if running_atomic == Some(true) { deadlines.atomic } else { deadlines.plain };
+        let wait = if atomic { deadlines.atomic } else { deadlines.plain };
         *deadline = Some(tokio::time::Instant::now() + wait);
     }
 }
@@ -558,6 +573,13 @@ struct Driver {
     /// The app-server child bot-hq spawned — the ONLY pid the driver ever
     /// signals (its tree holds the running commands). `None` in tests.
     server_pid: Option<u32>,
+    /// The app-server's OWN processes, listed once when the driver started
+    /// (after `thread/start`): the native binary under npm's wrapper and
+    /// whatever Codex started for itself. A descendant that is not among
+    /// them is taken for a command's process — a working assumption (a helper
+    /// Codex starts lazily would be taken for one too), only ever SUBTRACTED
+    /// from a fresh listing, never signalled on its own.
+    server_baseline: Vec<u32>,
     /// Where the handoff files live, and whose they are — for the text put
     /// back after a compaction.
     data_dir: std::path::PathBuf,
@@ -585,11 +607,16 @@ impl Driver {
         let mut queued: Vec<String> = Vec::new();
         let mut inputs_open = true;
         let mut controls_open = true;
-        // Whether the command running right now is an atomic git/migration
-        // step (the interrupt then waits the longer deadline).
-        let mut running_atomic: Option<bool> = None;
+        // The commands running right now, and whether each is an atomic
+        // git/migration step (an interrupt then waits the longer deadline).
+        let mut running = RunningCommands::new();
         // An interrupt in flight: when its deadline fires.
         let mut deadline: Option<tokio::time::Instant> = None;
+        // An interrupt went out during this turn: the completion that follows
+        // stops the commands Codex leaves running (it ends the turn, not the
+        // command — measured 2026-10-21), waiting out the deadline first when
+        // an atomic step was in flight at the interrupt.
+        let mut stop_commands: Option<bool> = None;
         loop {
             tokio::select! {
                 _ = async { tokio::time::sleep_until(deadline.unwrap()).await }, if deadline.is_some() => {
@@ -656,7 +683,9 @@ impl Driver {
                     let Some(_ctl) = ctl else { controls_open = false; continue };
                     self.interrupt(active_turn.as_deref());
                     if active_turn.is_some() {
-                        arm_deadline(&mut deadline, running_atomic, &self.deadlines);
+                        let atomic = atomic_in_flight(&running);
+                        arm_deadline(&mut deadline, atomic, &self.deadlines);
+                        stop_commands = Some(stop_commands.unwrap_or(false) || atomic);
                     }
                 }
                 inc = incoming.recv() => {
@@ -672,11 +701,13 @@ impl Driver {
                     if gate_hook_failed(&inc) {
                         self.interrupt(active_turn.as_deref());
                         if active_turn.is_some() {
-                            arm_deadline(&mut deadline, running_atomic, &self.deadlines);
+                            let atomic = atomic_in_flight(&running);
+                            arm_deadline(&mut deadline, atomic, &self.deadlines);
+                            stop_commands = Some(stop_commands.unwrap_or(false) || atomic);
                         }
                         let _ = event_tx.send(AgentEvent::Health(AgentHealth::Stalled)).await;
                     }
-                    track_running_command(&inc, &mut running_atomic);
+                    track_running_command(&inc, &mut running);
                     // Codex compacted the thread: put the handoff document and
                     // the user's words since back into the model-visible history
                     // (`thread/inject_items`); when that fails, they go in front
@@ -701,9 +732,38 @@ impl Driver {
                     }
                     for ev in self.translator.translate(&inc).into_iter().chain(reinjected) {
                         if let AgentEvent::TurnComplete { .. } = &ev {
+                            // The turn an interrupt ended may have left its
+                            // command running: stop it BEFORE the completion is
+                            // reported and before the next turn starts, so
+                            // nothing of the next turn is ever in the kill set.
+                            if let Some(atomic_at_interrupt) = stop_commands.take() {
+                                let atomic = atomic_at_interrupt || atomic_in_flight(&running);
+                                match self.stop_interrupted_commands(atomic, deadline).await {
+                                    Ok(0) => {}
+                                    Ok(n) => {
+                                        let _ = event_tx.send(AgentEvent::Notice(format!(
+                                            "{}'s interrupted command was still running after the turn ended; {n} process{} stopped.",
+                                            self.agent_name, if n == 1 { " was" } else { "es were" }
+                                        ))).await;
+                                    }
+                                    Err(why) => {
+                                        // Unknown is not clean: the app-server's own
+                                        // tree goes, as when a turn does not end.
+                                        warn!(agent = %self.agent_name, %why, "could not tell whether the interrupted command still runs; giving the app-server up");
+                                        if let Some(pid) = self.server_pid {
+                                            crate::process::kill_process_tree(pid);
+                                        }
+                                        let _ = event_tx.send(AgentEvent::Notice(format!(
+                                            "{}: after an interrupt bot-hq could not tell whether its command still runs ({why}); its Codex app-server was reaped and the next message resumes its thread.",
+                                            self.agent_name
+                                        ))).await;
+                                        return;
+                                    }
+                                }
+                            }
                             active_turn = None;
                             deadline = None;
-                            running_atomic = None;
+                            running.clear();
                             if !queued.is_empty() {
                                 match self.start_queued(&mut queued).await {
                                     Ok(turn_id) => {
@@ -786,6 +846,45 @@ impl Driver {
         });
     }
 
+    /// Stop the commands an interrupted turn left running: every live
+    /// descendant of the app-server that is not in its own tree, children
+    /// first. Codex answers a `turn/interrupt` by ending the turn and lets the
+    /// command run on (measured 2026-10-21: `sleep 180` outlived its
+    /// interrupted turn), so the driver does what Codex does not. With an
+    /// atomic git/migration step in flight the command is given until the
+    /// interrupt's own deadline — the same allowance the deadline gives — to
+    /// finish by itself. Returns how many processes were killed; `Err` when
+    /// the tree could not be listed, which the caller treats as "not clean".
+    /// Unix only: elsewhere there is no tree walk, and the command runs on as
+    /// before (a documented limitation, like the deadline's tree kill).
+    async fn stop_interrupted_commands(&self, atomic: bool, until: Option<tokio::time::Instant>) -> Result<usize, String> {
+        let Some(pid) = self.server_pid else { return Ok(0) };
+        #[cfg(not(unix))]
+        {
+            let _ = (pid, atomic, until);
+            return Ok(0);
+        }
+        #[cfg(unix)]
+        loop {
+            let live = crate::process::descendants_checked(pid).ok_or_else(|| "ps could not list the app-server's processes".to_string())?;
+            let newer: Vec<u32> = live.into_iter().filter(|p| !self.server_baseline.contains(p)).collect();
+            if newer.is_empty() {
+                return Ok(0);
+            }
+            if atomic {
+                if let Some(until) = until {
+                    let now = tokio::time::Instant::now();
+                    if now < until {
+                        tokio::time::sleep((until - now).min(std::time::Duration::from_millis(250))).await;
+                        continue;
+                    }
+                }
+            }
+            crate::process::kill_each(&newer);
+            return Ok(newer.len());
+        }
+    }
+
     /// G7/M10: the gate hook is re-read before EVERY turn. The file sits in
     /// a home the participant can write to, and Codex skips an untrusted or
     /// missing hook silently — so an unarmed gate refuses the turn, loudly.
@@ -830,21 +929,34 @@ impl Driver {
 /// atomic git/migration step the interrupt should give more time. The item's
 /// `processId` is deliberately NOT read: it is Codex's PTY identifier, not an
 /// OS pid (EYES d681ab5a).
-fn track_running_command(inc: &Incoming, running_atomic: &mut Option<bool>) {
+/// The command items in flight, by item id, each with whether it is an
+/// atomic git/migration step. Codex can run more than one command at once,
+/// so a single flag would let a later plain command hide an active commit
+/// (EYES 1331cc1b): the question is always "is ANY of them atomic".
+type RunningCommands = std::collections::HashMap<String, bool>;
+
+fn track_running_command(inc: &Incoming, running: &mut RunningCommands) {
     let Incoming::Notification(n) = inc else { return };
     let item = &n.params["item"];
     if item["type"].as_str() != Some("commandExecution") {
         return;
     }
+    let id = item["id"].as_str().unwrap_or("").to_string();
     match n.method.as_str() {
         "item/started" => {
             let command = item["command"].as_str().unwrap_or("");
-            *running_atomic =
-                Some(command.contains("git commit") || command.contains("git push") || command.contains("migrate"));
+            running.insert(id, command.contains("git commit") || command.contains("git push") || command.contains("migrate"));
         }
-        "item/completed" => *running_atomic = None,
+        "item/completed" => {
+            running.remove(&id);
+        }
         _ => {}
     }
+}
+
+/// Whether an atomic git/migration command is among those in flight.
+fn atomic_in_flight(running: &RunningCommands) -> bool {
+    running.values().any(|atomic| *atomic)
 }
 
 /// Whether an incoming message is a FAILED run of the gate hook
@@ -1104,6 +1216,7 @@ mod tests {
             cwd: Some("/tmp/repo".into()),
             deadlines: InterruptDeadlines { plain: std::time::Duration::from_millis(400), atomic: std::time::Duration::from_millis(800) },
             server_pid: SERVER_PID.with(|p| p.get()),
+            server_baseline: SERVER_PID.with(|p| p.get()).map(server_tree).unwrap_or_default(),
             data_dir: DATA_DIR.with(|d| d.borrow().clone()).unwrap_or_else(|| std::path::PathBuf::from("/nonexistent-data-dir")),
             session_id: "s-test".into(),
         };
@@ -1381,6 +1494,199 @@ mod tests {
         assert!(canary.try_wait().unwrap().is_none(), "the process holding Codex's reported id must survive");
         canary.kill().unwrap();
         let _ = canary.wait();
+    }
+
+    /// A stand-in app-server whose "own" tree is one `sleep 300`, and which
+    /// starts a `sleep 400` — "the command" — on SIGUSR1.
+    #[cfg(unix)]
+    fn command_server() -> (ServerGuard, u32, Vec<u32>) {
+        let shell = crate::process::command("sh")
+            .args(["-c", "sleep 300 & trap 'sleep 400 &' USR1; while :; do wait; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = shell.id();
+        let own = wait_for_descendants(pid, 1);
+        (ServerGuard(shell), pid, own)
+    }
+
+    /// The stand-in server's tree dies with the test, pass or fail — a
+    /// leftover would hold the harness's pipes open.
+    #[cfg(unix)]
+    struct ServerGuard(std::process::Child);
+    #[cfg(unix)]
+    impl Drop for ServerGuard {
+        fn drop(&mut self) {
+            crate::process::kill_process_tree(self.0.id());
+            let _ = self.0.wait();
+        }
+    }
+
+    /// SIGKILL is delivered asynchronously: wait (up to 2 s) for the pid to go.
+    #[cfg(unix)]
+    fn wait_dead(pid: u32) -> bool {
+        for _ in 0..40 {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    fn wait_for_descendants(pid: u32, at_least: usize) -> Vec<u32> {
+        for _ in 0..100 {
+            let d = crate::process::descendants(pid);
+            if d.len() >= at_least {
+                return d;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the stand-in server never had {at_least} child(ren)");
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
+
+    /// Tell the stand-in server to start "the command"; returns its pid.
+    #[cfg(unix)]
+    fn start_command(server_pid: u32, own: &[u32]) -> u32 {
+        unsafe {
+            libc::kill(server_pid as i32, libc::SIGUSR1);
+        }
+        for _ in 0..100 {
+            if let Some(p) = crate::process::descendants(server_pid).into_iter().find(|p| !own.contains(p)) {
+                return p;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the command never started");
+    }
+
+    /// Codex answers an interrupt by ending the turn and lets the command run
+    /// on (measured 2026-10-21: `sleep 180` outlived its interrupted turn). The
+    /// driver stops it on the completion that follows — before the completion
+    /// is reported and before the next queued page starts a turn — and leaves
+    /// the app-server's own tree alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interrupted_turns_command_is_stopped_before_the_turn_ends() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("build it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let command = start_command(server_pid, &own);
+        h.fake.write(json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "exec-1", "command": "/bin/zsh -lc 'sleep 400'", "processId": "12345", "status": "inProgress"}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        // A page that arrives mid-turn and is refused: it starts the next turn.
+        h.input.send(OutgoingUserMessage::text("next page")).await.unwrap();
+        let steer = h.fake.read().await;
+        h.fake.write(json!({"id": steer["id"], "error": {"code": -32600, "message": "turn t1 is not active"}})).await;
+        // The interrupt, then Codex ends the turn — the command runs on.
+        h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        assert!(alive(command), "Codex left the command running");
+        h.fake.turn_interrupted("t1").await;
+        // The queued page's turn starts only once the command is gone.
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        assert_eq!(start["method"], "turn/start");
+        assert!(wait_dead(command), "the command was stopped before the next turn started");
+        assert!(own.iter().all(|p| alive(*p)) && alive(server_pid), "the app-server's own tree is untouched");
+        let notice = next_event(&mut h).await;
+        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "{notice:?}");
+        drop(server);
+    }
+
+    /// An atomic git/migration step in flight at the interrupt is given until
+    /// the interrupt's own deadline to finish by itself, then stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_atomic_command_gets_the_deadlines_grace_before_it_is_stopped() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("commit it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let command = start_command(server_pid, &own);
+        // The commit, and a plain command beside it: the plain one's completion
+        // must not hide the commit (EYES 1331cc1b).
+        h.fake.write(json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "exec-1", "command": "/bin/zsh -lc 'git commit -m x'", "status": "inProgress"}}})).await;
+        h.fake.write(json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "exec-2", "command": "/bin/zsh -lc 'ls'", "status": "inProgress"}}})).await;
+        h.fake.write(json!({"method": "item/completed", "params": {"item": {"type": "commandExecution", "id": "exec-2", "command": "/bin/zsh -lc 'ls'", "status": "completed", "exitCode": 0}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolResult { .. }));
+        let t0 = std::time::Instant::now();
+        h.control.send(ControlRequest::interrupt("user-preempt")).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        h.fake.turn_interrupted("t1").await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(alive(command), "the commit is given the atomic deadline (800 ms here) to finish");
+        let done = next_event(&mut h).await;
+        assert!(matches!(&done, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "{done:?}");
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(700), "not before the deadline: {:?}", t0.elapsed());
+        assert!(wait_dead(command));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
+        drop(server);
+    }
+
+    /// A completion that no interrupt asked for stops nothing: a command the
+    /// model left running on purpose is its own business.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_completion_without_an_interrupt_stops_nothing() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("serve it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let command = start_command(server_pid, &own);
+        h.fake.turn_completed("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error: false, .. }));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(alive(command), "nothing asked for it to stop");
+        drop(server);
+    }
+
+    /// The commands in flight are tracked by item: a plain command starting
+    /// or completing beside an atomic one does not hide the atomic one, in
+    /// either order (EYES 1331cc1b).
+    #[test]
+    fn atomic_work_is_tracked_per_command_item() {
+        let started = |id: &str, cmd: &str| Incoming::Notification(super::super::client::Notification { method: "item/started".into(), params: json!({"item": {"type": "commandExecution", "id": id, "command": cmd}}) });
+        let completed = |id: &str| Incoming::Notification(super::super::client::Notification { method: "item/completed".into(), params: json!({"item": {"type": "commandExecution", "id": id}}) });
+        let mut running = RunningCommands::new();
+        track_running_command(&started("a", "git commit -m x"), &mut running);
+        track_running_command(&started("b", "ls"), &mut running);
+        assert!(atomic_in_flight(&running), "a plain command starting beside the commit");
+        track_running_command(&completed("b"), &mut running);
+        assert!(atomic_in_flight(&running), "the plain one completing first");
+        track_running_command(&completed("a"), &mut running);
+        assert!(!atomic_in_flight(&running));
+        // The other order.
+        track_running_command(&started("c", "ls"), &mut running);
+        track_running_command(&started("d", "git push"), &mut running);
+        assert!(atomic_in_flight(&running));
+        track_running_command(&completed("d"), &mut running);
+        assert!(!atomic_in_flight(&running), "the plain one still runs, nothing atomic does");
     }
 
     /// The deadline is cleared by a completion: an interrupt that ends the turn

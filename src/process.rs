@@ -37,9 +37,19 @@ pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
 /// single-PID `kill_child` stands in (the job-object reaping follow-up).
 #[cfg(unix)]
 pub fn descendants(pid: u32) -> Vec<u32> {
-    let Ok(out) = command("ps").args(["-axo", "pid=,ppid="]).output() else {
-        return Vec::new();
-    };
+    descendants_checked(pid).unwrap_or_default()
+}
+
+/// [`descendants`] that tells "no children" from "could not look": `None`
+/// when `ps` cannot be run or exits non-zero. A caller deciding whether a
+/// tree is CLEAN must use this one — an empty answer to a failed listing
+/// read as clean is how a surviving command goes unnoticed (EYES, 2026-10-21).
+#[cfg(unix)]
+pub fn descendants_checked(pid: u32) -> Option<Vec<u32>> {
+    let out = command("ps").args(["-axo", "pid=,ppid="]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let mut words = line.split_whitespace();
@@ -62,7 +72,19 @@ pub fn descendants(pid: u32) -> Vec<u32> {
         }
     }
     order.reverse();
-    order
+    Some(order)
+}
+
+/// SIGKILL each pid, in the order given (callers pass children first).
+/// Best-effort: a pid that is already gone is skipped.
+#[cfg(unix)]
+pub fn kill_each(pids: &[u32]) {
+    for &p in pids {
+        // SAFETY: kill(2) is thread-safe; a stale pid is refused by the kernel.
+        unsafe {
+            libc::kill(p as i32, libc::SIGKILL);
+        }
+    }
 }
 
 /// SIGKILL `pid` and every descendant it has, children first — a running
@@ -71,12 +93,9 @@ pub fn descendants(pid: u32) -> Vec<u32> {
 /// that is already gone is skipped. Unix only; see [`descendants`].
 #[cfg(unix)]
 pub fn kill_process_tree(pid: u32) {
-    for p in descendants(pid).into_iter().chain(std::iter::once(pid)) {
-        // SAFETY: kill(2) is thread-safe; a stale pid is refused by the kernel.
-        unsafe {
-            libc::kill(p as i32, libc::SIGKILL);
-        }
-    }
+    let mut all = descendants(pid);
+    all.push(pid);
+    kill_each(&all);
 }
 
 #[cfg(not(unix))]
