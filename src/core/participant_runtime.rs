@@ -431,7 +431,7 @@ impl AppState {
             if let Some(model) = prepared.model {
                 let config = crate::core::session::frozen_model_config(&prepared.participant.slug, &model);
                 let draft = CandidateDraft::prepare(&self.storage, &self.paths, &self.bridge, self.signaling_addr,
-                    context, prepared.participant, config, prepared.role, services).await?;
+                    context, prepared.participant, config, prepared.role, prepared.history_frontier, services).await?;
                 // No participant writes or token registration happened during
                 // the asynchronous probes. Recheck under the publication lock.
                 {
@@ -603,6 +603,7 @@ impl AppState {
                 "restored participant changed again"
             );
             let revision = self.storage.roster_revision(&row.session_id).await?;
+            let history_frontier = self.storage.cursor_for(old.participant.id).await?;
             let draft = CandidateDraft::prepare(
                 &self.storage,
                 &self.paths,
@@ -612,6 +613,7 @@ impl AppState {
                 participant,
                 old.config.clone(),
                 None,
+                history_frontier,
                 services,
             )
             .await?;
@@ -653,6 +655,7 @@ impl AppState {
                             &row.id,
                             old.participant.id,
                             revision,
+                            history_frontier,
                             &candidate.metadata
                         )
                         .await?,

@@ -1645,6 +1645,11 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   retained member, or reset only the affected member's model/runtime/account/
   resume metadata. It returns frozen model/role inputs for the runtime;
   credentials and composed prompts are not copied into recovery data.
+  A late invite's initial cursor is the session's current maximum message ID,
+  captured in that transaction; no old-row delivery or gate-result receipt is
+  manufactured. A switch keeps its delivered cursor. That history frontier is
+  stored in the checkpoint and passed to candidate construction; publication
+  refuses a cursor that moved meanwhile. Restoration never rewinds real delivery.
   Failure restores owned fields atomically; a failed addition remains disabled
   history. Current votes are retracted, never resurrected on rollback.
   Close and reopen settle unfinished operations in their own transactions;
@@ -1677,7 +1682,7 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   immediate persistence. `publish_participant_spawn` applies the draft's
   metadata and success status atomically only for the same prepared target,
   open session, runtime and post-preparation roster revision. Older checkpoints
-  without that revision still recover but cannot publish a candidate.
+  without that revision or history frontier still recover but cannot publish a candidate.
   Every spawn recovers an interrupted applying change before project setup or
   roster selection, including temporary-halt respawns. Recovery conflicts stop
   startup with a recap; pending intent stays pending and is not replayed as work.
@@ -1701,7 +1706,13 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   of their requester. Activity slots and the weak watchdog roster refresh together.
   Candidate prompt excerpts (phase docs, own handoff, first three/latest six
   authored-user ledger entries, including tray choices) cap encoded bytes at64KB
-  and never advance a reader cursor. Channel `origin=user` is not proof of human
+  and never advance an existing reader cursor. Excerpts exclude channel rows
+  beyond the captured frontier, so startup-time rows remain normal unread input.
+  The allowance reserves provider/tool room, estimates two bytes per token,
+  counts the existing prompt and caps at64KB; it is an estimate, not a live
+  context-meter reading. Small windows can receive only the coverage notice.
+  Each excerpt reports source/shown bytes and truncation, and the prompt states
+  which history was omitted. Channel `origin=user` is not proof of human
   authorship: it can also carry host/plugin text or command output.
   Full bootstrap/history budgeting, meter reset, UI controls and delegated-agent
   authorization remain integration work; no Session Settings control invokes the

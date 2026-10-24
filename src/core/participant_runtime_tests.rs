@@ -42,6 +42,7 @@ fn fake_agent(session: &str, slug: &str) -> (AgentHandle, Seat) {
 struct Spawned {
     config: AgentConfig,
     resume: Option<String>,
+    prompt: String,
     seat: Seat,
 }
 
@@ -57,6 +58,7 @@ fn services(fail: bool) -> (SpawnServices, mpsc::UnboundedReceiver<Spawned>) {
                     }
                     let (handle, seat) = fake_agent(&cfg.session_id, &cfg.agent_name);
                     tx.send(Spawned {
+                        prompt: std::fs::read_to_string(&cfg.system_prompt_path).unwrap(),
                         config: cfg.config,
                         resume: cfg.resume_session_id,
                         seat,
@@ -93,6 +95,137 @@ fn services(fail: bool) -> (SpawnServices, mpsc::UnboundedReceiver<Spawned>) {
         },
         rx,
     )
+}
+
+#[tokio::test]
+async fn startup_snapshot_stops_at_its_frontier_and_later_rows_arrive_once() {
+    for adding in [false, true] {
+        let f = Fixture::new(false).await;
+        let old = f
+            .state
+            .storage
+            .post_to_channel("s1", "user", None, "text", "HISTORICAL-DIRECTION", None)
+            .await
+            .unwrap()
+            .message_id();
+        f.state
+            .storage
+            .record_user_words("s1", old, "HISTORICAL-DIRECTION")
+            .await
+            .unwrap();
+        if !adding {
+            f.state
+                .storage
+                .commit_delivery(f.rows[0].id, &[(old, None)])
+                .await
+                .unwrap();
+            let unread = f
+                .state
+                .storage
+                .post_to_channel("s1", "user", None, "text", "UNREAD-BEFORE-SWITCH", None)
+                .await
+                .unwrap()
+                .message_id();
+            f.state
+                .storage
+                .record_user_words("s1", unread, "UNREAD-BEFORE-SWITCH")
+                .await
+                .unwrap();
+        }
+        let (mut services, mut spawned) = services(false);
+        let normal_auth = services.auth.clone();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (e, r) = (entered.clone(), release.clone());
+        services.auth = Arc::new(move |dir| {
+            let (e, r, probe) = (e.clone(), r.clone(), normal_auth.clone());
+            Box::pin(async move {
+                e.notify_one();
+                r.notified().await;
+                probe(dir).await
+            })
+        });
+        let request = if adding {
+            ParticipantChangeRequest::Add {
+                role_id: f.rows[0].role_id.unwrap(),
+                model_id: "new".into(),
+                label: None,
+            }
+        } else {
+            f.switch()
+        };
+        f.start("snapshot", request, services).await;
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        let target = if adding {
+            f.state
+                .storage
+                .participants_for_session("s1")
+                .await
+                .unwrap()
+                .into_iter()
+                .max_by_key(|p| p.id)
+                .unwrap()
+                .id
+        } else {
+            f.rows[0].id
+        };
+        assert_eq!(f.state.storage.cursor_for(target).await.unwrap(), old);
+        let old_receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM participant_deliveries WHERE participant_id = ? AND message_id = ?")
+            .bind(target).bind(old).fetch_one(f.state.storage.pool()).await.unwrap();
+        assert_eq!(
+            old_receipts,
+            if adding { 0 } else { 1 },
+            "joining never manufactures delivery receipts"
+        );
+        let late = f
+            .state
+            .storage
+            .post_to_channel("s1", "user", None, "text", "DIRECTION-DURING-STARTUP", None)
+            .await
+            .unwrap()
+            .message_id();
+        f.state
+            .storage
+            .record_user_words("s1", late, "DIRECTION-DURING-STARTUP")
+            .await
+            .unwrap();
+        f.ring
+            .send(SequencerCommand::UserMessage {
+                mentions: vec![target],
+                restarts_rotation: true,
+            })
+            .await
+            .unwrap();
+        release.notify_one();
+        assert_eq!(f.done("snapshot").await.status, "applied");
+        let mut fresh = spawned.recv().await.unwrap();
+        assert!(fresh.prompt.contains("HISTORICAL-DIRECTION"));
+        assert!(!fresh.prompt.contains("DIRECTION-DURING-STARTUP"));
+        assert!(
+            !fresh.prompt.contains("UNREAD-BEFORE-SWITCH"),
+            "the snapshot must use the captured delivered cursor, not the newest channel row"
+        );
+        let wire = tokio::time::timeout(Duration::from_secs(2), fresh.seat.input.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(wire.message.content.contains("DIRECTION-DURING-STARTUP"));
+        if !adding {
+            assert!(wire.message.content.contains("UNREAD-BEFORE-SWITCH"));
+        }
+        assert!(
+            !wire.message.content.contains("HISTORICAL-DIRECTION"),
+            "old history is in the snapshot, not replayed as fresh input"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), fresh.seat.input.recv())
+                .await
+                .is_err()
+        );
+        f.end().await;
+    }
 }
 
 struct Fixture {

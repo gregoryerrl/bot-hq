@@ -16,6 +16,9 @@ pub struct PreparedParticipantChange {
     pub previous: Option<Participant>,
     pub model: Option<Model>,
     pub role: Option<Role>,
+    /// The channel frontier captured with this preparation revision. New
+    /// members join here; replacements keep their existing delivered cursor.
+    pub history_frontier: i64,
 }
 
 /// Observed candidate state, kept in memory until the lifecycle owner publishes
@@ -41,6 +44,8 @@ struct Recovery {
     /// may publish, against the actual post-mutation revision it observed.
     #[serde(default)]
     publication_revision: Option<i64>,
+    #[serde(default)]
+    history_frontier: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -193,7 +198,7 @@ impl Storage {
     /// Runtime recovery after an owned rollback. The worker still holds the
     /// same ring reservation; a close or a later roster edit wins in storage.
     pub(crate) async fn publish_recovered_participant_spawn(&self, session: &str, id: &str,
-        participant_id: i64, revision: i64, metadata: &ParticipantSpawnMetadata) -> Result<bool> {
+        participant_id: i64, revision: i64, history_frontier: i64, metadata: &ParticipantSpawnMetadata) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let Some(row) = read_change(&mut tx, id).await?.filter(|r| r.session_id == session && r.status == "failed") else { return Ok(false) };
         let target = match row.request()? {
@@ -205,6 +210,9 @@ impl Storage {
             AND NOT EXISTS(SELECT 1 FROM session_participant_changes WHERE session_id = ? AND status IN ('pending', 'applying'))")
             .bind(session).bind(revision).bind(session).fetch_one(&mut *tx).await?;
         if !valid { return Ok(false); }
+        let cursor: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT last_read_message_id FROM participant_cursors WHERE participant_id = ?), 0)")
+            .bind(participant_id).fetch_one(&mut *tx).await?;
+        if cursor != history_frontier { return Ok(false); }
         let current = participant(&mut tx, session, participant_id).await?;
         if !current.enabled || current.runtime != metadata.runtime { return Ok(false); }
         sqlx::query("UPDATE session_participants SET runtime_version_at_spawn = ?, claude_session_id = ?, \
@@ -246,6 +254,10 @@ impl Storage {
             anyhow::bail!("the roster changed while this participant was starting; recover the change");
         }
         check_prepared(&mut tx, &row, &snapshot).await?;
+        let frontier = snapshot.history_frontier.context("an older interrupted change must recover before publishing a history snapshot")?;
+        let cursor: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT last_read_message_id FROM participant_cursors WHERE participant_id = ?), 0)")
+            .bind(target).fetch_one(&mut *tx).await?;
+        anyhow::ensure!(cursor == frontier, "the participant's delivery cursor changed during startup; recover before publishing");
         let current = participant(&mut tx, session, target).await?;
         if current.runtime != metadata.runtime { anyhow::bail!("spawn metadata belongs to another runtime"); }
         sqlx::query("UPDATE session_participants SET runtime_version_at_spawn = ?, claude_session_id = ?, \
@@ -312,8 +324,12 @@ impl Storage {
                     .bind(session).bind(slug).bind(&role.display_name).bind(role.id).bind(&model.id)
                     .bind(&model.runtime).bind(&role.capabilities).bind(&role.participation_mode).bind(position)
                     .bind(&now).bind(label).execute(&mut *tx).await?.last_insert_rowid();
-                sqlx::query("INSERT INTO participant_cursors (participant_id, updated_at) VALUES (?, ?)")
-                    .bind(id).bind(&now).execute(&mut *tx).await?;
+                // A late invite joins at this channel frontier. This is NOT a
+                // delivery: old rows stay stored and receive no delivery receipt.
+                let frontier: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?")
+                    .bind(session).fetch_one(&mut *tx).await?;
+                sqlx::query("INSERT INTO participant_cursors (participant_id, last_read_message_id, updated_at) VALUES (?, ?, ?)")
+                    .bind(id).bind(frontier).bind(&now).execute(&mut *tx).await?;
                 (id, RecoveryAction::Added { participant_id: id })
             }
             ParticipantChangeRequest::Remove { participant_id } => {
@@ -336,7 +352,9 @@ impl Storage {
         };
         let publication_revision: i64 = sqlx::query_scalar("SELECT roster_revision FROM sessions WHERE id = ?")
             .bind(session).fetch_one(&mut *tx).await?;
-        let checkpoint = serde_json::to_string(&Recovery { version: 1, action, publication_revision: Some(publication_revision) })?;
+        let history_frontier: i64 = sqlx::query_scalar("SELECT COALESCE((SELECT last_read_message_id FROM participant_cursors WHERE participant_id = ?), 0)")
+            .bind(changed_id).fetch_one(&mut *tx).await?;
+        let checkpoint = serde_json::to_string(&Recovery { version: 1, action, publication_revision: Some(publication_revision), history_frontier: Some(history_frontier) })?;
         if checkpoint.len() > 256 * 1024 { anyhow::bail!("participant recovery checkpoint exceeds 256 KiB; nothing changed"); }
         sqlx::query("UPDATE session_participant_changes SET recovery_json = ? WHERE id = ? AND session_id = ? AND recovery_json IS NULL")
             .bind(checkpoint).bind(id).bind(session).execute(&mut *tx).await?;
@@ -349,7 +367,7 @@ impl Storage {
             .bind(&now).bind(session).bind(session).execute(&mut *tx).await?;
         let participant = participant(&mut tx, session, changed_id).await?;
         tx.commit().await?;
-        Ok(PreparedParticipantChange { participant, previous, model, role })
+        Ok(PreparedParticipantChange { participant, previous, model, role, history_frontier })
     }
 
     /// Cold-start use only, before spawning a session. Pending intent survives
@@ -431,6 +449,55 @@ mod tests {
             account_email: Some("new@example.com".into()), account_org: Some("new-org".into()),
             effort: Some("low".into()), ultracode: Some(false), system_prompt: "candidate prompt".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn late_additions_join_their_own_channel_frontier_without_delivery_receipts() {
+        let (s, peers) = fixture().await;
+        let before = s.post_to_channel("s1", "user", None, "text", "old direction", None).await.unwrap().message_id();
+        s.create_session("other", "other", None).await.unwrap();
+        s.post_to_channel("other", "user", None, "text", "not this session", None).await.unwrap();
+        claim(&s, "add", ParticipantChangeRequest::Add { role_id: peers[0].role_id.unwrap(), model_id: "new".into(), label: None }).await;
+        let prepared = s.prepare_participant_change("s1", "add").await.unwrap();
+        assert_eq!(prepared.history_frontier, before);
+        assert_eq!(s.cursor_for(prepared.participant.id).await.unwrap(), before);
+        let receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM participant_deliveries WHERE participant_id = ?")
+            .bind(prepared.participant.id).fetch_one(s.pool()).await.unwrap();
+        assert_eq!(receipts, 0);
+        let saved = s.participant_change("s1", "add").await.unwrap().unwrap();
+        assert_eq!(recovery(&saved).unwrap().history_frontier, Some(before));
+        s.finish_participant_change("s1", "add", Some("startup failed")).await.unwrap();
+        assert!(!s.participant_by_id(prepared.participant.id).await.unwrap().unwrap().enabled);
+        assert_eq!(s.cursor_for(prepared.participant.id).await.unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn changed_delivery_frontier_refuses_publication_without_rewinding_the_cursor() {
+        let (s, peers) = fixture().await;
+        let old = s.post_to_channel("s1", "user", None, "text", "old", None).await.unwrap().message_id();
+        s.commit_delivery(peers[0].id, &[(old, None)]).await.unwrap();
+        claim(&s, "switch", switch(&peers[0])).await;
+        let prepared = s.prepare_participant_change("s1", "switch").await.unwrap();
+        assert_eq!(prepared.history_frontier, old);
+        let later = s.post_to_channel("s1", "user", None, "text", "later", None).await.unwrap().message_id();
+        s.commit_delivery(peers[0].id, &[(later, None)]).await.unwrap();
+        assert!(s.publish_participant_spawn("s1", "switch", peers[0].id, &spawn_metadata()).await.unwrap_err().to_string().contains("cursor changed"));
+        s.finish_participant_change("s1", "switch", Some("recover")).await.unwrap();
+        assert_eq!(s.cursor_for(peers[0].id).await.unwrap(), later, "recovery never rolls back actual delivery");
+    }
+
+    #[tokio::test]
+    async fn checkpoints_without_history_frontiers_recover_but_cannot_publish() {
+        let (s, peers) = fixture().await;
+        claim(&s, "switch", switch(&peers[0])).await;
+        s.prepare_participant_change("s1", "switch").await.unwrap();
+        let saved = s.participant_change("s1", "switch").await.unwrap().unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(saved.recovery_json.as_ref().unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("history_frontier");
+        sqlx::query("UPDATE session_participant_changes SET recovery_json = ? WHERE id = 'switch'").bind(json.to_string()).execute(s.pool()).await.unwrap();
+        assert!(s.publish_participant_spawn("s1", "switch", peers[0].id, &spawn_metadata()).await.is_err());
+        s.recover_interrupted_participant_change("s1").await.unwrap().unwrap();
+        assert_eq!(s.participant_by_id(peers[0].id).await.unwrap().unwrap(), peers[0]);
     }
 
     #[tokio::test]

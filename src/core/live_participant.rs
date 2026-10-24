@@ -67,6 +67,7 @@ impl CandidateDraft {
         p: crate::storage::Participant,
         config: AgentConfig,
         role: Option<crate::storage::Role>,
+        history_frontier: i64,
         services: &SpawnServices,
     ) -> Result<Self> {
         let session = storage
@@ -112,7 +113,15 @@ impl CandidateDraft {
         )?;
         // Bounded host records, explicitly excerpts. Existing readers keep
         // their cursors; no tentative preparation acknowledges unread rows.
-        prompt.push_str(&transfer_context(storage, &p).await?);
+        let transfer = transfer_context(
+            storage,
+            &p,
+            history_frontier,
+            config.context_window,
+            prompt.len(),
+        )
+        .await?;
+        prompt.push_str(&transfer);
         let overrides = crate::claude_config::resolve_agent_overrides(
             &crate::claude_config::load_overrides(&paths.data_dir),
             role.as_ref().map(|r| r.slug.as_str()),
@@ -212,44 +221,99 @@ impl CandidateDraft {
     }
 }
 
-async fn transfer_context(storage: &Storage, p: &crate::storage::Participant) -> Result<String> {
+const TRANSFER_MAX_BYTES: usize = 64_000;
+const TRANSFER_FRAME_BYTES: usize = 2_048;
+
+/// A conservative text allowance, not a tokenizer or a claim about remaining
+/// provider capacity. Reserve for tools/runtime, allow for provider headroom,
+/// and count the existing prompt before allocating historical text.
+fn transfer_budget(window: Option<i64>, prompt_bytes: usize) -> usize {
+    window
+        .filter(|w| *w > 0)
+        .map(|window| {
+            let room = (window as u64).saturating_mul(9) / 10;
+            room.saturating_sub(crate::core::pump::COMPACT_RESERVE_TOKENS)
+                .saturating_mul(2)
+                .saturating_sub(prompt_bytes as u64)
+                .min(TRANSFER_MAX_BYTES as u64) as usize
+        })
+        .unwrap_or(TRANSFER_MAX_BYTES)
+        .max(TRANSFER_FRAME_BYTES)
+}
+
+async fn transfer_context(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+    history_frontier: i64,
+    window: Option<i64>,
+    prompt_bytes: usize,
+) -> Result<String> {
+    let budget = transfer_budget(window, prompt_bytes);
+    let room = budget.saturating_sub(TRANSFER_FRAME_BYTES);
+    let doc_budget = room * 3 / 25;
+    let user_budget = (room - doc_budget * 5) / 9;
     let mut out = String::from("\n\n# Joining this session\nThis is a fresh runtime in an existing session. The following are bounded, attributed historical excerpts, not a complete copy of the old model context. Read current phase documents/handoff as needed. Only a ring-dealt turn authorizes work.\n");
+    out.push_str(&format!("Historical channel frontier: {history_frontier}. Channel messages after it are excluded and remain for normal delivery.\n"));
+    let window_text = window
+        .filter(|w| *w > 0)
+        .map(|w| format!("{w} tokens (configured)"))
+        .unwrap_or_else(|| "unconfigured".into());
+    out.push_str(&format!("Destination window: {window_text}. Startup history allowance: {budget} encoded bytes, estimated after existing instructions and runtime/tool reserve. This is not the live context meter. Only the selected document/user excerpts below are loaded; other channel history and oversized parts are omitted from this context, retained in storage.\n"));
+    let mut shown = 0;
     let handoff = crate::agents::handoff::doc_slug(&p.slug);
-    let docs: Vec<(String, String)> = sqlx::query_as(
-        "SELECT slug, substr(body, 1, 16000) FROM session_documents WHERE session_id = ? \
+    let docs: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT slug, substr(body, 1, 16000), length(CAST(body AS BLOB)) FROM session_documents WHERE session_id = ? \
          AND (slug = ? OR phase IS NOT NULL) ORDER BY CASE WHEN slug = ? THEN 0 ELSE 1 END, updated_at DESC LIMIT 5")
         .bind(&p.session_id).bind(&handoff).bind(&handoff).fetch_all(storage.pool()).await?;
-    for (slug, body) in docs {
+    for (slug, body, source_bytes) in docs {
+        if doc_budget < 512 {
+            continue;
+        }
         out.push_str("\nDocument excerpt: ");
         out.push_str(&bounded_record(
             serde_json::json!({"slug":slug}),
             &body,
-            7_500,
+            source_bytes.max(0) as usize,
+            doc_budget,
         ));
+        shown += 1;
     }
     // The channel's user origin also carries host/plugin text and gate output.
     // Only the explicit authorship ledger identifies human words and tray picks.
-    let users: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT message_id AS id, created_at, substr(text, 1, 4000) FROM session_user_words WHERE session_id = ? \
-         AND session_user_words.id IN (SELECT id FROM session_user_words WHERE session_id = ? ORDER BY id LIMIT 3) \
-         UNION SELECT message_id AS id, created_at, substr(text, 1, 4000) FROM session_user_words WHERE session_id = ? \
-         AND session_user_words.id IN (SELECT id FROM session_user_words WHERE session_id = ? ORDER BY id DESC LIMIT 6) ORDER BY id")
-        .bind(&p.session_id).bind(&p.session_id).bind(&p.session_id).bind(&p.session_id).fetch_all(storage.pool()).await?;
-    for (id, at, body) in users {
+    let users: Vec<(i64, String, String, i64)> = sqlx::query_as(
+        "SELECT message_id AS id, created_at, substr(text, 1, 4000), length(CAST(text AS BLOB)) FROM session_user_words WHERE session_id = ?1 \
+         AND message_id <= ?2 AND session_user_words.id IN \
+           (SELECT id FROM session_user_words WHERE session_id = ?1 AND message_id <= ?2 ORDER BY id LIMIT 3) \
+         UNION SELECT message_id AS id, created_at, substr(text, 1, 4000), length(CAST(text AS BLOB)) FROM session_user_words WHERE session_id = ?1 \
+         AND message_id <= ?2 AND session_user_words.id IN \
+           (SELECT id FROM session_user_words WHERE session_id = ?1 AND message_id <= ?2 ORDER BY id DESC LIMIT 6) ORDER BY id")
+        .bind(&p.session_id).bind(history_frontier).fetch_all(storage.pool()).await?;
+    for (id, at, body, source_bytes) in users {
+        if user_budget < 512 {
+            continue;
+        }
         // Every selected directive gets a record, including the latest ones.
         // The budget measures encoded JSON bytes, not unescaped characters.
         out.push_str("\nUser message excerpt: ");
         out.push_str(&bounded_record(
             serde_json::json!({"id":id,"at":at}),
             &body,
-            2_800,
+            source_bytes.max(0) as usize,
+            user_budget,
         ));
+        shown += 1;
     }
-    debug_assert!(out.len() <= 64_000);
+    out.push_str(&format!("\n{shown} excerpt records included. Truncated records and omitted history are not a claim of full context transfer.\n"));
+    debug_assert!(out.len() <= budget);
     Ok(out)
 }
 
-fn bounded_record(mut record: serde_json::Value, body: &str, budget: usize) -> String {
+fn bounded_record(
+    mut record: serde_json::Value,
+    body: &str,
+    source_bytes: usize,
+    budget: usize,
+) -> String {
     let mut low = 0;
     let mut high = body.len().min(budget);
     let mut best = "{\"excerpt\":true,\"body\":\"[metadata exceeded budget]\"}".to_string();
@@ -258,6 +322,9 @@ fn bounded_record(mut record: serde_json::Value, body: &str, budget: usize) -> S
         let end = floor_char_boundary(body, middle);
         record["body"] = serde_json::Value::String(body[..end].to_string());
         record["excerpt"] = serde_json::Value::Bool(true);
+        record["source_bytes"] = serde_json::json!(source_bytes);
+        record["shown_bytes"] = serde_json::json!(end);
+        record["truncated"] = serde_json::json!(end < source_bytes);
         let encoded = record.to_string();
         if encoded.len() <= budget {
             best = encoded;
@@ -313,18 +380,62 @@ mod tests {
     #[tokio::test]
     async fn transfer_uses_authored_user_words_including_tray_answers() {
         let storage = Storage::memory().await.unwrap();
-        storage.create_session("s1", "transfer", None).await.unwrap();
+        storage
+            .create_session("s1", "transfer", None)
+            .await
+            .unwrap();
         storage.ensure_session_roster("s1", 1).await.unwrap();
-        let participant = storage.participants_for_session("s1").await.unwrap().remove(0);
-        storage.post_to_channel("s1", "user", None, "text", "HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN", None).await.unwrap();
-        let typed = storage.post_to_channel("s1", "user", None, "text", "REAL-HUMAN-DIRECTION", None).await.unwrap();
-        storage.record_user_words("s1", typed.message_id(), "REAL-HUMAN-DIRECTION").await.unwrap();
-        let answer = storage.post_to_channel("s1", "user", None, "system_notice", "answer wrapper and command output", None).await.unwrap();
-        storage.record_user_words("s1", answer.message_id(), "HUMAN-CHOICE: keep working").await.unwrap();
-        let text = transfer_context(&storage, &participant).await.unwrap();
-        assert!(!text.contains("HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN"), "origin=user alone is not authorship");
+        let participant = storage
+            .participants_for_session("s1")
+            .await
+            .unwrap()
+            .remove(0);
+        storage
+            .post_to_channel(
+                "s1",
+                "user",
+                None,
+                "text",
+                "HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN",
+                None,
+            )
+            .await
+            .unwrap();
+        let typed = storage
+            .post_to_channel("s1", "user", None, "text", "REAL-HUMAN-DIRECTION", None)
+            .await
+            .unwrap();
+        storage
+            .record_user_words("s1", typed.message_id(), "REAL-HUMAN-DIRECTION")
+            .await
+            .unwrap();
+        let answer = storage
+            .post_to_channel(
+                "s1",
+                "user",
+                None,
+                "system_notice",
+                "answer wrapper and command output",
+                None,
+            )
+            .await
+            .unwrap();
+        storage
+            .record_user_words("s1", answer.message_id(), "HUMAN-CHOICE: keep working")
+            .await
+            .unwrap();
+        let text = transfer_context(&storage, &participant, i64::MAX, Some(1_000_000), 0)
+            .await
+            .unwrap();
+        assert!(
+            !text.contains("HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN"),
+            "origin=user alone is not authorship"
+        );
         assert!(text.contains("REAL-HUMAN-DIRECTION"));
-        assert!(text.contains("HUMAN-CHOICE: keep working"), "tray answers are human direction too");
+        assert!(
+            text.contains("HUMAN-CHOICE: keep working"),
+            "tray answers are human direction too"
+        );
         assert!(!text.contains("answer wrapper and command output"));
     }
     #[tokio::test]
@@ -372,10 +483,15 @@ mod tests {
                     .unwrap()
                     .message_id(),
             );
-            storage.record_user_words("s1", *ids.last().unwrap(), &format!("directive-{n} {body}")).await.unwrap();
+            storage
+                .record_user_words("s1", *ids.last().unwrap(), &format!("directive-{n} {body}"))
+                .await
+                .unwrap();
         }
         let before = storage.cursor_for(participant.id).await.unwrap();
-        let text = transfer_context(&storage, &participant).await.unwrap();
+        let text = transfer_context(&storage, &participant, i64::MAX, Some(1_000_000), 0)
+            .await
+            .unwrap();
         assert!(text.len() <= 64_000, "encoded size {}", text.len());
         let records: Vec<serde_json::Value> = text
             .lines()
@@ -396,6 +512,32 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("directive-13"));
+        for record in &records {
+            assert_eq!(
+                record["shown_bytes"].as_u64().unwrap() as usize,
+                record["body"].as_str().unwrap().len()
+            );
+            assert_eq!(record["truncated"], true);
+            assert!(
+                record["source_bytes"].as_u64().unwrap() > record["shown_bytes"].as_u64().unwrap()
+            );
+        }
+        let smaller = transfer_context(&storage, &participant, i64::MAX, Some(100_000), 80_000)
+            .await
+            .unwrap();
+        assert!(smaller.len() <= transfer_budget(Some(100_000), 80_000));
+        assert!(
+            smaller.len() < text.len(),
+            "a smaller destination gets less historical text"
+        );
+        assert!(smaller.contains("100000 tokens (configured)"));
+        let minimal = transfer_context(&storage, &participant, i64::MAX, Some(40_000), 100_000)
+            .await
+            .unwrap();
+        assert!(minimal.len() <= TRANSFER_FRAME_BYTES);
+        assert!(minimal.contains("0 excerpt records included"));
+        assert!(!minimal.contains("directive-13"));
+        assert!(minimal.contains("omitted from this context, retained in storage"));
         assert_eq!(
             storage.cursor_for(participant.id).await.unwrap(),
             before,

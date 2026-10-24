@@ -142,7 +142,12 @@ model side by side. Migration 0102 applies on first launch.
   follow the changed roster; outstanding review bodies are delivered again.
   Candidate prompts include bounded, attributed session excerpts; human
   instructions come from the authorship ledger and include tray choices,
-  without treating host/plugin text or command output as the user's words. The controls
+  without treating host/plugin text or command output as the user's words.
+  Added agents start at a captured history boundary without false delivery
+  receipts. Model changes preserve unread messages. Startup excerpts stop at
+  that boundary, scale to a conservative allowance for the configured window,
+  and identify omitted or truncated text; later messages arrive normally.
+  The controls
   and complete history-transfer flow are still being connected; these operations
   are not yet exposed in Session Settings.
 - **Auto-allowed publications still receive review.** Both connectors and
