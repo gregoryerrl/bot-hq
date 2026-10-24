@@ -478,7 +478,8 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/feedback.rs` | agent-filed bot-hq feedback | S |
 | `src/storage/models.rs` | `models` registry (incl. `claude_config_dir`, 0090) + `app_settings` kv | M |
 | `src/storage/codex_hook_trust.rs` | `codex_hook_trust` — exact reported key/hash cached under the selected credential home (0103); `codex_hook_trust_candidates` supplies same-home rows for physical-file matching on probe failure (#120) | S |
-| `src/storage/participant_changes.rs` | Durable roster-change intent (0107): revision validation, one pending/applying request per session, idempotent request IDs, claim/cancel transitions and write-once recovery checkpoints; runtime execution is separate | M |
+| `src/storage/participant_changes.rs` | Durable roster-change intent (0107): revision/selection validation, one pending/applying request per session, idempotent request IDs, claim/cancel transitions; completion delegates to transactional mutation/recovery | M |
+| `src/storage/participant_mutations.rs` | `prepare_participant_change` snapshots and appends/disables/resets atomically; frozen in-memory spawn inputs, owned-field rollback, cold-start recovery, and close/reopen settlement; caller must hold the ring boundary | M |
 | `src/storage/account_marks.rs` | `account_marks` — the advisory usage-limit mark per Claude account (config dir + organisation, 0091) | S |
 | `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |

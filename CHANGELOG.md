@@ -112,8 +112,11 @@ model side by side. Migration 0102 applies on first launch.
 - **Session agent controls (in progress).** Durable change requests retain
   their status and recovery checkpoint across restart. Repeated requests are
   idempotent; stale roster edits, unavailable selections and removal of the
-  last active agent are refused. Runtime execution and the controls are being
-  connected; this storage foundation alone does not change a live session.
+  last active agent are refused. Roster preparation and rollback are now
+  transactional; close/reopen settles unfinished changes, and failed additions
+  retain their history. A conflicting newer edit is preserved and recorded
+  instead of preventing a close. Runtime execution and controls are being connected;
+  these storage operations are not yet exposed as live session controls.
 - **Auto-allowed publications still receive review.** Both connectors and
   `action_gate` queue unread publication content for the reviewer, then the
   background worker runs it without a user approval card. The queue survives

@@ -335,6 +335,8 @@ impl Storage {
     /// turn, and 27 closed rows still named one on 2026-08-17 — an ending state
     /// that read like a session mid-turn (round 7).
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        super::participant_mutations::settle_open_change(&mut tx, id, "Session closed").await?;
         sqlx::query(
             "UPDATE sessions SET closed_at = ?, archived = ?, \
                  current_turn_participant_id = NULL \
@@ -343,9 +345,10 @@ impl Storage {
         .bind(now_utc())
         .bind(if archive { 1 } else { 0 })
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .with_context(|| format!("closing session {id}"))?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -400,6 +403,12 @@ impl Storage {
     /// its participants (four such rosters were alive at once on 2026-08-18,
     /// spawned by clicks through the Archive to copy session ids).
     pub async fn reopen_session(&self, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let closed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND closed_at IS NOT NULL)")
+            .bind(id).fetch_one(&mut *tx).await?;
+        if !closed { return Ok(false); }
+        // Also repairs an unfinished row left by an older host before reopening.
+        super::participant_mutations::settle_open_change(&mut tx, id, "Session reopened").await?;
         let now = now_utc();
         let res = sqlx::query(
             "UPDATE sessions SET closed_at = NULL, archived = 0, \
@@ -412,9 +421,10 @@ impl Storage {
         .bind(&now)
         .bind(&now)
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .with_context(|| format!("reopening session {id}"))?;
+        tx.commit().await?;
         Ok(res.rows_affected() > 0)
     }
 

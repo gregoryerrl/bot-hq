@@ -1640,8 +1640,19 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   wins only before claim. Role/model settings are hashed, so credentials and
   full role prose are not copied into this ledger. Triggers advance the roster
   revision on membership/selection edits, excluding runtime bookkeeping.
-  This is storage groundwork; runtime authorization, safe-boundary execution,
-  rollback/recovery and the UI remain separate integration work.
+  `prepare_participant_change` revalidates and commits the typed recovery
+  checkpoint with the roster change: append a new identity/cursor, disable a
+  retained member, or reset only the affected member's model/runtime/account/
+  resume metadata. It returns frozen model/role inputs for the runtime;
+  credentials and composed prompts are not copied into recovery data.
+  Failure restores owned fields atomically; a failed addition remains disabled
+  history. Current votes are retracted, never resurrected on rollback.
+  Close and reopen settle unfinished operations in their own transactions;
+  a newer external edit is preserved and recorded as a failed change rather
+  than blocking closure. Database errors are not acknowledged as recovery.
+  cold-start recovery rolls back applying work instead of replaying it.
+  Runtime authorization, safe-boundary/process execution, startup recovery
+  wiring, context transfer and the UI remain integration work.
 - `participant_cursors` (participant → last read message id) and
   `participant_deliveries` (participant, message_id, delivered_at,
   withheld_reason) — the ring's per-participant read position and its

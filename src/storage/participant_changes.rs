@@ -1,6 +1,7 @@
 //! Durable, validated intent for changing an existing session's participants.
-//! This layer never starts/stops a process or mutates a roster. The runtime
-//! owns the safe boundary, recovery snapshot, authority recheck and execution.
+//! Request and claim do not mutate the roster. Completion delegates to the
+//! transactional preparation/recovery module; the runtime owns the safe
+//! boundary, authority checks and process replacement.
 
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -54,7 +55,7 @@ impl ParticipantChange {
 const COLUMNS: &str = "id, session_id, expected_revision, selection_fingerprint, request_json, origin_json, status, \
     created_at, started_at, finished_at, error, recovery_json";
 
-async fn read_change(conn: &mut SqliteConnection, id: &str) -> Result<Option<ParticipantChange>> {
+pub(super) async fn read_change(conn: &mut SqliteConnection, id: &str) -> Result<Option<ParticipantChange>> {
     Ok(sqlx::query_as(&format!("SELECT {COLUMNS} FROM session_participant_changes WHERE id = ?"))
         .bind(id).fetch_optional(conn).await?)
 }
@@ -62,7 +63,7 @@ async fn read_change(conn: &mut SqliteConnection, id: &str) -> Result<Option<Par
 /// Freeze the meaning of a selected saved model/role without copying its
 /// credentials or full prompt into the request ledger. Timestamps alone can
 /// collide or change on no-op saves; hash the actual settings instead.
-async fn selection_fingerprint(conn: &mut SqliteConnection, request: &ParticipantChangeRequest) -> Result<String> {
+pub(super) async fn selection_fingerprint(conn: &mut SqliteConnection, request: &ParticipantChangeRequest) -> Result<String> {
     let mut selections = Vec::new();
     let (model, role) = match request {
         ParticipantChangeRequest::Add { model_id, role_id, .. } => (Some(model_id), Some(*role_id)),
@@ -89,7 +90,7 @@ async fn selection_fingerprint(conn: &mut SqliteConnection, request: &Participan
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(&selections)?)))
 }
 
-async fn validate_request(
+pub(super) async fn validate_request(
     conn: &mut SqliteConnection,
     session_id: &str,
     expected_revision: i64,
@@ -243,23 +244,11 @@ impl Storage {
             .bind(now_utc()).bind(id).bind(session_id).execute(&self.pool).await?.rows_affected() == 1)
     }
 
-    /// A host-owned recovery checkpoint must precede any roster mutation.
-    /// Write once: a retry must not replace the original rollback information.
-    pub async fn checkpoint_participant_change(&self, session_id: &str, id: &str, recovery: &serde_json::Value) -> Result<bool> {
-        let body = serde_json::to_string(recovery)?;
-        if !recovery.is_object() || body.len() > 256 * 1024 { anyhow::bail!("invalid participant change recovery checkpoint"); }
-        Ok(sqlx::query("UPDATE session_participant_changes SET recovery_json = ? WHERE id = ? AND session_id = ? AND status = 'applying' AND recovery_json IS NULL")
-            .bind(body).bind(id).bind(session_id).execute(&self.pool).await?.rows_affected() == 1)
-    }
-
-    /// None = completed; Some = failed (caller supplies a redacted explanation).
-    /// Successful completion requires a recovery checkpoint. The runtime must
-    /// restore/settle it before reporting failure; this is not a rollback API.
+    /// None = commit a prepared configuration; Some = atomically restore its
+    /// owned fields and report failure (caller supplies a redacted explanation).
+    /// The runtime keeps its safe boundary until this operation completes.
     pub async fn finish_participant_change(&self, session_id: &str, id: &str, error: Option<&str>) -> Result<bool> {
-        Ok(sqlx::query("UPDATE session_participant_changes SET status = ?, error = ?, finished_at = ? \
-            WHERE id = ? AND session_id = ? AND status = 'applying' AND (? OR recovery_json IS NOT NULL)")
-            .bind(if error.is_some() { "failed" } else { "applied" }).bind(error).bind(now_utc())
-            .bind(id).bind(session_id).bind(error.is_some()).execute(&self.pool).await?.rows_affected() == 1)
+        self.complete_participant_change(session_id, id, error).await
     }
 }
 
@@ -327,14 +316,14 @@ mod tests {
         s.request_participant_change("s1", "complete", rev, switch(id), ParticipantChangeOrigin::User).await.unwrap();
         assert!(s.claim_participant_change("s1", "complete").await.unwrap().is_some());
         assert!(!s.finish_participant_change("s1", "complete", None).await.unwrap(), "success cannot precede a recovery checkpoint");
-        let checkpoint = serde_json::json!({"participant_id":id,"old_model":"m1"});
-        assert!(s.checkpoint_participant_change("s1", "complete", &checkpoint).await.unwrap());
-        assert!(!s.checkpoint_participant_change("s1", "complete", &serde_json::json!({"overwrite":true})).await.unwrap());
+        s.prepare_participant_change("s1", "complete").await.unwrap();
+        let checkpoint = s.participant_change("s1", "complete").await.unwrap().unwrap().recovery_json;
+        assert!(s.prepare_participant_change("s1", "complete").await.is_err(), "preparation cannot overwrite its rollback checkpoint");
         assert!(s.finish_participant_change("s1", "complete", None).await.unwrap());
         assert!(!s.finish_participant_change("s1", "complete", Some("late failure")).await.unwrap());
         let row = s.participant_change("s1", "complete").await.unwrap().unwrap();
         assert_eq!(row.status, "applied");
-        assert_eq!(row.recovery_json.unwrap(), checkpoint.to_string());
+        assert_eq!(row.recovery_json, checkpoint);
         assert!(row.started_at.unwrap().ends_with('Z') && row.finished_at.unwrap().ends_with('Z'));
     }
 
@@ -460,12 +449,12 @@ mod tests {
         assert_eq!(a.unwrap(), b.unwrap(), "idempotency holds across independent connection pools");
         assert_eq!(reopened.open_participant_change("s1").await.unwrap().unwrap().request().unwrap(), switch(id));
         reopened.claim_participant_change("s1", "durable").await.unwrap().unwrap();
-        let checkpoint = serde_json::json!({"old_model":"m1"});
-        reopened.checkpoint_participant_change("s1", "durable", &checkpoint).await.unwrap();
+        reopened.prepare_participant_change("s1", "durable").await.unwrap();
+        let checkpoint = reopened.participant_change("s1", "durable").await.unwrap().unwrap().recovery_json;
         let again = Storage::open(&path).await.unwrap();
         let row = again.open_participant_change("s1").await.unwrap().unwrap();
         assert_eq!(row.status, "applying");
-        assert_eq!(row.recovery_json.as_deref(), Some(checkpoint.to_string().as_str()));
+        assert_eq!(row.recovery_json, checkpoint);
         assert_eq!(row.origin().unwrap(), ParticipantChangeOrigin::User);
         assert!(again.finish_participant_change("s1", "durable", Some("recovered by the host")).await.unwrap());
         assert_eq!(again.participant_change("s1", "durable").await.unwrap().unwrap().status, "failed");

@@ -232,7 +232,7 @@ const PARTICIPANT_COLUMNS: &str = "id, session_id, slug, display_name, role_id, 
      account_dir_at_spawn, account_email_at_spawn, account_org_at_spawn, \
      runtime_version_at_spawn";
 
-fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
+pub(super) fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     use sqlx::Row;
     Role {
         id: r.get("id"),
@@ -252,7 +252,7 @@ fn role_from_row(r: &sqlx::sqlite::SqliteRow) -> Role {
     }
 }
 
-fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
+pub(super) fn participant_from_row(r: &sqlx::sqlite::SqliteRow) -> Participant {
     use sqlx::Row;
     Participant {
         id: r.get("id"),
