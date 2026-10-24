@@ -66,7 +66,7 @@ pub use participants::{
     PARTICIPATION_MODES, UNREAD_BATCH_LIMIT, WIRE_BODY_CLAMP_BYTES, WIRE_JOIN,
 };
 pub use participant_changes::{ParticipantChange, ParticipantChangeOrigin, ParticipantChangeRequest};
-pub use participant_mutations::PreparedParticipantChange;
+pub use participant_mutations::{PreparedParticipantChange, ParticipantSpawnMetadata};
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, DOC_KIND_USER_ACTION, REVIEWER_CODOC_SLUGS};
 #[cfg(test)]

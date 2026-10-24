@@ -1669,7 +1669,19 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   and already-persisted halt declarations remain session state; the interrupt
   accompanying a pump-origin halt targets only that pump's incarnation.
   This is host-write retirement, not OS-exit proof.
-  Runtime authorization/process execution, startup recovery wiring, context
+  Spawn preparation can now return an in-memory draft: candidate files and
+  observed metadata, with no participant writes, MCP registration, handoff-file
+  refresh or channel announcements. It uses supplied frozen model/prompt/
+  override inputs. Codex may still prepare its selected hook/catalog files and shared
+  trust cache; those are not participant metadata. Ordinary startup retains
+  immediate persistence. `publish_participant_spawn` applies the draft's
+  metadata and success status atomically only for the same prepared target,
+  open session, runtime and post-preparation roster revision. Older checkpoints
+  without that revision still recover but cannot publish a candidate.
+  Every spawn recovers an interrupted applying change before project setup or
+  roster selection, including temporary-halt respawns. Recovery conflicts stop
+  startup with a recap; pending intent stays pending and is not replayed as work.
+  Runtime authorization/process execution, context
   transfer and the UI remain integration work; no user control invokes these
   storage or scheduling primitives yet.
 - `participant_cursors` (participant → last read message id) and

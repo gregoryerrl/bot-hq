@@ -440,6 +440,7 @@ async fn spawn_session_handle(
     bridge: Arc<SignalingBridge>,
     signaling_addr: SocketAddr,
 ) -> Result<SessionHandle> {
+    recover_participant_change_before_spawn(&storage, &bridge, &session.id).await?;
     let (project, _provenance) = resolve_session_project(
         &storage,
         session.base_repo_path.as_deref(),
@@ -1290,6 +1291,28 @@ async fn spawn_session_handle(
     })
 }
 
+/// Every cold/restart/temporary-halt spawn reaches this before roster selection
+/// or subprocess setup. Recovery never replays an interrupted mutation.
+async fn recover_participant_change_before_spawn(
+    storage: &Storage, bridge: &Arc<SignalingBridge>, session: &str,
+) -> Result<()> {
+    match storage.recover_interrupted_participant_change(session).await {
+        Ok(Some(change)) => {
+            crate::core::post_system_notice(storage, Some(bridge), session,
+                crate::storage::MessageKind::SystemNotice,
+                change.error.as_deref().unwrap_or("An interrupted agent change was recovered before startup."),
+                None).await;
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            bridge.declare_host_halt(session,
+                format!("A previous agent change could not be recovered. Session startup stopped: {error}. Review the change before retrying.")).await;
+            Err(error.context("recovering participant change before startup"))
+        }
+    }
+}
+
 /// This participant's user-editable role prose (`roles.description_prompt`), or
 /// `None` to fall back to the binary's hardcoded constant.
 ///
@@ -1642,6 +1665,20 @@ where
     F: Fn(Option<String>) -> Fut,
     Fut: std::future::Future<Output = crate::agents::spawn::AuthProbe>,
 {
+    resolve_participant_account_with_persistence(storage, p, cfg, probe, SpawnPersistence::Immediate).await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpawnPersistence { Immediate, Deferred }
+
+async fn resolve_participant_account_with_persistence<F, Fut>(
+    storage: &Storage, p: &crate::storage::Participant, cfg: &AgentConfig,
+    probe: F, persistence: SpawnPersistence,
+) -> Result<ParticipantAccount>
+where
+    F: Fn(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = crate::agents::spawn::AuthProbe>,
+{
     use crate::agents::spawn::{login_command, AuthProbe};
     // The pin is the runtime, the dir and the session id together (EYES
     // d928bf99): a record made under Codex is a Codex home and a Codex
@@ -1724,7 +1761,7 @@ where
     // none yet (a backfilled row records at its first resume, G2). A failed
     // write must not fail the spawn — same posture as `set_spawn_knobs`.
     let record = first_spawn || (p.account_email_at_spawn.is_none() && email.is_some());
-    if record {
+    if record && persistence == SpawnPersistence::Immediate {
         if let Err(e) = storage
             .set_account_at_spawn(p.id, &dir, email.as_deref(), org.as_deref())
             .await
@@ -1732,7 +1769,7 @@ where
             warn!(participant = %p.slug, ?e, "recording the account at spawn failed");
         }
     }
-    if !recorded_here {
+    if !recorded_here && persistence == SpawnPersistence::Immediate {
         if let Err(e) = storage
             .set_runtime_at_spawn(p.id, crate::agents::runtime::Runtime::ClaudeCode, "")
             .await
@@ -1778,6 +1815,7 @@ pub(crate) fn no_codex_probe() -> Box<CodexProbeFn> {
 /// the trust grant for bot-hq's hook, and whether the stored session id may
 /// be resumed on this connector.
 pub(crate) struct CodexAccount {
+    pub version: String,
     pub account: ParticipantAccount,
     pub hook_trust: Vec<crate::agents::codex::home::HookTrust>,
     pub resume: Option<String>,
@@ -1813,6 +1851,14 @@ pub(crate) async fn resolve_codex_account(
     data_dir: &std::path::Path,
     cwd: Option<&std::path::Path>,
     probe: &CodexProbeFn,
+) -> Result<CodexAccount> {
+    resolve_codex_account_with_persistence(storage, p, cfg, data_dir, cwd, probe, SpawnPersistence::Immediate).await
+}
+
+async fn resolve_codex_account_with_persistence(
+    storage: &Storage, p: &crate::storage::Participant, cfg: &AgentConfig,
+    data_dir: &std::path::Path, cwd: Option<&std::path::Path>, probe: &CodexProbeFn,
+    persistence: SpawnPersistence,
 ) -> Result<CodexAccount> {
     use crate::agents::account_setup::{codex_login_command, Shell};
     use crate::agents::codex::home::{write_hooks_json, RenderedHook};
@@ -1923,12 +1969,13 @@ pub(crate) async fn resolve_codex_account(
     // Record, as the Claude path does: the home at the first spawn, the
     // identity whenever the row has none yet, the runtime pin with the
     // connector's version.
-    if first_spawn || (p.account_email_at_spawn.is_none() && email.is_some()) {
+    if persistence == SpawnPersistence::Immediate
+        && (first_spawn || (p.account_email_at_spawn.is_none() && email.is_some())) {
         if let Err(e) = storage.set_account_at_spawn(p.id, &home, email.as_deref(), org.as_deref()).await {
             warn!(participant = %p.slug, ?e, "recording the Codex account at spawn failed");
         }
     }
-    if first_spawn {
+    if first_spawn && persistence == SpawnPersistence::Immediate {
         if let Err(e) = storage.set_runtime_at_spawn(p.id, Runtime::Codex, &probed.version).await {
             warn!(participant = %p.slug, ?e, "recording the runtime at spawn failed");
         }
@@ -1942,6 +1989,7 @@ pub(crate) async fn resolve_codex_account(
         "codex participant account"
     );
     Ok(CodexAccount {
+        version: probed.version,
         account: ParticipantAccount { dir: home, email, org, subscription: true, console_login, runtime: Runtime::Codex },
         hook_trust,
         resume,
@@ -2058,6 +2106,110 @@ async fn participant_spawn_config(
     project: &Option<String>,
     system_prompt: String,
     signaling_addr: SocketAddr,
+    mcp_temp_dir: &Path,
+    working_dir: Option<PathBuf>,
+    bridge: &Arc<SignalingBridge>,
+    auth_probe: &AuthProbeFn,
+    codex_probe: &CodexProbeFn,
+) -> Result<SpawnConfig> {
+    Ok(build_participant_spawn(
+        storage,
+        p,
+        config,
+        paths,
+        project,
+        system_prompt,
+        signaling_addr,
+        mcp_temp_dir,
+        working_dir,
+        bridge,
+        auth_probe,
+        codex_probe,
+        SpawnPersistence::Immediate,
+        None,
+    )
+    .await?
+    .config)
+}
+
+/// Prompt/MCP files belong to the candidate temp directory; Codex still prepares
+/// its selected home's hook/catalog and shared trust cache. This value does not
+/// register its MCP token, alter participant state, or announce successful
+/// startup. The lifecycle owner publishes only after checking its operation.
+pub(crate) struct ParticipantSpawnDraft {
+    pub config: SpawnConfig,
+    pub metadata: crate::storage::ParticipantSpawnMetadata,
+    pub mcp_token: String,
+    pub notices: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn participant_spawn_draft(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+    config: AgentConfig,
+    paths: &Paths,
+    project: &Option<String>,
+    system_prompt: String,
+    signaling_addr: SocketAddr,
+    mcp_temp_dir: &Path,
+    working_dir: Option<PathBuf>,
+    bridge: &Arc<SignalingBridge>,
+    auth_probe: &AuthProbeFn,
+    codex_probe: &CodexProbeFn,
+    frozen_overrides: crate::claude_config::AgentOverride,
+) -> Result<ParticipantSpawnDraft> {
+    build_participant_spawn(
+        storage,
+        p,
+        config,
+        paths,
+        project,
+        system_prompt,
+        signaling_addr,
+        mcp_temp_dir,
+        working_dir,
+        bridge,
+        auth_probe,
+        codex_probe,
+        SpawnPersistence::Deferred,
+        Some(frozen_overrides),
+    )
+    .await
+}
+
+async fn spawn_notice(
+    storage: &Storage,
+    bridge: &Arc<SignalingBridge>,
+    session: &str,
+    text: String,
+    persistence: SpawnPersistence,
+    notices: &mut Vec<String>,
+) {
+    if persistence == SpawnPersistence::Immediate {
+        crate::core::post_system_notice(
+            storage,
+            Some(bridge),
+            session,
+            crate::storage::MessageKind::SystemNotice,
+            text,
+            None,
+        )
+        .await;
+    } else {
+        notices.push(text);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_participant_spawn(
+    storage: &Storage,
+    p: &crate::storage::Participant,
+    config: AgentConfig,
+    paths: &Paths,
+    project: &Option<String>,
+    system_prompt: String,
+    signaling_addr: SocketAddr,
     mcp_temp_dir: &std::path::Path,
     working_dir: Option<PathBuf>,
     // Where this agent's MCP secret is registered so the server can check it
@@ -2069,8 +2221,11 @@ async fn participant_spawn_config(
     bridge: &Arc<SignalingBridge>,
     auth_probe: &AuthProbeFn,
     codex_probe: &CodexProbeFn,
-) -> Result<SpawnConfig> {
+    persistence: SpawnPersistence,
+    frozen_overrides: Option<crate::claude_config::AgentOverride>,
+) -> Result<ParticipantSpawnDraft> {
     let agent_name = p.slug.as_str();
+    let mut notices = Vec::new();
     // The participant's OWN session, not one passed alongside it. A mismatch
     // here is the failure `ParticipantInput`'s receipt scoping exists to catch
     // at delivery time; taking it off the row means it cannot arise.
@@ -2086,22 +2241,42 @@ async fn participant_spawn_config(
     let runtime = config.runtime();
     let resolved = match runtime {
         crate::agents::runtime::Runtime::Codex => {
-            resolve_codex_account(storage, p, &config, &paths.data_dir, working_dir.as_deref(), codex_probe)
+            let result = if persistence == SpawnPersistence::Immediate {
+                resolve_codex_account(
+                    storage,
+                    p,
+                    &config,
+                    &paths.data_dir,
+                    working_dir.as_deref(),
+                    codex_probe,
+                )
                 .await
-                .map(Some)
+            } else {
+                resolve_codex_account_with_persistence(
+                    storage,
+                    p,
+                    &config,
+                    &paths.data_dir,
+                    working_dir.as_deref(),
+                    codex_probe,
+                    persistence,
+                )
+                .await
+            };
+            result.map(Some)
         }
         crate::agents::runtime::Runtime::ClaudeCode => Ok(None),
     };
     let codex_account = match resolved {
         Ok(c) => c,
         Err(e) => {
-            crate::core::post_system_notice(
+            spawn_notice(
                 storage,
-                Some(bridge),
+                bridge,
                 session_id,
-                crate::storage::MessageKind::SystemNotice,
                 format!("⚠ [bot-hq] {e:#}"),
-                None,
+                persistence,
+                &mut notices,
             )
             .await;
             return Err(e);
@@ -2111,19 +2286,31 @@ async fn participant_spawn_config(
     // Codex is a thread, not a claude session — dropped, with a notice.
     let claude_resume_dropped = runtime == crate::agents::runtime::Runtime::ClaudeCode
         && p.claude_session_id.is_some()
-        && crate::agents::runtime::Runtime::from_column(&p.runtime) != crate::agents::runtime::Runtime::ClaudeCode;
+        && crate::agents::runtime::Runtime::from_column(&p.runtime)
+            != crate::agents::runtime::Runtime::ClaudeCode;
     let account = match &codex_account {
         Some(c) => c.account.clone(),
-        None => match resolve_participant_account(storage, p, &config, auth_probe).await {
+        None => match if persistence == SpawnPersistence::Immediate {
+            resolve_participant_account(storage, p, &config, auth_probe).await
+        } else {
+            resolve_participant_account_with_persistence(
+                storage,
+                p,
+                &config,
+                auth_probe,
+                persistence,
+            )
+            .await
+        } {
             Ok(account) => account,
             Err(e) => {
-                crate::core::post_system_notice(
+                spawn_notice(
                     storage,
-                    Some(bridge),
+                    bridge,
                     session_id,
-                    crate::storage::MessageKind::SystemNotice,
                     format!("⚠ [bot-hq] {e}"),
-                    None,
+                    persistence,
+                    &mut notices,
                 )
                 .await;
                 return Err(e);
@@ -2142,58 +2329,37 @@ async fn participant_spawn_config(
         })
     });
     if let Some(text) = pin_notice {
-        crate::core::post_system_notice(
-            storage,
-            Some(bridge),
-            session_id,
-            crate::storage::MessageKind::SystemNotice,
-            text,
-            None,
-        )
-        .await;
+        spawn_notice(storage, bridge, session_id, text, persistence, &mut notices).await;
     }
     if let Some(text) = &account.console_login {
-        crate::core::post_system_notice(
+        spawn_notice(
             storage,
-            Some(bridge),
+            bridge,
             session_id,
-            crate::storage::MessageKind::SystemNotice,
             text.clone(),
-            None,
+            persistence,
+            &mut notices,
         )
         .await;
     }
     if let Some(text) = account_mismatch_notice(p, &account) {
-        crate::core::post_system_notice(
-            storage,
-            Some(bridge),
-            session_id,
-            crate::storage::MessageKind::SystemNotice,
-            text,
-            None,
-        )
-        .await;
+        spawn_notice(storage, bridge, session_id, text, persistence, &mut notices).await;
     }
     // Spawning onto an account that reported a limit (0091): say so, once,
     // where the session starts. Advisory — the spawn goes ahead (the account
     // may well answer: extra usage, or the reset passed), and nothing here
     // names another account.
     if let Some(text) = account_limited_notice(storage, p, &account, &config.model_name).await {
-        crate::core::post_system_notice(
-            storage,
-            Some(bridge),
-            session_id,
-            crate::storage::MessageKind::SystemNotice,
-            text,
-            None,
-        )
-        .await;
+        spawn_notice(storage, bridge, session_id, text, persistence, &mut notices).await;
     }
     // Claude-config overrides for the ROLE this participant plays. Resolved
     // HERE, from the participant, so the set that filters the mcp-config below
     // and the set that reaches `SpawnConfig` are the same one — see
     // `resolve_participant_overrides`.
-    let mut overrides = resolve_participant_overrides(storage, &paths.data_dir, p).await;
+    let mut overrides = match frozen_overrides {
+        Some(overrides) => overrides,
+        None => resolve_participant_overrides(storage, &paths.data_dir, p).await,
+    };
     // **The precedence chain ends HERE, not in `build_command`.** This site holds
     // `storage`, so it is the only one that can RECORD what the reconciliation
     // decided — and recording it is the whole point: the effective pair is not
@@ -2207,18 +2373,23 @@ async fn participant_spawn_config(
     // back, and a session that will not start because a display value could not
     // be saved is a worse outcome than a badge that says nothing.
     crate::agents::reconcile_spawn_knobs(&mut overrides, p.effort.as_deref(), p.ultracode);
-    if let Err(e) = storage
-        .set_spawn_knobs(p.id, overrides.effort.as_deref(), overrides.ultracode)
-        .await
-    {
-        warn!(participant = %p.slug, ?e, "recording the spawn knobs failed");
+    if persistence == SpawnPersistence::Immediate {
+        if let Err(e) = storage
+            .set_spawn_knobs(p.id, overrides.effort.as_deref(), overrides.ultracode)
+            .await
+        {
+            warn!(participant = %p.slug, ?e, "recording the spawn knobs failed");
+        }
     }
     // A Codex participant's prompt carries the connector's notes: the tool
     // names the rules use are claude-code's, and Codex's base instructions
     // ask for a commit trailer the hook refuses (`agents::codex::runtime_notes`).
     let system_prompt = match runtime {
         crate::agents::runtime::Runtime::Codex => {
-            format!("{system_prompt}\n\n{}", crate::agents::codex::runtime_notes(&config.model_name))
+            format!(
+                "{system_prompt}\n\n{}",
+                crate::agents::codex::runtime_notes(&config.model_name)
+            )
         }
         crate::agents::runtime::Runtime::ClaudeCode => system_prompt,
     };
@@ -2228,8 +2399,10 @@ async fn participant_spawn_config(
     // the live DB. It also becomes the measurement rail for the prompt-size
     // work: real spawns report real bytes. Same non-fatal posture as the
     // knobs above — an audit value must not fail a spawn.
-    if let Err(e) = storage.store_participant_prompt(p.id, &system_prompt).await {
-        warn!(participant = %p.slug, ?e, "persisting the composed prompt failed");
+    if persistence == SpawnPersistence::Immediate {
+        if let Err(e) = storage.store_participant_prompt(p.id, &system_prompt).await {
+            warn!(participant = %p.slug, ?e, "persisting the composed prompt failed");
+        }
     }
     // The assembled prompt is multi-KB. Hand it to claude-code via a file
     // (`--append-system-prompt-file`) rather than an inline arg so the command
@@ -2250,25 +2423,35 @@ async fn participant_spawn_config(
     // per spawn — it is only meaningful while this subprocess is alive, and a
     // respawn writes a new config anyway.
     let mcp_token = uuid::Uuid::new_v4().to_string();
-    bridge.register_mcp_token(session_id, agent_name, &mcp_token);
+    if persistence == SpawnPersistence::Immediate {
+        bridge.register_mcp_token(session_id, agent_name, &mcp_token);
+    }
     // A Codex participant gets no claude mcp-config file: its MCP wiring is
     // `-c` overrides naming bot-hq's server alone (the user's own MCP servers
     // are the claude connector's; ⛔ Codex's are not forwarded either), with
     // the secret in a header from the env — never on argv.
-    let codex = codex_account.as_ref().map(|c| crate::agents::codex::spawn::CodexSpawn {
-        bin: None,
-        mcp_url: format!("http://{signaling_addr}/sessions/{session_id}/{agent_name}/mcp"),
-        mcp_token: mcp_token.clone(),
-        hook_trust: c.hook_trust.clone(),
-        hook_exe: None,
-        // The row's window reaches Codex through its catalog (the cap on
-        // `model_context_window` is the catalog's), written fresh per spawn.
-        model_catalog: config
-            .context_window
-            .filter(|w| *w > 0)
-            .and_then(|w| u64::try_from(w).ok())
-            .and_then(|w| crate::agents::codex::home::write_model_catalog(std::path::Path::new(&c.account.dir), &config.model_name, w)),
-    });
+    let codex = codex_account
+        .as_ref()
+        .map(|c| crate::agents::codex::spawn::CodexSpawn {
+            bin: None,
+            mcp_url: format!("http://{signaling_addr}/sessions/{session_id}/{agent_name}/mcp"),
+            mcp_token: mcp_token.clone(),
+            hook_trust: c.hook_trust.clone(),
+            hook_exe: None,
+            // The row's window reaches Codex through its catalog (the cap on
+            // `model_context_window` is the catalog's), written fresh per spawn.
+            model_catalog: config
+                .context_window
+                .filter(|w| *w > 0)
+                .and_then(|w| u64::try_from(w).ok())
+                .and_then(|w| {
+                    crate::agents::codex::home::write_model_catalog(
+                        std::path::Path::new(&c.account.dir),
+                        &config.model_name,
+                        w,
+                    )
+                }),
+        });
     let mcp_config_path = if codex.is_some() {
         None
     } else {
@@ -2298,14 +2481,51 @@ async fn participant_spawn_config(
     // The file the post-compaction hook prints (`agents::handoff`), rendered
     // from the participant's handoff doc as it stands — so it exists from the
     // first spawn (as the "no handoff doc" text) and again after a relaunch.
-    storage
-        .sync_handoff_file(session_id, &crate::agents::handoff::doc_slug(agent_name))
-        .await;
-    // And the session's user-words file the second compaction hook prints
-    // (B1d), re-rendered from the table for the same reason.
-    storage.sync_user_words_file(session_id).await;
+    if persistence == SpawnPersistence::Immediate {
+        storage
+            .sync_handoff_file(session_id, &crate::agents::handoff::doc_slug(agent_name))
+            .await;
+        // And the session's user-words file the second compaction hook prints
+        // (B1d), re-rendered from the table for the same reason.
+        storage.sync_user_words_file(session_id).await;
+    }
 
-    Ok(SpawnConfig {
+    let recorded_here = crate::agents::runtime::Runtime::from_column(&p.runtime) == runtime;
+    let first_account = !recorded_here
+        || p.account_dir_at_spawn.is_none()
+        || (runtime == crate::agents::runtime::Runtime::Codex
+            && p.account_dir_at_spawn.as_deref() == Some(""));
+    let record_account =
+        first_account || (p.account_email_at_spawn.is_none() && account.email.is_some());
+    let runtime_version = match &codex_account {
+        Some(c) if first_account => c.version.clone(),
+        None if !recorded_here => String::new(),
+        _ => p.runtime_version_at_spawn.clone(),
+    };
+    let mut metadata = crate::storage::ParticipantSpawnMetadata {
+        runtime: runtime.as_str().to_string(),
+        runtime_version,
+        resume_id: None,
+        account_dir: if record_account {
+            Some(account.dir.clone())
+        } else {
+            p.account_dir_at_spawn.clone()
+        },
+        account_email: if record_account {
+            account.email.clone()
+        } else {
+            p.account_email_at_spawn.clone()
+        },
+        account_org: if record_account {
+            account.org.clone()
+        } else {
+            p.account_org_at_spawn.clone()
+        },
+        effort: overrides.effort.clone(),
+        ultracode: overrides.ultracode,
+        system_prompt,
+    };
+    let config = SpawnConfig {
         agent_name: agent_name.to_string(),
         config,
         system_prompt_path,
@@ -2329,6 +2549,13 @@ async fn participant_spawn_config(
         account_email: account.email.clone(),
         account_org: account.org.clone(),
         codex,
+    };
+    metadata.resume_id = config.resume_session_id.clone();
+    Ok(ParticipantSpawnDraft {
+        config,
+        metadata,
+        mcp_token,
+        notices,
     })
 }
 
@@ -3294,18 +3521,7 @@ pub(crate) async fn resolve_spawn_config(
 ) -> AgentConfig {
     if let Some(id) = model_id.filter(|s| !s.is_empty()) {
         if let Ok(Some(m)) = storage.get_model(id).await {
-            return AgentConfig {
-                agent_name: agent_name.to_string(),
-                provider: m.provider,
-                model_name: m.model_name,
-                base_url: m.base_url,
-                auth_token: m.auth_token,
-                updated_at: m.updated_at,
-                context_window: m.context_window,
-                cli_settings: m.cli_settings,
-                claude_config_dir: m.claude_config_dir,
-                runtime: m.runtime,
-            };
+            return frozen_model_config(agent_name, &m);
         }
         tracing::warn!(
             agent = agent_name,
@@ -3350,6 +3566,18 @@ pub(crate) async fn resolve_spawn_config(
         };
     }
     default_agent_config(agent_name)
+}
+
+/// Build from the selected row value, not a later registry read. Live changes
+/// use the frozen Model returned by preparation through this same conversion.
+pub(crate) fn frozen_model_config(agent_name: &str, m: &crate::storage::Model) -> AgentConfig {
+    AgentConfig {
+        agent_name: agent_name.to_string(), provider: m.provider.clone(),
+        model_name: m.model_name.clone(), base_url: m.base_url.clone(), auth_token: m.auth_token.clone(),
+        updated_at: m.updated_at.clone(), context_window: m.context_window,
+        cli_settings: m.cli_settings.clone(), claude_config_dir: m.claude_config_dir.clone(),
+        runtime: m.runtime.clone(),
+    }
 }
 
 /// A `SessionHandle` no spawn produced — one stub agent, a readable stdin, the
@@ -3412,6 +3640,7 @@ pub(crate) async fn stub_session_for_tests(
 
 #[cfg(test)]
 mod tests {
+    include!("spawn_draft_tests.rs");
     /// **The registry outranks the compiled constant in the spawn fallback**
     /// (1.0.0 Batch 5 — the wire). A fresh install whose user skipped
     /// Settings → Models used to spawn EVERY agent on a hardcoded

@@ -18,10 +18,29 @@ pub struct PreparedParticipantChange {
     pub role: Option<Role>,
 }
 
+/// Observed candidate state, kept in memory until the lifecycle owner publishes
+/// the prepared change. No model credentials or MCP token belong here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantSpawnMetadata {
+    pub runtime: String,
+    pub runtime_version: String,
+    pub resume_id: Option<String>,
+    pub account_dir: Option<String>,
+    pub account_email: Option<String>,
+    pub account_org: Option<String>,
+    pub effort: Option<String>,
+    pub ultracode: Option<bool>,
+    pub system_prompt: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Recovery {
     version: u8,
     action: RecoveryAction,
+    /// Legacy checkpoints can still recover. Only a newly prepared runtime
+    /// may publish, against the actual post-mutation revision it observed.
+    #[serde(default)]
+    publication_revision: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -171,8 +190,52 @@ async fn settle(conn: &mut SqliteConnection, row: &ParticipantChange, reason: &s
 }
 
 impl Storage {
+    /// The only write of a candidate's observed metadata. Close/recovery and
+    /// publication serialize in one transaction: a late probe/candidate cannot
+    /// overwrite a rolled-back participant or reopen an already-failed intent.
+    pub async fn publish_participant_spawn(
+        &self, session: &str, id: &str, participant_id: i64,
+        metadata: &ParticipantSpawnMetadata,
+    ) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(row) = read_change(&mut tx, id).await?
+            .filter(|r| r.session_id == session && r.status == "applying" && r.recovery_json.is_some())
+            else { return Ok(false) };
+        let snapshot = recovery(&row)?;
+        let target = match &snapshot.action {
+            RecoveryAction::Added { participant_id } | RecoveryAction::Model { participant_id, .. } => *participant_id,
+            RecoveryAction::Removed { .. } => anyhow::bail!("a removal cannot publish spawn metadata"),
+        };
+        if target != participant_id { anyhow::bail!("spawn metadata names another participant"); }
+        let open: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND closed_at IS NULL AND archived = 0)")
+            .bind(session).fetch_one(&mut *tx).await?;
+        if !open { return Ok(false); }
+        let revision: i64 = sqlx::query_scalar("SELECT roster_revision FROM sessions WHERE id = ?")
+            .bind(session).fetch_one(&mut *tx).await?;
+        let prepared_revision = snapshot.publication_revision
+            .context("an older interrupted change must be recovered before publishing its agent")?;
+        if prepared_revision != revision {
+            anyhow::bail!("the roster changed while this participant was starting; recover the change");
+        }
+        check_prepared(&mut tx, &row, &snapshot).await?;
+        let current = participant(&mut tx, session, target).await?;
+        if current.runtime != metadata.runtime { anyhow::bail!("spawn metadata belongs to another runtime"); }
+        sqlx::query("UPDATE session_participants SET runtime_version_at_spawn = ?, claude_session_id = ?, \
+            account_dir_at_spawn = ?, account_email_at_spawn = ?, account_org_at_spawn = ?, \
+            effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = 1, prompt = ? \
+            WHERE session_id = ? AND id = ?")
+            .bind(&metadata.runtime_version).bind(&metadata.resume_id)
+            .bind(&metadata.account_dir).bind(&metadata.account_email).bind(&metadata.account_org)
+            .bind(&metadata.effort).bind(metadata.ultracode.map(i64::from)).bind(&metadata.system_prompt)
+            .bind(session).bind(target).execute(&mut *tx).await?;
+        sqlx::query("UPDATE session_participant_changes SET status = 'applied', finished_at = ? WHERE id = ? AND session_id = ?")
+            .bind(now_utc()).bind(id).bind(session).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// A claimed request prepares ONCE: snapshot and row mutation commit
-    /// together. The runtime keeps the old process until the replacement works.
+    /// together. The runtime holds a safe boundary and owns process recovery.
     pub async fn prepare_participant_change(&self, session: &str, id: &str) -> Result<PreparedParticipantChange> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let row = read_change(&mut tx, id).await?.filter(|r| r.session_id == session && r.status == "applying")
@@ -243,7 +306,9 @@ impl Storage {
                 (*participant_id, RecoveryAction::Model { participant_id: *participant_id, after_model: model_id.clone(), after_runtime: runtime.clone(), before })
             }
         };
-        let checkpoint = serde_json::to_string(&Recovery { version: 1, action })?;
+        let publication_revision: i64 = sqlx::query_scalar("SELECT roster_revision FROM sessions WHERE id = ?")
+            .bind(session).fetch_one(&mut *tx).await?;
+        let checkpoint = serde_json::to_string(&Recovery { version: 1, action, publication_revision: Some(publication_revision) })?;
         if checkpoint.len() > 256 * 1024 { anyhow::bail!("participant recovery checkpoint exceeds 256 KiB; nothing changed"); }
         sqlx::query("UPDATE session_participant_changes SET recovery_json = ? WHERE id = ? AND session_id = ? AND recovery_json IS NULL")
             .bind(checkpoint).bind(id).bind(session).execute(&mut *tx).await?;
@@ -329,6 +394,97 @@ mod tests {
 
     fn switch(p: &Participant) -> ParticipantChangeRequest {
         ParticipantChangeRequest::SwitchModel { participant_id: p.id, model_id: "new".into() }
+    }
+
+    fn spawn_metadata() -> ParticipantSpawnMetadata {
+        ParticipantSpawnMetadata {
+            runtime: "codex".into(), runtime_version: "observed-version".into(),
+            resume_id: Some("ready-thread".into()), account_dir: Some("/new-account".into()),
+            account_email: Some("new@example.com".into()), account_org: Some("new-org".into()),
+            effort: Some("low".into()), ultracode: Some(false), system_prompt: "candidate prompt".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_publication_checks_target_runtime_revision_and_never_touches_a_peer() {
+        let (s, peers) = fixture().await;
+        claim(&s, "switch", switch(&peers[0])).await;
+        s.prepare_participant_change("s1", "switch").await.unwrap();
+        let metadata = spawn_metadata();
+        assert!(s.publish_participant_spawn("s1", "switch", peers[1].id, &metadata).await.is_err());
+        let wrong_runtime = ParticipantSpawnMetadata { runtime: "claude_code".into(), ..metadata.clone() };
+        assert!(s.publish_participant_spawn("s1", "switch", peers[0].id, &wrong_runtime).await.is_err());
+        sqlx::query("UPDATE session_participants SET label = 'newer user label' WHERE id = ?")
+            .bind(peers[0].id).execute(s.pool()).await.unwrap();
+        assert!(s.publish_participant_spawn("s1", "switch", peers[0].id, &metadata).await.is_err());
+        assert!(s.finish_participant_change("s1", "switch", Some("roster changed")).await.unwrap());
+        assert!(!s.publish_participant_spawn("s1", "switch", peers[0].id, &metadata).await.unwrap());
+        assert_eq!(s.participant_by_id(peers[0].id).await.unwrap().unwrap().label.as_deref(), Some("newer user label"));
+        claim(&s, "retry", switch(&peers[0])).await;
+        s.prepare_participant_change("s1", "retry").await.unwrap();
+        assert!(s.publish_participant_spawn("s1", "retry", peers[0].id, &metadata).await.unwrap());
+        assert_eq!(s.participant_change("s1", "retry").await.unwrap().unwrap().status, "applied");
+        assert_eq!(s.participant_by_id(peers[1].id).await.unwrap().unwrap(), peers[1]);
+        let prompt: String = sqlx::query_scalar("SELECT prompt FROM session_participants WHERE id = ?")
+            .bind(peers[0].id).fetch_one(s.pool()).await.unwrap();
+        assert_eq!(prompt, metadata.system_prompt);
+    }
+
+    #[tokio::test]
+    async fn spawn_publication_failure_commits_neither_metadata_nor_success() {
+        let (s, peers) = fixture().await;
+        s.store_participant_prompt(peers[0].id, "before").await.unwrap();
+        claim(&s, "switch", switch(&peers[0])).await;
+        let prepared = s.prepare_participant_change("s1", "switch").await.unwrap();
+        // Fail AFTER the metadata UPDATE, at the success mark: this proves
+        // the first write rolls back with the second, not just a pre-write refusal.
+        sqlx::query("CREATE TRIGGER refuse_candidate BEFORE UPDATE OF status ON session_participant_changes \
+            WHEN NEW.status = 'applied' BEGIN SELECT RAISE(ABORT, 'fixture rejects success'); END")
+            .execute(s.pool()).await.unwrap();
+        assert!(s.publish_participant_spawn("s1", "switch", peers[0].id, &spawn_metadata()).await.is_err());
+        assert_eq!(s.participant_change("s1", "switch").await.unwrap().unwrap().status, "applying");
+        assert_eq!(s.participant_by_id(peers[0].id).await.unwrap().unwrap(), prepared.participant);
+        let prompt: String = sqlx::query_scalar("SELECT prompt FROM session_participants WHERE id = ?")
+            .bind(peers[0].id).fetch_one(s.pool()).await.unwrap();
+        assert_eq!(prompt, "before");
+    }
+
+    #[tokio::test]
+    async fn spawn_publication_and_close_have_one_consistent_winner() {
+        let (s, peers) = fixture().await;
+        claim(&s, "switch", switch(&peers[0])).await;
+        s.prepare_participant_change("s1", "switch").await.unwrap();
+        let metadata = spawn_metadata();
+        let (published, closed) = tokio::join!(
+            s.publish_participant_spawn("s1", "switch", peers[0].id, &metadata),
+            s.close_session("s1", false));
+        closed.unwrap();
+        let published = published.unwrap();
+        let now = s.participant_by_id(peers[0].id).await.unwrap().unwrap();
+        let change = s.participant_change("s1", "switch").await.unwrap().unwrap();
+        assert!(s.get_session("s1").await.unwrap().unwrap().closed_at.is_some());
+        if published {
+            assert_eq!(change.status, "applied");
+            assert_eq!(now.claude_session_id, metadata.resume_id);
+        } else {
+            assert_eq!(change.status, "failed");
+            assert_eq!(now, peers[0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn older_checkpoints_without_a_publication_revision_can_still_recover() {
+        let (s, peers) = fixture().await;
+        claim(&s, "switch", switch(&peers[0])).await;
+        s.prepare_participant_change("s1", "switch").await.unwrap();
+        let row = s.participant_change("s1", "switch").await.unwrap().unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(row.recovery_json.as_ref().unwrap()).unwrap();
+        json.as_object_mut().unwrap().remove("publication_revision");
+        sqlx::query("UPDATE session_participant_changes SET recovery_json = ? WHERE id = ?")
+            .bind(json.to_string()).bind(&row.id).execute(s.pool()).await.unwrap();
+        assert!(s.publish_participant_spawn("s1", "switch", peers[0].id, &spawn_metadata()).await.is_err());
+        s.recover_interrupted_participant_change("s1").await.unwrap().unwrap();
+        assert_eq!(s.participant_by_id(peers[0].id).await.unwrap().unwrap(), peers[0]);
     }
 
     #[tokio::test]

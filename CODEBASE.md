@@ -213,6 +213,7 @@ check.
 | path | role | size |
 |---|---|---|
 | `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the big glue fn); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
+| `src/core/spawn_draft_tests.rs` | async draft/publication wire tests for both connectors: close/rollback during probe, frozen input settings, staged metadata/token/notices and operation-owned publication | — |
 | `src/core/close_learnings.rs` | pure `decide`/`plan(decision, claimed, in_flight)` for the D15 close-out epilogue (in-flight decides first, round 11), `outcome_notice` | M |
 | `src/core/watchdog.rs` | `run_stall_watchdog`: stall + idle-unflagged loop → `session:attention` chip / nudge / halt escalation | L |
 | `src/core/worktree.rs` | `ensure_worktree`/`remove_worktree_if_clean` (argv-array `git`, no shell) | M |
@@ -483,7 +484,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/models.rs` | `models` registry (incl. `claude_config_dir`, 0090) + `app_settings` kv | M |
 | `src/storage/codex_hook_trust.rs` | `codex_hook_trust` — exact reported key/hash cached under the selected credential home (0103); `codex_hook_trust_candidates` supplies same-home rows for physical-file matching on probe failure (#120) | S |
 | `src/storage/participant_changes.rs` | Durable roster-change intent (0107): revision/selection validation, one pending/applying request per session, idempotent request IDs, claim/cancel transitions; completion delegates to transactional mutation/recovery | M |
-| `src/storage/participant_mutations.rs` | `prepare_participant_change` snapshots and appends/disables/resets atomically; frozen in-memory spawn inputs, owned-field rollback, cold-start recovery, and close/reopen settlement; caller must hold the ring boundary | M |
+| `src/storage/participant_mutations.rs` | `prepare_participant_change` snapshots and appends/disables/resets atomically; frozen in-memory spawn inputs, `publish_participant_spawn` (metadata + applied status under preparation revision), owned-field rollback, cold-start recovery, and close/reopen settlement; caller must hold the ring boundary | M |
 | `src/storage/account_marks.rs` | `account_marks` — the advisory usage-limit mark per Claude account (config dir + organisation, 0091) | S |
 | `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
