@@ -1028,6 +1028,18 @@ impl SignalingBridge {
             .insert(format!("{session_id}:{agent}"), token.to_string());
     }
 
+    /// Revoke only the retiring runtime's registration. A delayed cleanup
+    /// carrying its old token must never revoke a replacement's new token.
+    pub fn revoke_mcp_token(&self, session_id: &str, agent: &str, retiring_token: &str) -> bool {
+        use subtle::ConstantTimeEq;
+        let mut tokens = self.mcp_tokens.lock().unwrap_or_else(|p| p.into_inner());
+        let key = format!("{session_id}:{agent}");
+        let matches = tokens.get(&key).is_some_and(|current|
+            bool::from(current.as_bytes().ct_eq(retiring_token.as_bytes())));
+        if matches { tokens.remove(&key); }
+        matches
+    }
+
     /// Does this caller hold the secret registered for the pair it claims to be?
     ///
     /// **Absent registration REFUSES.** Until 1.0.5 a pair with no secret on

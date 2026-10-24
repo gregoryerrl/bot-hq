@@ -118,7 +118,9 @@ model side by side. Migration 0102 applies on first launch.
   instead of preventing a close. The host can now reserve a completed turn,
   keeping Pause and queued directions intact while replacing the participant's
   input and turn identity together. Loss of that reservation's worker leaves a
-  recovery recap. Runtime execution and controls are still being connected;
+  recovery recap. Retired runtimes now have a fence for pending host writes,
+  late events, teardown and delayed retries; token revocation preserves a
+  replacement's newer credential. Runtime execution and controls are still being connected;
   these operations are not yet exposed as live session controls.
 - **Auto-allowed publications still receive review.** Both connectors and
   `action_gate` queue unread publication content for the reviewer, then the

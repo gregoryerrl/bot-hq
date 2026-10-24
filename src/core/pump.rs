@@ -71,6 +71,9 @@ struct ToolResultRow<'a> {
 
 #[derive(Clone)]
 pub struct PumpConfig {
+    /// Shared with the installed AgentHandle. Leases fence ALL event writes,
+    /// teardown and delayed retries; retirement drains writes already admitted.
+    pub incarnation: Arc<crate::agents::incarnation::Incarnation>,
     /// `Arc<str>` (not `String`): cloned once per persisted message on the hottest
     /// path (`notify_persisted` fires on every Text / ToolUse / ToolResult), so a
     /// refcount bump beats a heap copy. Threaded as `Arc<str>` through
@@ -249,12 +252,16 @@ impl PumpConfig {
     /// `interrupted_epoch` is the participant's handle cell
     /// ([`AgentHandle::interrupted_epoch`](crate::agents::AgentHandle::interrupted_epoch)),
     /// required so no construction can silently fall back to a fresh one.
+    /// `incarnation` likewise comes from that handle: a private fallback fence
+    /// would let a retired handle's pump keep writing into its replacement.
     pub fn new(
         session_id: impl Into<Arc<str>>,
         slug: impl Into<Arc<str>>,
         interrupted_epoch: Arc<std::sync::atomic::AtomicU64>,
+        incarnation: Arc<crate::agents::incarnation::Incarnation>,
     ) -> Self {
         Self {
+            incarnation,
             session_id: session_id.into(),
             slug: slug.into(),
             edits_files: false,
@@ -1306,6 +1313,7 @@ pub async fn pump_agent(
 
     loop {
         let Some(event) = event_rx.recv().await else { break };
+        let Some(_incarnation_lease) = cfg.incarnation.enter().await else { return };
 
         // Batch 7: any event means the agent is alive — reset the stall timer.
         if let Some(liveness) = &cfg.liveness {
@@ -2134,8 +2142,10 @@ pub async fn pump_agent(
                             let session_id = cfg.session_id.clone();
                             let slug = cfg.slug.clone();
                             let line = last_line.clone();
+                            let incarnation = cfg.incarnation.clone();
                             tokio::spawn(async move {
                                 tokio::time::sleep(delay).await;
+                                let Some(_incarnation_lease) = incarnation.enter().await else { return };
                                 let nudge = format!(
                                     "[System: {slug}'s previous turn failed with a transient \
                                      error ({line}) — attempt {attempt}/{total}. The backlog \
@@ -2511,6 +2521,7 @@ pub async fn pump_agent(
         }
     }
 
+    let Some(_incarnation_lease) = cfg.incarnation.enter().await else { return };
     // Pump terminated (channel closed — the supervisor suppresses per-incarnation
     // Exited events, so a closed channel is the reliable "agent stopped" signal).
     // Clear its busy unconditionally so a crashed/stopped agent can't strand the
@@ -2577,6 +2588,7 @@ pub async fn pump_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("pump_incarnation_tests.rs");
     use crate::agents::spawn::{ContextReport, ContextVerdict};
 
     /// `recv()` with a deadline.
@@ -2612,6 +2624,7 @@ mod tests {
     /// name question.
     fn fast_cfg(slug: &str) -> PumpConfig {
         PumpConfig {
+            incarnation: crate::agents::incarnation::Incarnation::new(),
             session_id: "s1".into(),
             slug: slug.into(),
             edits_files: slug == "hands",

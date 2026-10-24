@@ -87,6 +87,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `src/agents/codex/home.rs` | the bot-hq-managed Codex home: `write_hooks_json` (one catch-all PreToolUse hook running `policy-check codex-gate`; refuses a `hooks.json` bot-hq did not write), `hooks_state_override` (the per-spawn `-c hooks.state={…}` trust grant), `RenderedHook::{trust_for,armed}` (physical hook-file identity, exact event/position/command/matcher; retains Codex's reported key/hash; pre-turn `hooks/list` check) | M |
 | `tests/codex_live_test.rs` | IGNORED: one real gated turn through `spawn_codex_agent` against the `codex` binary and a signed-in managed home (`BOT_HQ_CODEX_LIVE_HOME`), with an in-process signaling server — the wire no fake can prove | — |
 | `src/agents/runtime.rs` | `Runtime` — the CONNECTOR a model row spawns through (`claude_code` \| `codex`, column value of `models.runtime`, 0102); `parse` refuses the unknown (Save), `from_column` reads it as claude-code (a pre-0102 row) | S |
+| `src/agents/incarnation.rs` | installed-runtime identity and host-write leases; retirement revokes new writers and drains admitted ones before replacement publication | S |
 | `src/agents/events.rs` | stdout/stderr pumps; `translate` stream-json → `AgentEvent`; context-window arithmetic (`parse_context_usage`) | L |
 | `src/agents/protocol.rs` | stream-json wire types both directions | M |
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |
@@ -150,6 +151,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 | `src/core/roster_boundary.rs` | host-owned `RosterBoundary` guard/protocol: cancellation, token-checked input+epoch binding, explicit release; ring implementation in `sequencer.rs`, bridge entry `reserve_roster_boundary` | S |
 | `src/core/roster_boundary_tests.rs` | real ring/bridge reservation tests (included by `sequencer.rs`): live/atomic/boot waits, steering/Pause, cancellation, replacement epochs, closed-session refusal and retained rotation anchor | — |
 | `src/core/pump.rs` | `pump_agent` + `PumpConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
+| `src/core/pump_incarnation_tests.rs` | actual handle-to-pump retirement tests: late Init/events, closed-stream teardown, atomic/busy/context/halt isolation and delayed retries | — |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |
 | `src/core/state.rs` | `AppState`: open/ensure/restart/`reopen_session`, `cancel_and_escalate` (Pause: decide → interrupt → SIGKILL, atomic-op deferral via `await_atomic_op_or_cap`), resume, `close_session` + epilogue (join arm applies the archive) + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared`, `stray_turn` (stops a turn nobody dealt while another participant holds the ring) | XL |
 | `src/core/broadcast.rs` | `broadcast_user_message`: envelope + `post_to_channel("user")`; writes no stdin (D19) | S |

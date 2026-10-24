@@ -1657,7 +1657,14 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   and releases once. A cancelled waiter resumes normally; loss of an acknowledged
   owner keeps the ring stopped with a recap. Reservations belong to one ring
   instance and preserve the completed member's position when it is removed.
-  Runtime authorization/process execution, startup recovery wiring, context
+  Each installed `AgentHandle` also owns an incarnation fence shared with its
+  pump. Retirement revokes new host writes and drains admitted writes across
+  their async waits; late events, teardown and delayed retries cannot mutate
+  a replacement's state. Ordinary process kill retains ordinary pump cleanup.
+  Token revocation compares the retiring token so delayed cleanup cannot revoke
+  a newer registration. This is host-write retirement, not OS-exit proof or
+  invalidation of control messages already enqueued before retirement.
+  Runtime authorization/process execution, queued-control incarnation checks, startup recovery wiring, context
   transfer and the UI remain integration work; no user control invokes these
   storage or scheduling primitives yet.
 - `participant_cursors` (participant → last read message id) and

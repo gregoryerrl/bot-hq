@@ -1210,6 +1210,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn retiring_an_mcp_registration_refuses_old_tokens_without_revoking_the_new_one() {
+        let bridge = SignalingBridge::new();
+        bridge.register_mcp_token("s1", "hands", "old-token");
+        bridge.register_mcp_token("s1", "eyes", "peer-token");
+        let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+        let client = reqwest::Client::new();
+        let status = |slug: &str, token: &str, header: bool| {
+            let path = if header { format!("/sessions/s1/{slug}/mcp") }
+                else { format!("/sessions/s1/{slug}/{token}/mcp") };
+            let mut request = client.post(format!("http://{}{path}", server.local_addr))
+                .header("content-type", "application/json")
+                .body(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string());
+            if header { request = request.header(MCP_TOKEN_HEADER, token); }
+            async move { request.send().await.unwrap().status().as_u16() }
+        };
+        assert_eq!(status("hands", "old-token", false).await, 200);
+        assert!(bridge.revoke_mcp_token("s1", "hands", "old-token"));
+        assert_eq!(status("hands", "old-token", false).await, 403);
+        assert_eq!(status("hands", "old-token", true).await, 403);
+        bridge.register_mcp_token("s1", "hands", "new-token");
+        assert!(!bridge.revoke_mcp_token("s1", "hands", "old-token"));
+        assert!(!bridge.revoke_mcp_token("other-session", "hands", "new-token"));
+        assert_eq!(status("hands", "new-token", true).await, 200);
+        assert_eq!(status("eyes", "peer-token", false).await, 200);
+    }
+
     /// A browser page that found the port gets nothing from any route: the
     /// request carries `Origin` (a cross-origin POST always does) or
     /// `Sec-Fetch-*`, and both are refused before the token is even looked

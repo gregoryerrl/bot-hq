@@ -11,6 +11,7 @@ pub mod events;
 pub mod general_rules;
 pub mod handoff;
 pub mod input;
+pub mod incarnation;
 pub mod llm_proxy;
 pub mod prompts;
 pub mod runtime;

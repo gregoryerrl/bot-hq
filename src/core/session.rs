@@ -1084,7 +1084,8 @@ async fn spawn_session_handle(
             // the handle's own `Arc`, so a host interrupt and the pump's
             // completion read one number. Required by `PumpConfig::new`: there is
             // no default for it to fall back to (finding `3de92589`).
-            ..PumpConfig::new(session.id.clone(), p.slug.clone(), handles[slot].interrupted_epoch())
+            ..PumpConfig::new(session.id.clone(), p.slug.clone(), handles[slot].interrupted_epoch(),
+                handles[slot].incarnation())
         };
         let storage_clone = storage.clone();
         let ipav_clone = Arc::clone(&ipav);

@@ -817,6 +817,7 @@ impl ParticipantInput {
 
 /// Driver handle for one running agent subprocess.
 pub struct AgentHandle {
+    incarnation: Arc<crate::agents::incarnation::Incarnation>,
     pub name: String,
     pub event_rx: mpsc::Receiver<AgentEvent>,
     /// Private so the only way to this agent's stdin is [`AgentHandle::input`],
@@ -849,6 +850,19 @@ pub struct AgentHandle {
 pub const NO_INTERRUPT_EPOCH: u64 = u64::MAX;
 
 impl AgentHandle {
+    /// The host-write fence shared with THIS handle's pump, never re-derived
+    /// from a slug. A model/account replacement gets a fresh handle and fence.
+    pub fn incarnation(&self) -> Arc<crate::agents::incarnation::Incarnation> {
+        Arc::clone(&self.incarnation)
+    }
+
+    /// Revoke/drain host writers before requesting process termination. This
+    /// is not an OS exit acknowledgement; publication must also settle the
+    /// process lifecycle. Ordinary kill/Drop retain their normal pump cleanup.
+    pub async fn retire(&mut self) {
+        self.incarnation.retire().await;
+        self.kill();
+    }
     /// Assemble a handle from channels a caller owns, rather than from a spawn.
     ///
     /// **Its production caller was the native loop, which rc3 D9 deleted.** What
@@ -880,6 +894,7 @@ impl AgentHandle {
             control_tx,
             kill_tx: Some(kill_tx),
             interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
+            incarnation: crate::agents::incarnation::Incarnation::new(),
         }
     }
 
@@ -1045,6 +1060,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         control_tx,
         kill_tx: Some(kill_tx),
         interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
+        incarnation: crate::agents::incarnation::Incarnation::new(),
     })
 }
 
@@ -1142,6 +1158,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         control_tx: out_control_tx,
         kill_tx: Some(kill_tx),
         interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
+        incarnation: crate::agents::incarnation::Incarnation::new(),
     })
 }
 
@@ -2875,6 +2892,7 @@ mod tests {
             control_tx,
             kill_tx: Some(kill_tx),
             interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
+            incarnation: crate::agents::incarnation::Incarnation::new(),
         };
         (handle, ev_tx, in_rx)
     }
