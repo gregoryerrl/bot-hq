@@ -779,6 +779,16 @@ impl Storage {
             .context("reading an existing command's active gate")
     }
 
+    /// A close retry reports the existing card before generating another
+    /// recap or consuming the once-per-session advisory reports.
+    pub async fn active_close_card(&self, session_id: &str) -> Result<Option<SessionTrayEntry>> {
+        sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray WHERE session_id = ? \
+             AND kind = 'close' AND status IN ('queued', 'pending') ORDER BY id DESC LIMIT 1"
+        )).bind(session_id).fetch_optional(&self.pool).await
+            .context("reading the active close card")
+    }
+
     /// The most recent REJECTED answer to this exact command in this session:
     /// `(answered_at, picked_option)`, or `None`. Backs the re-park card's
     /// "you rejected this before" line (E6, week 35): a rejected outward

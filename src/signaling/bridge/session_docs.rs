@@ -717,7 +717,8 @@ impl SignalingBridge {
 
     /// The session's CUSTOM documents whose content is not in the Context
     /// Library (feedback #73): untagged, not an archive (`@n`), not a reviewer
-    /// co-doc, not a handoff doc (per-session by design — the user declined
+    /// co-doc, not a persistent user action item, not a handoff doc
+    /// (per-session by design — the user declined
     /// carrying handoffs over, #74 step 4), not empty, and either never
     /// promoted or CHANGED since they were (`updated_at` past `promoted_at` —
     /// EYES: the library copy is then out of date). Oldest first.
@@ -730,6 +731,7 @@ impl SignalingBridge {
             .into_iter()
             .filter(|d| {
                 d.phase.is_none()
+                    && d.kind.as_deref() != Some(crate::storage::DOC_KIND_USER_ACTION)
                     && !is_archive_slug(&d.slug)
                     && crate::storage::reviewer_codoc_phase(&d.slug).is_none()
                     && crate::agents::handoff::participant_of(&d.slug).is_none()

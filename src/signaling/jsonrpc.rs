@@ -1177,6 +1177,24 @@ async fn call_tool(
                 .get("archive")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            // A retry observes the existing close, including across a host
+            // restart. Do not consume advisory reports again or describe a
+            // pending user card as still waiting for reviewer delivery.
+            if let Some(storage) = bridge.storage_handle().await {
+                if storage.get_session(&caller.session_id).await.map_err(internal_err_no_prefix)?
+                    .is_some_and(|session| session.closed_at.is_some()) {
+                    return Ok(ToolCallResult::text("session is already closed; no further action is needed")
+                        .with_structured(json!({"status":"closed", "choice_id":null, "next_action":"none"})));
+                }
+                if let Some(card) = storage.active_close_card(&caller.session_id).await.map_err(internal_err_no_prefix)? {
+                    let waiting = if card.status == "queued" { "QUEUED for the reviewer's read" } else { "PARKED for the user's approval" };
+                    return Ok(ToolCallResult::text(format!(
+                        "close already {waiting} (card {}). End your turn; no further close_session call is needed. \
+                         Approve closes; Reject keeps the session open and its answer is the next instruction. \
+                         Existing card:\n{}", card.choice_id, card.prompt,
+                    )).with_structured(json!({"status":card.status, "choice_id":card.choice_id, "next_action":"end_turn"})));
+                }
+            }
             // A3b (adherence), kept as the ONE refusal in the close path (EYES
             // P6 — the rung with teeth): the FIRST close with no CL learnings
             // delta this session nudges to persist it; the retry proceeds. The
@@ -1184,13 +1202,12 @@ async fn call_tool(
             // each — they ride the close card's recap below (0081, F5).
             if bridge.should_nudge_close(&caller.session_id).await {
                 return Ok(ToolCallResult::text(
-                    "Before closing: persist this session's bounded learnings delta via \
-                     cl_write_file (read the project's notes.md, append your ~5 one-liners \
-                     under ## Learnings, and write the FULL updated body), so the next \
-                     session doesn't re-discover what this one learned. Then call \
-                     close_session again. (If there's genuinely nothing to persist, just \
-                     call close_session again.)",
-                ));
+                    "Before requesting close: persist a bounded learnings delta only if this \
+                     session learned something reusable. Use cl_write_file with mode: append \
+                     for new notes; do not manufacture a learning or rewrite the whole file. \
+                     Then call close_session again. If there is nothing to persist, retry once \
+                     without writing anything. No close card has been created yet.",
+                ).with_structured(json!({"status":"needs_learnings", "choice_id":null, "next_action":"persist_or_retry"})));
             }
             // 0081 (F4): an AGENT's close needs the user's word given SINCE the
             // session was last (re)opened — a `close` card answered Approve at or
@@ -1221,7 +1238,7 @@ async fn call_tool(
                 );
                 return Ok(ToolCallResult::text(
                     "session close requested — your subprocess will be terminated shortly",
-                ));
+                ).with_structured(json!({"status":"closing", "choice_id":null, "next_action":"end_turn"})));
             }
             let recap = bridge.close_recap(&caller.session_id).await;
             let detail = if recap.detail.is_empty() {
@@ -1243,10 +1260,10 @@ async fn call_tool(
                     "close QUEUED for the reviewer's read (card {card}) — the recap is posted for \
                      them; after their turn the card parks for the user's approval on its own, or a \
                      blocking finding naming it keeps the session open. The session closes on the \
-                     user's Approve; on Reject a system row tells you to keep working. No further \
-                     close_session call is needed. Recap on the card:\n{}{detail}",
+                     user's Approve; on Reject a system row tells you to keep working. End your \
+                     turn so review can proceed; no further close_session call is needed. Recap on the card:\n{}{detail}",
                     recap.card
-                )));
+                )).with_structured(json!({"status":"queued", "choice_id":card, "next_action":"end_turn"})));
             }
             // A reviewer that is down cannot read the recap (EYES d95f95c7):
             // the card parks directly and the reply says the review was skipped.
@@ -1267,7 +1284,7 @@ async fn call_tool(
                  answer text is the next instruction.{skipped} No further close_session call is \
                  needed. Recap on the card:\n{}{detail}",
                 recap.card
-            )))
+            )).with_structured(json!({"status":"pending", "choice_id":card, "next_action":"end_turn"})))
         }
         "check_commit_message" => {
             let message = arg_required_str(&args, "message")?;
@@ -2612,6 +2629,11 @@ mod tests {
 
     /// Dispatch `close_session` for the default caller and return the tool text.
     async fn close_text(bridge: &std::sync::Arc<SignalingBridge>, id: i64) -> String {
+        close_result(bridge, id).await["content"][0]["text"]
+            .as_str().unwrap().to_string()
+    }
+
+    async fn close_result(bridge: &std::sync::Arc<SignalingBridge>, id: i64) -> Value {
         let res = dispatch(
             req("tools/call", json!({"name": "close_session", "arguments": {}}), id),
             &caller(),
@@ -2620,10 +2642,49 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        serde_json::to_value(&res).unwrap()["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        serde_json::to_value(&res).unwrap()["result"].clone()
+    }
+
+    #[tokio::test]
+    async fn close_contract_keeps_one_card_and_reports_its_actual_state() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "close contract", None).await.unwrap();
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        let reviewer = storage.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+        bridge.set_storage(storage.clone()).await;
+        bridge.register_session_reviewers("s1".into(), vec!["eyes".into()]);
+        let nudge = close_result(&bridge, 1).await;
+        assert_eq!(nudge["structuredContent"]["status"], "needs_learnings");
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty());
+        storage.insert_finding("s1", "close-advisory", "eyes", crate::storage::FindingSeverity::Advisory, "carry this note", None).await.unwrap();
+        let queued = close_result(&bridge, 2).await;
+        assert_eq!(queued["structuredContent"]["status"], "queued");
+        let id = queued["structuredContent"]["choice_id"].as_str().unwrap();
+        let text = queued["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("then call") && !text.contains("the close will proceed either way"), "{text}");
+        assert!(text.contains("close-advisory"));
+        assert_eq!(close_result(&bridge, 3).await["structuredContent"]["choice_id"], id);
+        let row = storage.get_tray_entry(id).await.unwrap().unwrap();
+        storage.commit_delivery(reviewer, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", reviewer).await;
+        let pending = close_result(&bridge, 4).await;
+        assert_eq!(pending["structuredContent"]["status"], "pending");
+        assert_eq!(pending["structuredContent"]["choice_id"], id);
+        assert_eq!(pending["structuredContent"]["next_action"], "end_turn");
+        let restarted = SignalingBridge::new();
+        restarted.set_storage(storage.clone()).await;
+        let resumed = close_result(&restarted, 5).await;
+        assert_eq!(resumed["structuredContent"]["status"], "pending", "an existing card outranks a fresh in-memory learnings nudge");
+        assert_eq!(resumed["structuredContent"]["choice_id"], id);
+        assert_eq!(storage.tray_entries_for_session("s1").await.unwrap().iter().filter(|r| r.kind == "close").count(), 1);
+        let mut events = bridge.subscribe();
+        bridge.resolve_choice(id, "Reject — finish the work first".into()).await.unwrap();
+        assert!(storage.get_session("s1").await.unwrap().unwrap().closed_at.is_none());
+        assert!(storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap().iter().any(|r| r.contains("finish the work first")));
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, SignalingEvent::SessionCloseRequest { .. }), "Reject must not request close");
+        }
     }
 
     /// The one pending `close` card in s1, if any.
@@ -2679,6 +2740,8 @@ mod tests {
         ] {
             storage.upsert_session_document("s1", slug, body, phase).await.unwrap();
         }
+        storage.upsert_session_document("s1", "restart-game", "A command for the user", None).await.unwrap();
+        storage.set_session_document_kind("s1", "restart-game", Some(crate::storage::DOC_KIND_USER_ACTION)).await.unwrap();
         storage.mark_session_document_promoted("s1", "promoted-notes", "bot-hq/notes.md").await.unwrap();
         // Promoted, then changed: its library copy is out of date (EYES).
         storage.mark_session_document_promoted("s1", "stale-copy", "bot-hq/stale.md").await.unwrap();
@@ -2693,6 +2756,7 @@ mod tests {
         let second = close_text(&bridge, 2).await;
         assert!(second.contains("close PARKED"), "got: {second}");
         assert!(second.contains("CL learnings delta: NOT written"), "got: {second}");
+        assert!(second.contains("1 user action item(s) remain on the dashboard after closing: `restart-game`"), "{second}");
         assert!(
             second.contains("3 custom document(s) not in the Context Library — never promoted, or changed since — will archive with the session: `key-questions`, `eyes-handoff`, `stale-copy` (changed since its copy to bot-hq/stale.md)."),
             "got: {second}"
@@ -2737,6 +2801,12 @@ mod tests {
             }
         }
         assert!(saw_close, "Approve on the close card must request the close");
+        storage.close_session("s1", false).await.unwrap();
+        assert_eq!(close_result(&bridge, 4).await["structuredContent"]["status"], "closed");
+        let items = storage.user_action_items().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].slug, "restart-game");
+        assert!(items[0].session_closed_at.is_some(), "the action item survives closure");
     }
 
     #[tokio::test]
@@ -2755,7 +2825,9 @@ mod tests {
         // Skip the delta nudge for this test by taking it once.
         let _ = close_text(&bridge, 1).await;
         let mut sub = bridge.subscribe();
-        let text = close_text(&bridge, 2).await;
+        let result = close_result(&bridge, 2).await;
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(result["structuredContent"]["status"], "closing", "a requested close is not yet a persisted closed session");
         assert!(text.contains("close requested"), "got: {text}");
         assert!(matches!(sub.recv().await.unwrap(), SignalingEvent::SessionCloseRequest { .. }));
         assert!(pending_close_card(&storage).await.is_none());
@@ -2838,6 +2910,7 @@ mod tests {
         assert!(text.contains("Staleness sweep"), "the card recap names the sweep: {text}");
         assert!(text.contains("conventions.md:1"), "the executor gets the hit list: {text}");
         assert!(text.contains("CL learnings delta: written"), "got: {text}");
+        assert!(!text.contains("then call") && !text.contains("this check does not repeat"), "a parked close must not tell the agent to retry: {text}");
         let mut close_requests = 0;
         while let Ok(ev) = sub.try_recv() {
             if matches!(ev, SignalingEvent::SessionCloseRequest { .. }) {

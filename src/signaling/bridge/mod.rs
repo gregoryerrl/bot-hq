@@ -1584,8 +1584,9 @@ impl SignalingBridge {
             "Close-out staleness sweep — this session's CL writes retired terms (or CL files \
              were deleted or renamed) that OTHER library files still cite:\n{}{tail}\n\nEach \
              hit is either (a) a file that should have been updated with the change, or (b) a \
-             legitimate historical mention. Fix the (a)s with cl_edit_file, then call \
-             close_session again — this check does not repeat and will not hold the close.",
+             legitimate historical mention. Fix actual stale claims with cl_edit_file; \
+             historical mentions may remain. This report is advisory; the current close \
+             request stands.",
             hits.join("\n")
         ))
     }
@@ -1683,8 +1684,8 @@ impl SignalingBridge {
         Some(format!(
             "Before closing: {} open advisory finding(s) will archive undispositioned \
              with this session:\n{}\nDisposition each via disposition_finding (fixed / \
-             rebutted), or relay what should outlive the session, then call \
-             close_session again — the close will proceed either way.",
+             rebutted), or relay what should outlive the session before approval. \
+             This report is advisory; the current close request stands.",
             open.len(),
             lines.join("\n")
         ))
@@ -1779,6 +1780,20 @@ impl SignalingBridge {
                     .collect::<Vec<_>>()
                     .join("\n")
             ));
+        }
+        // User-action documents already have durable dashboard placement;
+        // copying them to the CL is not needed to preserve that placement.
+        if let Some(storage) = self.storage.lock().await.clone() {
+            let items: Vec<_> = storage.user_action_items().await.unwrap_or_default()
+                .into_iter().filter(|item| item.session_id == session_id).collect();
+            if !items.is_empty() {
+                let names = items.iter().map(|item| format!("`{}`", item.slug)).collect::<Vec<_>>().join(", ");
+                card.push(format!(
+                    "{} user action item(s) remain on the dashboard after closing: {names}. \
+                     They stay in Your action items until dismissed; no CL promotion is needed for that.",
+                    items.len(),
+                ));
+            }
         }
         // Scheduled runs (feedback #66a; EYES 2f046a6f): a close CANCELS them —
         // nobody would be left to read their output — so the card says which

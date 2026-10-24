@@ -13,6 +13,13 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Close responses describe the card that actually exists.** The tool now
+  reports its status, card ID and next action as structured data alongside
+  its explanation. Repeated calls return the same queued or pending card,
+  including after a restart. Advisory details no longer tell the agent to
+  retry while a card is open; general guidance uses the single close card.
+  User action documents are identified as remaining on the dashboard after
+  closure, rather than included in the scratch-document archive warning.
 - **Automatic and scheduled command results display as host notices.** They
   no longer appear in the chat as if the user had written their output.
 - **Scheduled command results wake the agent that requested them.** The

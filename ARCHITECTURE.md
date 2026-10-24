@@ -1484,6 +1484,18 @@ inside `REVIEWER_LIVENESS_WINDOW`) parks directly too, and the arm's reply says
 the recap was not read. The learnings-delta nudge below stays as the arm's one refusal; the UI
 Close button (`tauri_cmd`) and `Capability::CloseSession` are untouched.
 
+The tool returns its readable explanation plus `structuredContent` containing
+`status`, `choice_id` and `next_action`. `needs_learnings` is the one retry
+before a card exists; `queued` and `pending` require ending the turn, with no
+further close call. A retry reads the existing card before generating a recap
+or consuming advisory reports, including after a host restart. `closing`
+means the close request was emitted; `closed` means storage already records
+closure. Reject names the card and preserves the user's next instruction.
+Advisory details never ask for another close request. `user_action` documents
+are excluded from the unpromoted-scratch warning and named separately as
+remaining on the dashboard until dismissed. The default role already uses
+this one-card flow (0082); customized role prose is not rewritten.
+
 A session that ends before anyone wrote anything down is D15's gap. The
 agent's own `close_session` tool is soft-gated with a write-the-delta nudge
 (A3b, `jsonrpc.rs`); the user's Close button reached `AppState::close_session`

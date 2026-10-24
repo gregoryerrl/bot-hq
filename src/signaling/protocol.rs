@@ -596,7 +596,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "close_session",
-            description: gated_by("close_session", "Close the session this agent is running in. Kills every participant's subprocess and marks the session row closed (or archived). Use this when the user asks you to close the session and the conversation has reached a natural stopping point. The FIRST call may answer with a Context-Library staleness report, and the next with a close-out learnings nudge (when adherence nudges are on and this session wrote no CL delta) instead of closing — up to two pre-answers; act on each (write the delta, or decide there is none), then call again; the call that closes is fire-and-forget — your subprocess is terminated shortly after it returns."),
+            description: gated_by("close_session", "Request a CLOSE CARD when the work is settled; do not ask a separate Close session? question first. The FIRST call may answer with one learnings reminder (no card yet): save a real delta if any, then retry once. Otherwise the recap queues for reviewer read, then parks for the user's Approve/Reject; without a reviewer it parks directly. Approve closes automatically; Reject keeps the session open and its text is the next instruction. Queued/pending: end your turn, no further close_session call. Retries return the same card. Text and structuredContent report status, choice_id and next_action; closing means requested, closed means persisted. Advisory sweep/findings ride the recap and never require a retry. User action items remain on the dashboard after close."),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1116,6 +1116,9 @@ pub struct ToolCallResult {
     pub content: Vec<ToolContentBlock>,
     #[serde(rename = "isError")]
     pub is_error: bool,
+    /// Optional machine-readable outcome beside the human-readable content.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1129,13 +1132,20 @@ impl ToolCallResult {
         Self {
             content: vec![ToolContentBlock::Text { text: s.into() }],
             is_error: false,
+            structured_content: None,
         }
     }
     pub fn error(s: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContentBlock::Text { text: s.into() }],
             is_error: true,
+            structured_content: None,
         }
+    }
+
+    pub fn with_structured(mut self, value: Value) -> Self {
+        self.structured_content = Some(value);
+        self
     }
 }
 

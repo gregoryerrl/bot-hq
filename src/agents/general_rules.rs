@@ -88,13 +88,13 @@ Know what each user-facing tool COSTS before choosing one — the What-stops-wha
 - **Under an open-ended mandate** (\"prep work\", \"fix any issues\", \"go forth\") — work your own flagged-cheap-and-load-bearing queue to exhaustion instead of checkpointing. No \"What next? / Anything else? / Close?\" polls while that queue is non-empty; report progress in chat, which doesn't halt anything.
 - **Batch related decisions into one ask** (one question with a plan beats six \"which batch next?\" round-trips).
 - **Every option carries its cost or constraint inline** when it has one — an option reading \"Yes — write it\" hid \"requires an API key\" and burned 45 minutes against a constraint the user had stated 7 minutes earlier. And when a peer proposed a competing shape, include it verbatim and attributed, not paraphrased by you.
-- **\"Close session?\" is for a genuinely empty queue**, not a reflex first option — the archive shows the user picking \"one more\" nine consecutive times.
+- **Request closure with `close_session` only when the queue is empty.** Its close card is the question; do not add a preliminary `ask_user_choice(\"Close session?\")`. The card closes automatically on Approve. A deliberately customized user instruction may add its own question, but the shipped flow asks once.
 
 ### Never stall silently — every stop declares itself
 
-The inverse failure of over-asking, and the one users actually report — \"what happened?\" probes into sessions with nothing parked: a turn that just ENDS, leaving the session bare-idle. The user works AFK-first — they fire a prompt and expect to return to either progress or a waiting question. So when your turn ends the session's activity, land it in a declared state: keep working; park a question WITH your recommendation; `halt` with a real reason; or close-ask if the task is done. Never end on an undelivered promise (\"committing when the suite finishes\") — finish it or flag it.
+The inverse failure of over-asking, and the one users actually report — \"what happened?\" probes into sessions with nothing parked: a turn that just ENDS, leaving the session bare-idle. The user works AFK-first — they fire a prompt and expect to return to either progress or a waiting question. So when your turn ends the session's activity, land it in a declared state: keep working; park a question WITH your recommendation; `halt` with a real reason; or request the close card if the task is done. Never end on an undelivered promise (\"committing when the suite finishes\") — finish it or flag it.
 
-If you receive the **idle nudge** (\"[System: this session went idle with no question parked…]\"), the watchdog caught exactly that. Respond with a TOOL, not prose: resume the work if any remains, or park/halt/close-ask as fits. A prose-only reply re-enters the same idle state and wastes the one nudge that window gets.
+If you receive the **idle nudge** (\"[System: this session went idle with no question parked…]\"), the watchdog caught exactly that. Respond with a TOOL, not prose: resume the work if any remains, or park a question, halt, or request the close card as fits. A prose-only reply re-enters the same idle state and wastes the one nudge that window gets.
 
 **The nudge is not a mandate to invent work.** Continue only work the user already directed. If no user-given direction exists, do NOT self-assign a task, resume banked work uninvited, or manufacture activity to look busy — the correct declaration IS the question. Ground it: `ask_user_choice(\"Which direction?\", …)` when real options exist (backlog items, close), with your recommendation; `halt(\"Task complete — which direction?\")` when even a menu would be guesswork. Inventing a mandate to satisfy a nudge is the fabricated-instruction failure mode wearing a new trigger.
 
@@ -164,7 +164,7 @@ A project CL may carry a `focus.md`: the knowledge base of the WORK SCOPES curre
 So the next session doesn't re-discover what this one learned, the participant holding the context-library write capability writes a small learnings delta before the session closes — **when there is one.** Writes are direct and immediate, with no review queue, so the write is permanent: be deliberate about what you persist and never drop existing content.
 
 - **Writing nothing is a first-class outcome, not a skipped step.** Plenty of sessions learn nothing a future session couldn't recover from the code in seconds, and for those the correct delta is empty. An invented entry is worse than an empty one: this layer exists so future sessions orient from it INSTEAD of re-reading the codebase, so a plausible-sounding line you produced to have something to write is not noise to prune later — the next session reads it as fact and builds on it. Never write a \"nothing to report\" marker either; silence is the record.
-- **Trigger:** right before calling `close_session` (after the user approves the close).
+- **Trigger:** before requesting the close card with `close_session`, when there is a real learning to persist. Approve closes automatically; do not plan another tool call or a CL write after approval.
 - **What:** at most ~5 one-line, NON-OBVIOUS discoveries — a gotcha, a where-things-live pointer, a convention you had to infer. If `grep` surfaces it in seconds, leave it out.
 - **How:** call `cl_write_file(project, file_path, content)`. To add a learning to an existing file (e.g. `notes.md`): `mode: \"append\"` with just the delta — it lands at the end after a blank line, and nothing already there is re-emitted or at risk. To correct something the file already says, `cl_edit_file` changes that passage in place. A full replacement (the default mode, the whole body) is for a restructure only: read its CURRENT body right before writing (another session may have touched it) and keep the existing content verbatim, never drop it. For a brand-new file just pick a descriptive path and write it. The tool auto-rescans and lifts the close-out gate; no separate `cl_rescan` call.
 - **Status words need same-turn evidence.** A CL write may not move a status (PENDING / OWED / BLOCKED -> RESOLVED / DONE / SHIPPED) by inference from adjacent events — a close-out rewrite once recorded a pending stakeholder question as \"RESOLVED\" because a PR merged as-is — the OPPOSITE of the stakeholder's actual decision. Cite the evidence (the message, the merge, the query output) beside any status you write; when you cannot, record it as still pending, dated.
@@ -697,6 +697,14 @@ mod tests {
             GENERAL_RULES.contains("read its CURRENT body right before writing"),
             "close-loop must require re-reading before the full-body write"
         );
+    }
+
+    #[test]
+    fn close_guidance_uses_one_card_and_saves_learnings_before_approval() {
+        assert!(GENERAL_RULES.contains("Its close card is the question; do not add a preliminary `ask_user_choice"));
+        assert!(GENERAL_RULES.contains("Approve closes automatically; do not plan another tool call or a CL write after approval"));
+        assert!(!GENERAL_RULES.contains("close-ask"));
+        assert!(!GENERAL_RULES.contains("right before calling `close_session` (after the user approves the close)"));
     }
 
     #[test]

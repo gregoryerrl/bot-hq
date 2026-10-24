@@ -996,7 +996,7 @@ impl SignalingBridge {
                                 &session_id,
                                 crate::storage::MessageKind::SystemNotice,
                                 format!(
-                                    "[System: the user DECLINED the close ({picked}). The session stays \
+                                    "[System: the user DECLINED close card {choice_id} ({picked}). The session stays \
                                      open — treat the answer text as the next instruction, and call \
                                      close_session again only when the user says to close.]"
                                 ),
@@ -5049,7 +5049,7 @@ mod tests {
         assert_eq!(close_requests, 0, "Reject must not close");
         let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap();
         assert!(
-            rows.iter().any(|r| r.contains("DECLINED the close")),
+            rows.iter().any(|r| r.contains(&format!("DECLINED close card {card}"))),
             "the executor is told to keep working: {rows:?}"
         );
         assert!(!storage.close_approved_since_open("s1").await.unwrap());
