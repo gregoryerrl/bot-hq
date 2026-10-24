@@ -40,6 +40,7 @@ mod gc;
 mod messages;
 mod models;
 mod participants;
+mod participant_changes;
 mod plugin_kv;
 mod plugins;
 mod projects;
@@ -63,6 +64,7 @@ pub use participants::{
     ParticipantDraft, PersistedMessage, Role, RoleDraft, MAX_SESSION_PARTICIPANTS,
     PARTICIPATION_MODES, UNREAD_BATCH_LIMIT, WIRE_BODY_CLAMP_BYTES, WIRE_JOIN,
 };
+pub use participant_changes::{ParticipantChange, ParticipantChangeOrigin, ParticipantChangeRequest};
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, DOC_KIND_USER_ACTION, REVIEWER_CODOC_SLUGS};
 #[cfg(test)]

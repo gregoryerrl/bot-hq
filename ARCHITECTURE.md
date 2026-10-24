@@ -1594,7 +1594,7 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   created_at, closed_at, archived, slot0/slot1_model_at_spawn,
   created_by_plugin, current_turn_participant_id, round_number,
   halt_declared_by/halt_reason/halt_declared_at, staged_message,
-  phase_epoch, ipav_phase) —
+  phase_epoch, ipav_phase, roster_revision) —
   per-participant model, effort, ultracode and resume id live on
   `session_participants` (rc3 D10), which also carries **`effort_at_spawn` /
   `ultracode_at_spawn` / `spawn_knobs_recorded`** (0061) — what a participant was
@@ -1630,6 +1630,18 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   color, label, effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded)
   — the roster; capabilities are the invite-time snapshot the runtime
   enforces.
+- `session_participant_changes` (0107, controls in progress) records add,
+  remove and model-switch intent, authenticated host-supplied origin,
+  expected roster revision, a fingerprint of selected role/model settings,
+  status/timestamps/error and a write-once recovery checkpoint. One pending
+  or applying request per session; exact retries return the same record.
+  Acceptance and claim validate inside immediate transactions and do not
+  mutate the roster. A claim rechecks selections and revision; cancellation
+  wins only before claim. Role/model settings are hashed, so credentials and
+  full role prose are not copied into this ledger. Triggers advance the roster
+  revision on membership/selection edits, excluding runtime bookkeeping.
+  This is storage groundwork; runtime authorization, safe-boundary execution,
+  rollback/recovery and the UI remain separate integration work.
 - `participant_cursors` (participant → last read message id) and
   `participant_deliveries` (participant, message_id, delivered_at,
   withheld_reason) — the ring's per-participant read position and its
