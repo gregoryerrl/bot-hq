@@ -13,6 +13,13 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **A fresh daily report no longer retires yesterday's code vocabulary.**
+  The close-out sweep now requires an explicit retirement declaration or a
+  library file actually removed or renamed. Dropping names, filenames or
+  timestamps from an EOD produces no warning. Current references to an
+  explicitly retired name still report; historical records and retirement
+  explanations are preserved. The separate repository-reference scan remains
+  available through `cl_stale_refs`.
 - **Gate results stay visible when a handoff is newer than their completion.**
   The issuer receives a once-per-result notice on a subsequent MCP reply,
   and both connectors restore bounded result excerpts after compaction

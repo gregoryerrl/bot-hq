@@ -1845,6 +1845,16 @@ human-review-queue predecessor — migrations 0025→0035 — was removed
 friction bought nothing. The user still edits any CL file in the
 Context Library tab.)
 
+The close-out staleness sweep uses **explicit retirement declarations**, not
+words removed by a rewrite. It recognizes line-leading ``Retired `name` ``,
+``Deleted `name` ``, ``Renamed `name` to ...``, and `` `name` was retired `` forms
+(also list items); quoted/fenced examples, questions and negated/planned
+statements do not seed it. Appending a new declaration counts; copying an
+existing one does not. Retraction in its source cancels it. Physical library
+file deletions/renames are still detected through git. History files and lines
+explaining retirements are excluded from hits. Reports remain bounded and
+advisory; the separate `cl_stale_refs` tool checks repository references.
+
 **The library is one git repository, and each write is its own commit**
 (`bridge/cl_write.rs`, feedback #64 #65 #86). One process-wide lock,
 `LIBRARY_GIT_LOCK`, covers a write from its first read of the file to its last

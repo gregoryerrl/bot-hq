@@ -2973,7 +2973,7 @@ mod tests {
                 "hands".to_string(),
                 "bot-hq".to_string(),
                 "vision.md".to_string(),
-                "The harness is the core of it, restated at a similar length.".to_string(),
+                "Retired `duo`.\nThe harness is the core of it, restated at a similar length.".to_string(),
                 false,
                 false,
             )

@@ -384,15 +384,10 @@ impl SignalingBridge {
             let lint = old_body
                 .as_deref()
                 .and_then(|old| status_flip_warning(old, &final_content));
-            // Retired concepts, for the close-out staleness sweep (issues.md
-            // #31). An append can only add, so it retires nothing; a replace
-            // or an edit can delete a term.
-            let retired = match (&old_body, &done) {
-                (Some(old), Done::Replaced | Done::Edited { .. }) => {
-                    retired_terms(old, &final_content)
-                }
-                _ => Vec::new(),
-            };
+            // #119: only an explicit new retirement declaration seeds the
+            // sweep. Creation and append can state one too; dropped report
+            // vocabulary is never evidence of a deletion.
+            let retired = retired_terms(old_body.as_deref().unwrap_or(""), &final_content);
             // Content on disk that never reached git (a bare Write/Bash) is
             // committed ALONE before this write replaces it — otherwise the
             // "rollback point" an agent records is a generation stale.
@@ -795,126 +790,74 @@ fn appends_since_last_replace(library_root: &Path, target: &Path) -> usize {
     appends
 }
 
-/// Words too common to be a retired *concept*. The "absent from the whole new
-/// body" filter already does most of the work; this stops an ordinary sentence
-/// rewrite from seeding the close-out sweep with prose noise.
-const SWEEP_STOPWORDS: &[&str] = &[
-    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was",
-    "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "new", "now", "old",
-    "see", "two", "way", "who", "did", "put", "say", "she", "too", "use", "that", "with", "have",
-    "this", "will", "your", "from", "they", "know", "want", "been", "good", "much", "some",
-    "time", "very", "when", "come", "here", "just", "like", "long", "make", "many", "over",
-    "such", "take", "than", "them", "well", "were", "what", "only", "then", "into", "also",
-    "back", "even", "most", "still", "there", "would", "about", "which", "their", "could",
-    "other", "after", "first", "these", "where", "before", "because", "should", "instead",
-    "already", "always", "never", "every", "however", "though", "while", "since", "without",
-    "within", "between", "another", "through", "against", "across", "under", "above", "below",
-    "again", "once", "each", "both", "same", "more", "less", "must", "being", "does", "made",
-    "need", "needs", "keep", "kept", "left", "right", "thing", "things",
-];
-
-/// Concepts this write RETIRED: terms present in `old` that no longer appear
-/// anywhere in `new`. Seeds the close-out staleness sweep (issues.md #31) —
-/// a session that renames or drops a concept in one CL file should be told
-/// which OTHER files still cite the old one, mechanically, instead of relying
-/// on an agent remembering to grep. Ranked by how load-bearing the term looked
-/// in the old body (occurrence count, then length) and capped, so a wholesale
-/// rewrite yields the handful of real concepts rather than its whole vocabulary.
-///
-/// **Distinctive-only** (the user's pick a9f8c705, 2026-08-24, narrowed by
-/// their pick 4136edff, 2026-09-24): a word reports only when it is
-/// code-shaped (dash/underscore/digit) or BACKTICKED in the old body. Words in
-/// headings and bold no longer count — every EOD heading ("Tom", "Down",
-/// "Report") seeded the sweep, 609 false hits in one close (feedback #38).
-/// **Filenames and paths** (`eod.md`, `projects/x/notes.md`) always count:
-/// the word tokenizer splits them at the dot, which is how a renamed
-/// `eod.md` slipped past the sweep while it reported ordinary words.
-pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
-    const MIN_LEN: usize = 3;
-    const MAX_TERMS: usize = 12;
-    fn tokens(body: &str) -> impl Iterator<Item = String> + '_ {
-        body.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
-            .map(|t| t.trim_matches(['-', '_']).to_lowercase())
-            .filter(|t| t.len() >= MIN_LEN && t.chars().any(|c| c.is_alphabetic()))
+/// Explicit retirement declarations, deliberately narrower than natural-language
+/// inference (#119). A code span disappearing from a report proves nothing.
+/// Recognize line-leading ``Retired `name` `` / ``Renamed `name` to ...`` and
+/// `` `name` was retired `` forms, including list items. Ignore quoted examples,
+/// fenced code, questions and modal/negated statements. Physical library-file
+/// removals are detected separately from git; missing repo references remain
+/// the job of `cl_stale_refs`.
+fn declared_retirements(body: &str) -> std::collections::BTreeSet<String> {
+    fn span(text: &str) -> Option<(&str, &str)> {
+        let rest = text.strip_prefix('`')?;
+        let (name, tail) = rest.split_once('`')?;
+        (name.len() >= 3 && !name.contains(char::is_whitespace)
+            && name.chars().any(char::is_alphabetic))
+            .then_some((name, tail.trim_start()))
     }
-    let surviving: std::collections::HashSet<String> = tokens(new).collect();
-    let surviving_artifacts: std::collections::HashSet<String> = artifact_tokens(new).collect();
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for tok in tokens(old) {
-        if surviving.contains(&tok) || SWEEP_STOPWORDS.contains(&tok.as_str()) {
+    fn verb(text: &str) -> Option<(&str, &str)> {
+        ["retired", "removed", "deleted", "renamed"].into_iter().find_map(|v| {
+            let tail = text.strip_prefix(v)?;
+            (tail.is_empty() || tail.starts_with(|c: char| c.is_whitespace() || c == ':' || c == '.'))
+                .then_some((v, tail.trim_start_matches(':').trim_start()))
+        })
+    }
+    let mut terms = std::collections::BTreeSet::new();
+    let mut fence: Option<char> = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let mark = line.chars().next().unwrap();
+            if fence == Some(mark) { fence = None; }
+            else if fence.is_none() { fence = Some(mark); }
             continue;
         }
-        *counts.entry(tok).or_default() += 1;
-    }
-    let old_lower = old.to_lowercase();
-    counts.retain(|tok, _| term_shaped(tok) || backticked(&old_lower, tok));
-    let mut artifacts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for a in artifact_tokens(old) {
-        if !surviving_artifacts.contains(&a) {
-            *artifacts.entry(a).or_default() += 1;
+        if fence.is_some() || line.starts_with('>') || line.contains('?') {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        let line = lower.strip_prefix("- ").or_else(|| lower.strip_prefix("* ")).unwrap_or(&lower);
+        let declaration = if let Some((v, rest)) = verb(line) {
+            span(rest).map(|(name, tail)| (name, v, tail))
+        } else {
+            span(line).and_then(|(name, rest)| {
+                let rest = rest.strip_prefix("was ").or_else(|| rest.strip_prefix("is "))
+                    .or_else(|| rest.strip_prefix("has been ")).unwrap_or(rest);
+                verb(rest).map(|(v, tail)| (name, v, tail))
+            })
+        };
+        if let Some((name, v, tail)) = declaration {
+            // Renaming must name the destination. Removing a name FROM a
+            // report/list is not a declaration that the named thing is gone.
+            if (v != "renamed" || tail.starts_with("to ")) && !tail.starts_with("from ") {
+                terms.insert(name.to_string());
+            }
         }
     }
-    // A word that is only a PIECE of a retired filename/path (`tool-gate` of
-    // `tool-gate.json`) would report the same reference twice.
-    counts.retain(|tok, _| {
-        !artifacts.keys().any(|a| {
-            a.split(['/', '.']).any(|piece| piece == tok)
-        })
-    });
-    counts.extend(artifacts);
-    let mut terms: Vec<(String, usize)> = counts.into_iter().collect();
-    // Most-used first (a concept the old body leaned on), longest as tiebreak
-    // (more distinctive to grep), then alphabetical so the output is stable.
-    terms.sort_by(|a, b| {
-        b.1.cmp(&a.1)
-            .then(b.0.len().cmp(&a.0.len()))
-            .then(a.0.cmp(&b.0))
-    });
-    terms.truncate(MAX_TERMS);
-    terms.into_iter().map(|(t, _)| t).collect()
+    terms
 }
 
-/// Code-shaped: an underscore, TWO hyphens, or a digit that is not an ordinal
-/// — the shapes prose words don't have and identifiers, branch names and
-/// issue numbers do. A single hyphen is prose ("follow-up", "re-read",
-/// "short-lived", "byte-identical" were most of one close's 263 hits) and an
-/// ordinal ("1st") is a number in words; both count only when backticked
-/// (the user's pick on #87 a-iii, 2026-10-12). Dots and slashes never reach
-/// here — the tokenizer splits on them and `artifact_tokens` keeps the
-/// filenames and paths whole.
-fn term_shaped(tok: &str) -> bool {
-    if tok.contains('_') || tok.matches('-').count() >= 2 {
-        return true;
-    }
-    tok.chars().any(|c| c.is_ascii_digit()) && !is_ordinal(tok)
+/// Newly stated retirements only, at most twelve per write. Existing historical
+/// declarations copied into a fresh EOD do not become this session's changes.
+pub(super) fn retired_terms(old: &str, new: &str) -> Vec<String> {
+    let before = declared_retirements(old);
+    declared_retirements(new).difference(&before).take(12).cloned().collect()
 }
 
-/// `1st`, `2nd`, `3rd`, `4th`, `22nd`, `100th`: digits then an ordinal suffix.
-fn is_ordinal(tok: &str) -> bool {
-    let digits = tok.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-    let suffix = &tok[digits.len()..];
-    !digits.is_empty()
-        && digits.chars().all(|c| c.is_ascii_digit())
-        && matches!(suffix, "st" | "nd" | "rd" | "th")
-}
-
-/// Did the (lowercased) old body BACKTICK this token? Code spans are how a CL
-/// file says "this word is a TERM here"; headings and bold also carry plain
-/// prose, and counting them flooded the sweep (feedback #38).
-fn backticked(old_lower: &str, tok: &str) -> bool {
-    old_lower.contains(&format!("`{tok}`"))
-}
-
-/// Filenames (`eod.md`, `tool-gate.json`) and paths (`projects/x/notes.md`,
-/// `~/.bot-hq/library`) in `body`, lowercased, trimmed of surrounding
-/// punctuation. See [`is_artifact`] for what qualifies.
-fn artifact_tokens(body: &str) -> impl Iterator<Item = String> + '_ {
-    body.split(|c: char| {
-        c.is_whitespace()
-            || matches!(c, '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '|' | '*' | '{' | '}')
-    })
-    .map(|t| t.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?' | '#')).to_lowercase())
-    .filter(|t| is_artifact(t))
+/// Whether the source STILL declares this retirement. A later correction
+/// retracting it must cancel the pending close-out warning.
+pub(super) fn declares_retirement(body: &str, term: &str) -> bool {
+    declared_retirements(body).contains(term)
 }
 
 /// Extensions a CL file names when it cites a FILE. An allow-list: `and/or`,
@@ -991,9 +934,7 @@ pub(super) const SWEEP_MAX_HITS: usize = 20;
 /// true when written. Flagging them would make every sweep noisy and train the
 /// reader to skip it.
 fn sweep_skips(file_name: &str) -> bool {
-    file_name == "decisions.md"
-        || file_name.starts_with("learnings-")
-        || file_name.starts_with("notes-20")
+    super::cl_staleness::is_history_file(file_name)
 }
 
 /// A term the close-out sweep looks for, with the write that retired it
@@ -1086,9 +1027,13 @@ pub(super) fn sweep_project(
             if !is_artifact_term(term) && (own || !words_here) {
                 continue;
             }
-            if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| line_cites(line, term)) {
+            if let Some((lineno, _)) = body.lines().enumerate().find(|(_, line)| {
+                let lower = line.to_lowercase();
+                line_cites(line, term)
+                    && !super::cl_staleness::RETIREMENT_MARKERS.iter().any(|m| lower.contains(m))
+            }) {
                 let by = match retired_by {
-                    Some(source) => format!(" (retired by your write to {source})"),
+                    Some(source) => format!(" (explicitly retired in {source})"),
                     None => " (a library file removed or renamed this session)".to_string(),
                 };
                 hits.push(format!("  {project}/{rel}:{} — \"{term}\"{by}", lineno + 1));
@@ -2776,11 +2721,11 @@ mod tests {
         assert!(msg.starts_with("edited"), "advisory, not a block: {msg}");
         assert!(msg.contains("status-lint") && msg.contains("#94"), "got: {msg}");
 
-        // Retired terms: an edit that deletes a marked term records it, so the
+        // An edit that explicitly declares a retirement records it, so the
         // close-out sweep reports the file still citing it.
         std::fs::write(proj.join("conventions.md"), "line one\nThe duo maintains this.\n").unwrap();
         std::fs::write(proj.join("vision.md"), "The `duo` (Brian + Rain) is the core.\n").unwrap();
-        edit(&bridge, "vision.md", "The `duo` (Brian + Rain)", "The harness").await.unwrap();
+        edit(&bridge, "vision.md", "The `duo` (Brian + Rain)", "Retired `duo`.\nThe harness").await.unwrap();
         let report = bridge.staleness_sweep("s1").await.expect("the edit retired `duo`");
         assert!(report.contains("conventions.md:2"), "got:\n{report}");
         assert!(report.contains("\"duo\""), "got:\n{report}");
@@ -2903,106 +2848,102 @@ mod tests {
 
     // --- issues.md #31: close-out staleness sweep -------------------------
 
-    #[test]
-    fn retired_terms_keeps_dropped_concepts_and_drops_noise() {
-        // Distinctive-only everywhere (the user's pick a9f8c705, 2026-08-24):
-        // a MARKED term reports; a plain unmarked word does not, whatever the
-        // edit size. The historic "duo" catch survives through the marking a
-        // well-kept CL file gives a real term (backticks here).
-        let old = "The `duo` (Brian + Rain) maintains bot-hq. The `duo` is the core. \
-                   However, the trio was retired. See tmp-scratch too.";
-        let new = "The harness maintains bot-hq. The harness is the core.";
-        let terms = retired_terms(old, new);
-        // Backticked in the old body → a TERM, and first on occurrence count.
-        assert_eq!(terms.first().map(String::as_str), Some("duo"));
-        // A single hyphen is prose (the user's pick on #87 a-iii): unmarked, it
-        // is vocabulary, not a concept. Underscores, two hyphens and
-        // non-ordinal digits still report unmarked; ordinals never do.
-        assert!(!terms.contains(&"tmp-scratch".to_string()), "got: {terms:?}");
-        let shaped = retired_terms(
-            "Use meta_reconcile_runs, the tool-gate-json path, migration m0092, pr-531 and the 1st pass; the follow-up is byte-identical.",
-            "lean.",
-        );
-        // (A digits-only token such as `0092` is not a word to the tokenizer.)
-        for yes in ["meta_reconcile_runs", "tool-gate-json", "m0092", "pr-531"] {
-            assert!(shaped.contains(&yes.to_string()), "{yes} is code-shaped: {shaped:?}");
+    /// #119: changing yesterday's report never establishes a code deletion,
+    /// even when its vocabulary is backticked or filename-shaped.
+    #[tokio::test]
+    async fn replacing_an_eod_does_not_retire_its_reported_code() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        bridge.register_session("s1".into(), Some("bot-hq".into())).await;
+        let lib = tmp.path().join("library");
+        let old = "# Yesterday\nRead `AGENTS.md`; refresh v_funnel_analysis_with_meta_data \
+                   and v_funnel_analysis_monthly `CONCURRENTLY`, every 5min, with a \
+                   30-second limit. At 1xz / 32z.\n";
+        std::fs::write(lib.join("eod-tldr.md"), old).unwrap();
+        std::fs::write(lib.join("tasks.md"), old).unwrap();
+        std::fs::write(lib.join("projects/bot-hq/notes.md"), old).unwrap();
+        std::fs::create_dir_all(lib.join("projects/bot-hq/archive")).unwrap();
+        std::fs::write(lib.join("projects/bot-hq/archive/focus.md"), old).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        storage.upsert_project("bot-hq", "bot-hq", repo.to_str(), None, None).await.unwrap();
+        std::fs::write(repo.join("AGENTS.md"), "live instructions").unwrap();
+        std::fs::write(repo.join("refresh.sql"), "REFRESH MATERIALIZED VIEW v_funnel_analysis_with_meta_data CONCURRENTLY;").unwrap();
+        bridge.cl_write_file(
+            "s1".into(), "hands".into(), "_globals".into(), "eod-tldr.md".into(),
+            "# Today\nSent today's report.\n".into(), false, true,
+        ).await.unwrap();
+        assert!(bridge.staleness_sweep("s1").await.is_none(), "a report rewrite is not retirement evidence");
+        assert!(repo.join("AGENTS.md").is_file());
+        assert!(std::fs::read_to_string(repo.join("refresh.sql")).unwrap().contains("CONCURRENTLY"));
+    }
+
+    #[tokio::test]
+    async fn appended_retirement_reports_current_claims_and_leaves_history_alone() {
+        let (bridge, _storage, tmp) = bridge_with_data_dir().await;
+        let proj = tmp.path().join("library/projects/bot-hq");
+        std::fs::write(proj.join("notes.md"), "The `old_function` runs each day.\n").unwrap();
+        std::fs::write(proj.join("issues.md"), "The old_function was broken last month.\n").unwrap();
+        std::fs::write(proj.join("learnings-2026-01-01.md"), "The old_function once ran.\n").unwrap();
+        std::fs::write(proj.join("conventions.md"), "old_function was removed; use its replacement.\n").unwrap();
+        std::fs::write(proj.join("decisions.md"), "# Decisions\n").unwrap();
+        bridge.cl_write_file(
+            "s1".into(), "hands".into(), "bot-hq".into(), "decisions.md".into(),
+            "Deleted `old_function`.\n".into(), true, false,
+        ).await.unwrap();
+        let report = bridge.staleness_sweep("s1").await.expect("an explicit deletion still reports");
+        assert!(report.contains("notes.md:1") && report.contains("explicitly retired in decisions.md"), "{report}");
+        for history in ["issues.md:1", "learnings-2026-01-01.md:1", "conventions.md:1"] {
+            assert!(!report.contains(history), "history must remain intact: {report}");
         }
-        for no in ["1st", "follow-up", "byte-identical", "pass"] {
-            assert!(!shaped.contains(&no.to_string()), "{no} is prose: {shaped:?}");
-        }
-        assert!(retired_terms("the `follow-up` list", "lean.").contains(&"follow-up".to_string()), "backticked: a term");
-        // A plain unmarked word is vocabulary now, not a concept — the five
-        // generic-English flags at s-a73699ec's close were exactly this class.
-        assert!(!terms.contains(&"trio".to_string()), "got: {terms:?}");
-        // Still present in the new body → not retired.
-        assert!(!terms.contains(&"maintains".to_string()), "got: {terms:?}");
-        assert!(!terms.contains(&"core".to_string()), "got: {terms:?}");
-        // Prose noise is filtered: stopwords and sub-3-char tokens.
-        assert!(!terms.contains(&"however".to_string()), "got: {terms:?}");
-        assert!(!terms.contains(&"was".to_string()), "got: {terms:?}");
-        // An append can only add — a pure superset retires nothing.
-        assert!(retired_terms("alpha beta", "alpha beta gamma").is_empty());
     }
 
     #[test]
-    fn a_bulk_rewrite_reports_terms_not_vocabulary() {
-        // s-761704e8: the tasks.md refactor (1,515 → 116 lines) made the
-        // sweep flag "real", "pass", "empty" — 510 hits of ordinary prose,
-        // dismissed in 18 seconds. Over the bulk threshold only DISTINCTIVE
-        // candidates survive: term-shaped tokens and words the old body
-        // marked structurally (backticks, bold, headings).
-        let mut old = String::from(
-            "## Sandbox rules\n\nUse `meta_reconcile_runs` and tmp-prod-logs for scratch.\n",
-        );
-        for i in 0..40 {
-            old.push_str(&format!(
-                "- item {i}: the real pass looks empty and wrong exactly here, running \
-                 tests with php quickly against normal prose sentences forever\n\
-                 - walk jump swim dance sing paint drive climb read write count speak\n"
-            ));
-        }
-        let terms = retired_terms(&old, "lean.");
-        // Since the user's pick 4136edff (2026-09-24) a HEADING no longer
-        // marks a term: EOD headings ("Tom", "Down", "Report") seeded 609
-        // false hits in one close (feedback #38). Backticks still do.
-        assert!(
-            !terms.iter().any(|t| t == "sandbox"),
-            "a heading word is vocabulary, not a term: {terms:?}"
-        );
-        assert!(terms.iter().any(|t| t == "meta_reconcile_runs"), "got: {terms:?}");
-        assert!(terms.iter().any(|t| t == "tmp-prod-logs"), "got: {terms:?}");
-        for noise in ["real", "pass", "empty", "wrong", "running", "tests", "php", "walk"] {
-            assert!(
-                !terms.iter().any(|t| t == noise),
-                "prose vocabulary must not report in a bulk rewrite: {noise} in {terms:?}"
-            );
-        }
-        // Since a9f8c705 (2026-08-24) the distinctive filter is unconditional
-        // — no under-threshold allowance for plain words remains; the sibling
-        // test pins the marked-term path that replaced it.
+    fn only_new_explicit_retirements_seed_the_sweep() {
+        let old = "`duo` maintains this. Retired words occur in examples.\nRetired `already_gone`.\n";
+        let new = "Retired `duo`.\n- Deleted `src/old.rs`.\n`old_function` was removed.\n\
+                   Renamed `old-plan.md` to `plan.md`.\n`previous_name` has been renamed to `current_name`.\n\
+                   Retired `already_gone`.\n";
+        assert_eq!(retired_terms(old, new), vec!["duo", "old-plan.md", "old_function", "previous_name", "src/old.rs"]);
+        assert!(retired_terms("Use `live_symbol`, 5min, 32z and AGENTS.md.", "Today's report.").is_empty());
+        assert!(retired_terms(new, new).is_empty(), "copying historical declarations adds no retirement");
+        assert!(declares_retirement(new, "duo"));
+        assert!(!declares_retirement("The `duo` rules, restored.", "duo"));
     }
 
-    /// Feedback #38: filenames and paths are terms; bold and heading words
-    /// are not; `e.g.` and version numbers are not files.
     #[test]
-    fn filenames_are_terms_and_headings_are_not() {
-        let old = "## Tom\n**Down** the line, see `eod.md` and projects/bcc/notes.md. \
-                   Also eod-cc.md, e.g. v1.0.6 and 1.2.3.\n";
-        let new = "## Tom\nsee eod-cc.md.\n";
-        let terms = retired_terms(old, new);
-        assert!(terms.contains(&"eod.md".to_string()), "got: {terms:?}");
-        assert!(terms.contains(&"projects/bcc/notes.md".to_string()), "got: {terms:?}");
-        for noise in ["down", "e.g", "v1.0.6", "1.2.3", "eod"] {
-            assert!(!terms.iter().any(|t| t == noise), "{noise} in {terms:?}");
+    fn plans_negations_quotes_and_examples_are_not_retirement_declarations() {
+        for line in [
+            "`live_symbol` was not deleted.", "`live_symbol` will be retired.",
+            "We have not retired `live_symbol`.", "Please remove `live_symbol`.",
+            "Retire `live_symbol` next week.", "Deleted `live_symbol`?",
+            "Removed `live_symbol` from this report.", "`live_symbol` was removed from the list.",
+            "> Retired `live_symbol`.", "Example: Retired `live_symbol`.",
+            "```text\nRetired `live_symbol`.\n```", "~~~\nRetired `live_symbol`.\n~~~",
+            "Renamed `live_symbol` eventually.", "Retired prose without a code span.",
+            "`live_symbol` was retiredish.",
+        ] {
+            assert!(retired_terms("", line).is_empty(), "not an assertion: {line}");
         }
-        // EYES 8179f7cc: prose slashes and bare domains are not artifacts.
-        for prose in ["and/or", "read/write", "i/p/a/v", "added/fixed/changed", "client/server", "github.com", "claude.ai"] {
+    }
+
+    #[test]
+    fn a_bulk_rewrite_reports_no_retirements_without_evidence() {
+        let old = (0..40).map(|i| format!(
+            "## Report {i}\nUse `meta_reconcile_runs`, tmp-prod-logs and eod.md.\n\
+             The real pass looks empty; 30-second follow-up at 1xz.\n"
+        )).collect::<String>();
+        assert!(retired_terms(&old, "Today's report.").is_empty());
+    }
+
+    /// Physical file removals still use these shapes, independently of prose.
+    #[test]
+    fn filenames_are_artifacts_but_prose_and_versions_are_not() {
+        for prose in ["and/or", "read/write", "i/p/a/v", "added/fixed/changed", "client/server", "github.com", "claude.ai", "e.g.", "1.2.3"] {
             assert!(!is_artifact(prose), "{prose} must not be a filename/path term");
         }
         for real in ["eod.md", "src/core/pump.rs", "~/.bot-hq/library", "projects/bcc/audit", "/tmp/x-dir", "tool-gate.json"] {
             assert!(is_artifact(real), "{real} is a filename/path term");
         }
-        assert!(!terms.contains(&"eod-cc.md".to_string()), "still cited in the new body");
     }
 
     #[test]
@@ -3043,7 +2984,7 @@ mod tests {
 
     /// A file this session wrote is skipped for WORD terms (it was just
     /// updated by hand) but never for a filename term (plan review M4); a
-    /// term a later write put back into its source file is dropped.
+    /// declaration a later write retracts from its source file is dropped.
     #[tokio::test]
     async fn own_files_skip_words_but_not_filenames_and_restored_terms_drop() {
         let (bridge, _storage, tmp) = bridge_with_data_dir().await;
@@ -3060,8 +3001,8 @@ mod tests {
                     .unwrap();
             }
         };
-        // a.md drops both terms; the session also rewrites b.md (still citing both).
-        write("a.md", "The replacement text for this file, long enough.\n").await;
+        // a.md retires both terms; the session also rewrites b.md (still citing both).
+        write("a.md", "Retired `widget-x`.\nRetired `old-plan.md`.\nThe replacement text.\n").await;
         write("b.md", "Mentions widget-x and old-plan.md, rewritten.\n").await;
         let report = bridge.staleness_sweep("s1").await.expect("the filename still reports");
         assert!(report.contains("\"old-plan.md\""), "a filename is never skipped:\n{report}");
@@ -3072,7 +3013,7 @@ mod tests {
         let proj2 = tmp2.path().join("library/projects/bot-hq");
         std::fs::write(proj2.join("a.md"), "The `gizmo-9` rules.\n").unwrap();
         std::fs::write(proj2.join("c.md"), "gizmo-9 is cited here.\n").unwrap();
-        for body in ["Other words entirely, a while.\n", "The `gizmo-9` rules, restored.\n"] {
+        for body in ["Retired `gizmo-9`. Other words here.\n", "The `gizmo-9` rules, restored.\n"] {
             bridge2
                 .cl_write_file("s2".into(), "hands".into(), "bot-hq".into(), "a.md".into(), body.into(), false, false)
                 .await
@@ -3085,6 +3026,7 @@ mod tests {
     fn sweep_skips_history_files_only() {
         // Append-only + dated records legitimately keep old vocabulary.
         assert!(sweep_skips("decisions.md"));
+        assert!(sweep_skips("issues.md"));
         assert!(sweep_skips("learnings-2026-08-05-thing.md"));
         assert!(sweep_skips("notes-2026-07-02-cl-measurement.md"));
         // Living docs are exactly what the sweep is for.
@@ -3101,8 +3043,8 @@ mod tests {
         // history, so only conventions.md may be reported.
         std::fs::write(proj.join("conventions.md"), "line one\nThe duo maintains this.\n").unwrap();
         std::fs::write(proj.join("decisions.md"), "2026-08-05: retired the duo framing.\n").unwrap();
-        // `duo` is backticked — a marked TERM (distinctive-only everywhere,
-        // a9f8c705): an unmarked plain word would no longer record at all.
+        // A marked name alone does not establish retirement. The write
+        // below explicitly declares it; that assertion seeds the sweep.
         std::fs::write(proj.join("vision.md"), "The `duo` (Brian + Rain) is the core.\n").unwrap();
 
         // The session rewrites vision.md, retiring "duo".
@@ -3112,7 +3054,7 @@ mod tests {
                 "hands".to_string(),
                 "bot-hq".to_string(),
                 "vision.md".to_string(),
-                "The harness is the core. The harness is the core, restated at length \
+                "Retired `duo`.\nThe harness is the core, restated at length \
                  so the shrink guard stays out of this test's way."
                     .to_string(),
                 false,
@@ -3124,7 +3066,7 @@ mod tests {
         let report = bridge.staleness_sweep("s1").await.expect("sweep must report a hit");
         assert!(report.contains("conventions.md:2"), "got:\n{report}");
         // The hit names the write that retired the term (feedback #87 a-ii).
-        assert!(report.contains("\"duo\" (retired by your write to vision.md)"), "got:\n{report}");
+        assert!(report.contains("\"duo\" (explicitly retired in vision.md)"), "got:\n{report}");
         assert!(
             !report.contains("decisions.md"),
             "append-only history must not be flagged:\n{report}"
@@ -3155,7 +3097,7 @@ mod tests {
                 "hands".to_string(),
                 "_globals".to_string(),
                 "scratch.md".to_string(),
-                "A new plan, restated at some length so that the shrink guard stays out of this \
+                "Retired `lodestone`.\nRetired `old-plan.md`.\nA new plan, restated so that the shrink guard stays out of this \
                  test's way, with nothing of the old vocabulary left in it."
                     .to_string(),
                 false,
@@ -3164,7 +3106,7 @@ mod tests {
             .await
             .unwrap();
         let report = bridge.staleness_sweep("s1").await.expect("a hit");
-        assert!(report.contains("_globals/tasks.md:1 — \"lodestone\" (retired by your write to scratch.md)"), "got:\n{report}");
+        assert!(report.contains("_globals/tasks.md:1 — \"lodestone\" (explicitly retired in scratch.md)"), "got:\n{report}");
         assert!(report.contains("_globals/projects/bot-hq/notes.md:1 — \"lodestone\""), "the own project: {report}");
         assert!(!report.contains("minecraft/notes.md:1 — \"lodestone\""), "another project's words are its own:\n{report}");
         assert!(report.contains("minecraft/notes.md:1 — \"old-plan.md\""), "a retired filename is found anywhere:\n{report}");

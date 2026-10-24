@@ -403,9 +403,8 @@ struct CloseGateState {
     /// We've already nudged once on `close_session` — let the next close go.
     close_nudged: bool,
     /// #31: `(project, term, source file)` concepts this session's CL writes
-    /// RETIRED — present in a file's old body, gone from its new one. Seeds
-    /// the close-out staleness sweep. The source lets the sweep drop a term a
-    /// later write put back.
+    /// explicitly mark as retired. Seeds the close-out staleness sweep. The
+    /// source lets the sweep drop a declaration a later write retracts.
     retired: Vec<(String, String, Option<String>)>,
     /// `(project, file_path)` of every CL file this session wrote — the sweep
     /// does not report WORD terms in them (feedback #38).
@@ -1484,7 +1483,7 @@ impl SignalingBridge {
     }
 
     /// #31 close-out staleness sweep: which OTHER CL files still cite a concept
-    /// this session retired — a term its writes removed, or the name of a CL
+    /// this session explicitly retired in a CL write, or the name of a CL
     /// file deleted or renamed since the session registered? Returns a capped,
     /// human-readable report the `close_session` handler surfaces ONCE, or
     /// `None` when there's nothing to say (no retired terms, no surviving hits,
@@ -1525,16 +1524,16 @@ impl SignalingBridge {
             .entry(session_id.to_string())
             .or_default()
             .sweep_nudged = true;
-        // Group by project so each library root is walked once; drop a term a
-        // later write put back into its own source file. Each term keeps the
-        // write that retired it, which the hit names (feedback #87 a-ii).
+        // Group by project; discard declarations subsequently retracted from
+        // their source. Merely retaining a name in a retirement sentence is
+        // intentional history, not evidence that the thing still exists.
         let mut by_project: HashMap<String, Vec<cl_write::RetiredTerm>> = HashMap::new();
         for (project, term, source) in retired {
             if let (Some(source), Some(root)) = (&source, self.cl_project_root(&project).await) {
-                let back = std::fs::read_to_string(root.join(source))
-                    .map(|body| body.lines().any(|l| cl_write::line_cites(l, &term)))
+                let still_declared = std::fs::read_to_string(root.join(source))
+                    .map(|body| cl_write::declares_retirement(&body, &term))
                     .unwrap_or(false);
-                if back {
+                if !still_declared {
                     continue;
                 }
             }
@@ -1581,7 +1580,7 @@ impl SignalingBridge {
             String::new()
         };
         Some(format!(
-            "Close-out staleness sweep — this session's CL writes retired terms (or CL files \
+            "Close-out staleness sweep — this session's CL writes explicitly mark terms as retired (or CL files \
              were deleted or renamed) that OTHER library files still cite:\n{}{tail}\n\nEach \
              hit is either (a) a file that should have been updated with the change, or (b) a \
              legitimate historical mention. Fix actual stale claims with cl_edit_file; \
