@@ -479,6 +479,19 @@ the round cap ends it.
    when a ring registers (`register_session_sequencer` → `rearm_temporary_halt_for`),
    so a relaunch or lazy respawn honours a pending wake without a boot-time
    sweep over ringless sessions.
+   **The last gate resolving can itself wake queued work.** Once its answer
+   or command result has been delivered, an idle ring serves its stored user
+   release, reviewer summons, staged response or eligible unread rows. A live
+   holder, Pause, boot, explicit halt or another gate still takes precedence.
+   A close approval clears the latch quietly before requesting close-out.
+   The bridge returns a receipt when it queues that gate transition; AppState
+   then sends no second release or cleanup. Questions and ordinary approval
+   requests still send one non-preempting notice, suppressed during Pause;
+   the ring decides when the live turn can safely read it.
+   With no next turn, the host leaves a recap; approval alone is never called
+   proof that a command finished. A non-preempting answer observed during
+   backlog delivery is deferred without cutting that delivery short.
+
 2b. **The all-pass lap** — a full lap in which every dealt participant PASSED
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
    nobody had anything to add, and the only party who can change that is the

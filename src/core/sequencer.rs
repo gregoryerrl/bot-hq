@@ -1277,7 +1277,12 @@ pub enum SequencerCommand {
     /// the latch and **never deals a turn itself** — the wake rides the
     /// existing release (`user_responded` → [`UserMessage`](SequencerCommand::UserMessage)) or the asker's own
     /// completion, so there is no second path onto a turn.
-    GateResolved { choice_id: String },
+    GateResolved {
+        choice_id: String,
+        /// Closing clears the latch but must not start ordinary work before
+        /// the close-out request takes ownership of the session.
+        resume: bool,
+    },
     /// Put `participant_id` at the head of the turn order WITHOUT a ring reset
     /// (round 12 — the transient-error retry ladder's wake). A summons in rc3
     /// D17's sense: it takes the next turn INSTEAD of the ring step and the
@@ -1481,6 +1486,9 @@ struct RingState {
     /// Non-preempting tray answers wait for a LIVE holder, without the short
     /// wind-down deadline: real work may take minutes, and is not interrupted.
     pending_answer: Option<Vec<i64>>,
+    /// Preserve a user release's reset intent while an approval still blocks
+    /// dealing. Its mentions are already in the summons queue.
+    gated_restart: Option<bool>,
     /// The ring's own boot latch (feedback #10): set at construction when the
     /// spawn boots ([`SequencerDeps::boots`]), cleared ONLY by `BootEnded`.
     /// While set, a release is held in `boot_release` and a stage is held —
@@ -2358,21 +2366,19 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     halt(&deps, &mut state.holder, &mut state.epoch).await;
                 }
             }
-            SequencerCommand::GateResolved { choice_id } => {
+            SequencerCommand::GateResolved { choice_id, resume } => {
                 // `remove` rather than a decrement: a resolve for a gate this
                 // ring never saw open is a no-op instead of clearing somebody
                 // else's latch.
-                state.open_gates.remove(&choice_id);
+                let removed = state.open_gates.remove(&choice_id);
                 debug!(
                     session = %deps.session_id,
                     open_gates = state.open_gates.len(),
                     "sequencer: an approval gate resolved"
                 );
-                // Deliberately deals nothing. The wake is the asker's own
-                // completion (it was mid-turn, blocked on the tool result) or
-                // the release the resolve path already fires
-                // (`user_responded` → `UserMessage`). Dealing here would be a
-                // second path onto a turn.
+                if removed && resume {
+                    continue_after_gate(&deps, &mut rx, &mut state, &choice_id).await;
+                }
             }
             SequencerCommand::Summon { participant_id } => {
                 // Queued like a mention; dealt now only if the ring is idle.
@@ -2532,7 +2538,7 @@ async fn release_ring(
     rx: &mut mpsc::Receiver<SequencerCommand>,
     state: &mut RingState,
     mut mentions: Vec<i64>,
-    restarts_rotation: bool,
+    mut restarts_rotation: bool,
 ) {
     if state.pause_releases_pending != 0 {
         state.summons.queue.extend(mentions);
@@ -2542,6 +2548,11 @@ async fn release_ring(
     if let Some(mut earlier) = state.pending_answer.take() {
         earlier.append(&mut mentions);
         mentions = earlier;
+    }
+    if state.open_gates.is_empty() {
+        restarts_rotation |= state.gated_restart.take().unwrap_or(false);
+    } else {
+        state.gated_restart = Some(state.gated_restart.unwrap_or(false) || restarts_rotation);
     }
     // **Whoever the user named takes the next turn, in the order
     // they were named** (rc3 D17). Appended rather than assigned:
@@ -2591,6 +2602,73 @@ async fn release_ring(
     state.spin.clear();
     state.reseed_gates_if_needed(deps).await;
     advance_turn(deps, rx, state, true, restarts_rotation).await;
+}
+
+/// The final approval can be the only remaining wake: a waiting push hook
+/// receives its answer in-band and posts no UserMessage to the ring (#113).
+async fn continue_after_gate(
+    deps: &SequencerDeps,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    state: &mut RingState,
+    choice_id: &str,
+) {
+    state.reseed_gates_if_needed(deps).await;
+    if !state.open_gates.is_empty() || state.holder.is_some() || state.winding_down.is_some()
+        || state.boot_hold || state.paused || state.halted_pending_user
+        || deps.activity.as_ref().is_some_and(|a| a.holds_wakes())
+        || state.pause_releases_pending != 0
+    {
+        return;
+    }
+    if let Some(bridge) = &deps.bridge {
+        bridge.clear_session_awaiting(&deps.session_id).await;
+    }
+    if deliver_staged_if_pending(deps, &mut state.staged_pending).await {
+        return;
+    }
+    if let Some(restart) = state.gated_restart.take() {
+        release_ring(deps, rx, state, Vec::new(), restart).await;
+        return;
+    }
+    let unread = async {
+        for p in deps.storage.participants_for_session(&deps.session_id).await? {
+            if p.enabled && p.participation_mode == crate::storage::MODE_ACTIVE {
+                let page = deps.storage.unread_for_participant(p.id).await?;
+                if !page.rows.is_empty() || page.more {
+                    return Ok::<bool, anyhow::Error>(true);
+                }
+            }
+        }
+        Ok(false)
+    }.await;
+    let unread = match unread {
+        Ok(unread) => unread,
+        Err(error) => {
+            warn!(session = %deps.session_id, %error, "could not read work after gate resolution");
+            let _ = crate::core::post_system_notice(&deps.storage, deps.bridge.as_deref(),
+                &deps.session_id, crate::storage::MessageKind::SystemNotice,
+                "The approval resolved, but pending work could not be read. Send a message to retry.", None).await;
+            return;
+        }
+    };
+    if !state.summons.queue.is_empty() || unread {
+        advance_turn(deps, rx, state, false, false).await;
+        return;
+    }
+    let running = deps.bridge.as_ref().is_some_and(|b| b.has_running_gate(&deps.session_id));
+    let reason = if running {
+        format!("Gate {choice_id} resolved. An approved command is still running; its result will arrive separately.")
+    } else {
+        format!("Gate {choice_id} resolved. No next turn is queued. Any command result is reported separately; send a message to continue.")
+    };
+    let _ = crate::core::post_system_notice(&deps.storage, deps.bridge.as_deref(), &deps.session_id,
+        crate::storage::MessageKind::SystemNotice, &reason, None).await;
+    if !running {
+        halt(deps, &mut state.holder, &mut state.epoch).await;
+        if let Some(bridge) = &deps.bridge {
+            bridge.declare_host_halt(&deps.session_id, reason).await;
+        }
+    }
 }
 
 /// Step the ring, stamp the new turn, and deliver its backlog — emptying the
@@ -4236,10 +4314,17 @@ async fn deliver_backlog(
                 // whole point is that a full stdin cannot hide it.
                 biased;
                 cmd = rx.recv() => match cmd {
-                    Some(cmd @ SequencerCommand::UserMessage { .. }) => {
+                    Some(cmd @ SequencerCommand::UserMessage { restarts_rotation: true, .. }) => {
                         deferred.push_back(cmd);
                         stop = Some(Stop::Superseded);
                         break;
+                    }
+                    // An answer is not an interrupt. Finish the delivery it
+                    // raced, then let the ring retain it for that turn's end.
+                    // Stopping here can leave a live holder with no input and
+                    // therefore no completion capable of releasing the answer.
+                    Some(cmd @ SequencerCommand::UserMessage { restarts_rotation: false, .. }) => {
+                        deferred.push_back(cmd);
                     }
                     // Deferred like the user message, and for the same
                     // reason: the ACT is the loop's, not this function's.
@@ -5209,7 +5294,7 @@ mod tests {
     }
 
     fn gate_resolved(choice_id: &str) -> SequencerCommand {
-        SequencerCommand::GateResolved { choice_id: choice_id.to_string() }
+        SequencerCommand::GateResolved { choice_id: choice_id.to_string(), resume: true }
     }
 
     /// `participant_id` declared a halt (rc3 D35: the ring stops NOW).
@@ -5740,7 +5825,6 @@ mod tests {
             .await
             .unwrap();
         send(&tx, gate_resolved("late-gate")).await;
-        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -5809,20 +5893,20 @@ mod tests {
             .resolve_choice("gate-1", "Approve".to_string())
             .await
             .expect("the gate resolves");
-        // The release is the resolve path's own; this is the ring's next command
-        // either way, and with the latch stuck it changes nothing.
-        send(&tx, user_message()).await;
+        // No extra user nudge: the resolved gate must serve the stored release.
         // Raw, not `expect`: the resolve posts the user's answer into the
         // channel too, so what goes out is the answer row and the message —
         // host-authored rows carry no `[speaker]`, and this assertion is about
         // the LATCH, not the wire format.
         let dealt = seats[0].expect_raw(1).await.join("\n");
         assert!(
-            dealt.contains("Approve") || dealt.contains("go"),
+            dealt.contains("Approve") && dealt.contains("go"),
             "the gate resolved and the ring is still holding — the latch never \
              lifted, so this session deals nothing for the rest of the process; \
              got {dealt:?}"
         );
+        seats[0].quiet().await;
+        seats[1].quiet().await;
         drop(tx);
         // The bridge holds the other sender, so the ring outlives this test
         // until the session is unregistered — which is the lifetime
@@ -5879,7 +5963,6 @@ mod tests {
         // whether the durable row moved — nothing is parked here, and the
         // withdraw still has to lift the latch the durable row seeded.
         bridge.withdraw_question("gate-2", None).await;
-        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -9929,6 +10012,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_answer_during_the_initial_delivery_does_not_leave_an_unfed_holder() {
+        let (deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        post(&storage, "user", None, "task").await;
+        post(&storage, "user", None, "answer").await;
+        let (tx, rx) = mpsc::channel(8);
+        // Queue both before the ring starts: the answer is observed INSIDE
+        // deliver_backlog, before the first page can reach the model.
+        send(&tx, user_message()).await;
+        send(&tx, answer_message()).await;
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        assert_eq!(seats[0].expect(2).await, vec!["task", "answer"]);
+        assert!(notices(&storage).await.is_empty());
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_gate_resolution_respects_live_turns_pauses_halts_and_closing() {
+        for hold in ["live", "pause", "halt", "close"] {
+            let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+            let (a, b) = (seats[0].id, seats[1].id);
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            post(&storage, "user", None, "task").await;
+            send(&tx, user_message()).await;
+            seats[0].expect(1).await;
+            send(&tx, gate_opened("g")).await;
+            send(&tx, SequencerCommand::Summon { participant_id: b }).await;
+            if hold != "live" {
+                send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+                seats[1].quiet().await;
+            }
+            match hold {
+                "pause" => send(&tx, SequencerCommand::Pause).await,
+                "halt" => send(&tx, halt_by(a)).await,
+                _ => {}
+            }
+            send(&tx, SequencerCommand::GateResolved { choice_id: "g".into(), resume: hold != "close" }).await;
+            seats[0].quiet().await;
+            seats[1].quiet().await;
+            drop(tx);
+            assert!(exited(task).await, "{hold}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_idle_gate_resolution_leaves_a_recap_without_claiming_the_run_finished() {
+        for running in [false, true] {
+            let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+            let bridge = SignalingBridge::new();
+            bridge.set_storage(storage.clone()).await;
+            deps.bridge = Some(Arc::clone(&bridge));
+            let run = running.then(|| bridge.note_gate_running("s1", "g", std::time::Duration::from_secs(120)));
+            let a = seats[0].id;
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            post(&storage, "user", None, "task").await;
+            send(&tx, user_message()).await;
+            seats[0].expect(1).await;
+            send(&tx, gate_opened("g")).await;
+            send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+            seats[0].quiet().await;
+            send(&tx, gate_resolved("g")).await;
+            seats[0].quiet().await;
+            let rows = notices(&storage).await;
+            assert_eq!(rows.len(), 1, "one recap, not a silent stop");
+            assert!(rows[0].contains(if running { "still running" } else { "No next turn" }));
+            assert!(!rows[0].contains("finished"));
+            assert_eq!(storage.session_halt("s1").await.unwrap().is_some(), !running);
+            send(&tx, gate_resolved("g")).await;
+            seats[0].quiet().await;
+            assert_eq!(notices(&storage).await.len(), 1, "duplicate resolution is inert");
+            drop(run);
+            drop(tx);
+            assert!(exited(task).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn resolving_the_last_gate_serves_a_queued_reviewer_without_a_user_nudge() {
+        for two_gates in [false, true] {
+            let (deps, storage, mut seats, activity) =
+                ring_with_activity(&[("a", "active"), ("b", "active")]).await;
+            let (a, b) = (seats[0].id, seats[1].id);
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            post(&storage, "user", None, "first task").await;
+            send(&tx, user_message()).await;
+            assert_eq!(seats[0].expect(1).await, vec!["first task"]);
+            send(&tx, gate_opened("push")).await;
+            if two_gates { send(&tx, gate_opened("other")).await; }
+            post(&storage, "system", None, "publish waiting for review").await;
+            send(&tx, SequencerCommand::Summon { participant_id: b }).await;
+            activity.set_busy_slug("a", false);
+            send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+            seats[1].quiet().await;
+            if two_gates {
+                send(&tx, gate_resolved("other")).await;
+                seats[1].quiet().await;
+            }
+            send(&tx, gate_resolved("unknown")).await;
+            seats[1].quiet().await;
+            send(&tx, gate_resolved("push")).await;
+            assert_eq!(seats[1].expect(2).await, vec!["first task", "publish waiting for review"]);
+            assert!(activity.is_busy_slug("b"));
+            send(&tx, gate_resolved("push")).await;
+            seats[0].quiet().await;
+            seats[1].quiet().await;
+            drop(tx);
+            assert!(exited(task).await);
+        }
+    }
+
+    #[tokio::test]
     async fn an_answer_after_an_all_pass_halt_starts_a_fresh_lap() {
         for roster in [vec![("a", "active")], vec![("a", "active"), ("b", "active")]] {
             let (deps, storage, mut seats, activity) = ring_with_activity(&roster).await;
@@ -11152,7 +11349,7 @@ mod tests {
             for _ in 0..8 {
                 tokio::time::sleep(Duration::from_millis(700)).await;
                 if chatter_tx
-                    .send(SequencerCommand::GateResolved { choice_id: "never-opened".into() })
+                    .send(SequencerCommand::GateResolved { choice_id: "never-opened".into(), resume: true })
                     .await
                     .is_err()
                 {
@@ -12313,21 +12510,14 @@ mod tests {
         .await;
         seats[1].quiet().await;
 
-        // Resolving the gate deals NOTHING by itself — the wake is the user's
-        // release, so there is no second path onto a turn. BOTH seats must be
-        // quiet: the first cut of this checked only B, and a premature deal
-        // goes to the FRONT (A), whose buffered row the later expect would
-        // happily consume — the mutation passed until A was pinned quiet too.
+        // No completion is still owed. The final gate resumes from the anchor,
+        // serving B without another user message or an unintended front reset.
         send(&tx, gate_resolved("g1")).await;
         seats[0].quiet().await;
-        seats[1].quiet().await;
-
-        // The release drains normally once the gate is lifted.
-        send(&tx, user_message()).await;
         assert_eq!(
-            seats[0].expect(1).await,
-            vec!["for b"],
-            "the release deals from the front once no gate is open"
+            seats[1].expect(2).await,
+            vec!["go", "for b"],
+            "the next participant is served once no gate is open"
         );
         let _ = b;
         drop(tx);
@@ -12348,11 +12538,10 @@ mod tests {
         seats[0].quiet().await;
 
         send(&tx, gate_resolved("g1")).await;
-        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
-            "lifted gate + release = the turn deals"
+            "the lifted gate serves the release it held"
         );
         drop(tx);
         assert!(exited(task).await);
@@ -12372,13 +12561,12 @@ mod tests {
         send(&tx, user_message()).await;
         seats[0].quiet().await;
 
-        // Answering the gate (the row flips) + the resolve notify + the release
-        // is the full production sequence, in its production order. The resolve
+        // Answering the gate (the row flips) + the resolve notify releases the
+        // stored user message, with no second nudge. The resolve
         // names the gate it answers — the seeded latch holds ids now, so an
         // unrelated id would leave it exactly where it was (below).
         storage.answer_tray_entry("c-gate-1", "Approve").await.unwrap();
         send(&tx, gate_resolved("c-gate-1")).await;
-        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],
@@ -12423,7 +12611,6 @@ mod tests {
         // twice.
         storage.answer_tray_entry("c-gate-1", "Approve").await.unwrap();
         send(&tx, gate_resolved("c-gate-1")).await;
-        send(&tx, user_message()).await;
         assert_eq!(
             seats[0].expect(1).await,
             vec!["go"],

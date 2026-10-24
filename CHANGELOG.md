@@ -13,6 +13,13 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Queued reviews resume when the blocking gate resolves.** A reviewer
+  waiting behind a push approval no longer needs an extra user message to
+  get its turn. Gate answers are recorded before scheduling resumes;
+  each answer wakes the ring once, without a phantom follow-up turn.
+  Closing clears the gate without starting more project work. A session
+  with no queued work gets a recap, and a running command stays identified
+  as running.
 - **Tray answers wait for the current turn to finish.** A stale idle indicator
   could let an answer replace a working turn or falsely halt the session.
   Scheduling now checks the actual turn owner. A new answer also starts fresh

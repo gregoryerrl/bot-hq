@@ -225,6 +225,22 @@ impl Storage {
         Ok(res.rows_affected() > 0)
     }
 
+    /// Gate answers may release a mechanical host stop, never an agent's halt.
+    /// Keep the author predicate in the write so a newer agent halt survives.
+    pub async fn clear_host_session_halt(&self, session_id: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL, \
+             halt_declared_at = NULL, halt_wake_at = NULL \
+             WHERE id = ? AND halt_reason IS NOT NULL \
+               AND COALESCE(halt_declared_by, 'system') = 'system'",
+        )
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("clearing host halt for session {session_id}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     /// Every OPEN session's declared halt:
     /// `(session_id, declared_by, reason, declared_at, wake_at)` — the one read
     /// the dashboard cards and the header bell need to say "halted — your move"

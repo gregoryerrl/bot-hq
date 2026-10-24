@@ -131,9 +131,9 @@ pub struct ClRescanReport {
 /// is the normal outcome for every `ask_user_choice` (non-blocking since rc3
 /// D35: the receiver is dropped at park time) and for any durable row whose
 /// park predates a restart: the bridge persisted the answer as the user's row
-/// in session storage; the caller (`CoreAppState::resolve_choice`) wakes an
-/// idle ring so the row is read at the next boundary — the row IS the
-/// delivery, nothing is written to a stdin here.
+/// in session storage. Gates carry their queued transition receipt; the caller
+/// (`CoreAppState::resolve_choice`) notifies only answers still needing a wake.
+/// The ring owns safe-boundary delivery — nothing is written to stdin here.
 #[derive(Debug, Clone)]
 pub enum ResolveOutcome {
     Delivered,
@@ -152,6 +152,9 @@ pub enum ResolveOutcome {
         /// path where that changes behaviour — it used to wake the agent with
         /// text that existed nowhere else.
         receipt: Option<PersistedMessage>,
+        /// The gate transition was queued to the ring. This says who owns
+        /// scheduling/cleanup, not that a paused or busy ring already resumed.
+        gate_notified: bool,
     },
     /// The pick would EXECUTE a gated command (action_gate / ToolBlocklist)
     /// whose requesting agent has moved on (client-side MCP timeout / restart),
@@ -859,13 +862,17 @@ impl SignalingBridge {
     /// durable rows); a miss on `resolved` is healed the same way, and the
     /// user's release still drains the session's rows.
     pub async fn notify_ring_gate(&self, session_id: &str, choice_id: &str, opened: bool) {
+        self.notify_ring_gate_with_resume(session_id, choice_id, opened, true).await;
+    }
+
+    pub(super) async fn notify_ring_gate_with_resume(&self, session_id: &str, choice_id: &str, opened: bool, resume: bool) -> bool {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {
             let choice_id = choice_id.to_string();
             let cmd = if opened {
                 crate::core::sequencer::SequencerCommand::GateOpened { choice_id }
             } else {
-                crate::core::sequencer::SequencerCommand::GateResolved { choice_id }
+                crate::core::sequencer::SequencerCommand::GateResolved { choice_id, resume }
             };
             if tx.try_send(cmd).is_err() {
                 tracing::warn!(
@@ -873,7 +880,11 @@ impl SignalingBridge {
                     opened,
                     "a gate notification did not reach the ring; the latch reseeds on respawn"
                 );
+                return false;
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -1318,6 +1329,10 @@ impl SignalingBridge {
     pub async fn clear_session_awaiting(&self, session_id: &str) {
         if let Some(flag) = self.session_awaiting.lock().await.get(session_id) {
             flag.store(false, Ordering::Release);
+        }
+        let tracker = self.session_activity.lock().await.get(session_id).and_then(Weak::upgrade);
+        if let Some(tracker) = tracker {
+            tracker.refresh();
         }
     }
 

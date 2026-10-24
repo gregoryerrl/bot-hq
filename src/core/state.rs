@@ -2432,22 +2432,6 @@ impl AppState {
         }
     }
 
-    /// Decide what an out-of-band tray answer does to a live session. Pure for
-    /// testing; `holds_wakes` is the pause latch (`activity.holds_wakes()`),
-    /// `recorded` is whether the bridge got a receipt back for the answer, and
-    /// `ring_running` is whether any participant is mid-turn
-    /// (`activity.any_busy()` — the same signal the chat-input lock reads, so
-    /// the UI and this table agree on what "working" means).
-    ///
-    /// Read the two lines as "what does each consequence actually depend on":
-    /// the halt clear on nothing, and the release on all three — a receipt to
-    /// read, no pause to respect, and no running ring to interrupt (rc3 D34).
-    ///
-    /// There used to be a third, `stash`, for the paused case. It set a map that
-    /// the broadcast then discarded: the rows are in the channel and every
-    /// participant reads them off its own cursor (D19), so holding a copy bought
-    /// nothing. The PAUSE still suppresses the release, which is the half that
-    /// was doing the work.
     /// **Does an AGENT-declared halt suppress a gate answer's release?**
     /// (12951cc3, the user's pick, 2026-08-24 — "halt wins".) True only when a
     /// halt is standing, its declarer is a participant rather than the host
@@ -2463,10 +2447,13 @@ impl AppState {
         is_gate_row && halt_declared_by.is_some_and(|by| by != "system")
     }
 
-    fn tray_wake(holds_wakes: bool, recorded: bool, ring_running: bool) -> TrayWake {
+    /// Question/request answers notify the ring without interrupting a turn.
+    /// The ring owns busy/deferral decisions; Pause must suppress the notice
+    /// here because a UserMessage received while paused is a steering release.
+    fn tray_wake(holds_wakes: bool, recorded: bool) -> TrayWake {
         TrayWake {
             clear_awaiting: true,
-            release: !holds_wakes && recorded && !ring_running,
+            release: !holds_wakes && recorded,
         }
     }
 
@@ -2511,14 +2498,10 @@ impl AppState {
                 }
             }
         }
-        // Only the timed-out fallback needs us to wake the session. The
-        // OOB message is already in storage (bridge wrote it, envelope and all).
-        // To actually wake the participants so they read + act on it, also: (1)
-        // clear the awaiting-user halt, (2) release the ring (an IDLE ring only)
-        // so the next dealt turn drains the row. We deliberately do
-        // NOT call broadcast_user_message (which re-inserts) — the storage row
-        // already exists. Delivered + StaleGateNeedsConfirm need no wake (the
-        // agent is live, or nothing ran).
+        // The OOB message already exists. Gates whose notification was queued
+        // are wholly the bridge/ring's transition; questions and requests still
+        // need a non-preempting notice so the ring can release or defer them.
+        // Do not reinsert the answer or infer ring ownership from a UI snapshot.
         //
         // `receipt: None` means the answer was never recorded (no storage wired,
         // or the insert failed). Which of the four steps below that suppresses —
@@ -2526,9 +2509,15 @@ impl AppState {
         // pure so every combination is a value a test can compare rather than a
         // shape a test has to guess at.
         if let ResolveOutcome::DeliveredOutOfBand {
-            session_id, receipt, ..
+            session_id, receipt, gate_notified, ..
         } = &outcome
         {
+            if *gate_notified {
+                // The bridge finished cleanup and queued the sole gate wake.
+                // Even an idle snapshot here can race that already-queued
+                // deal; a second UserMessage would erase its later Done vote.
+                return Ok(outcome);
+            }
             let sessions = self.sessions.lock().await;
             if let Some(handle) = sessions.get(session_id) {
                 // The user's pick on 12951cc3 (2026-08-24, "halt wins"): a gate
@@ -2563,7 +2552,6 @@ impl AppState {
                 let step = Self::tray_wake(
                     handle.activity.holds_wakes(),
                     receipt.is_some(),
-                    handle.activity.any_busy(),
                 );
                 if step.clear_awaiting {
                     self.clear_awaiting(handle, session_id).await;
@@ -2579,23 +2567,10 @@ impl AppState {
                     // them off its own cursor (rc3 D19). A map written on one
                     // path and discarded on the other is not a queue; it is a
                     // leak with a comment.
-                    // **No interrupt, and no release while the ring runs (rc3
-                    // D34).** This block used to fire `tray-answer-preempt` at
-                    // every agent and reset the ring — the issues.md #27 cure
-                    // for an agent building on premises a parked answer had
-                    // overturned (s-b69a5c01). But the reset threw away the
-                    // holder's whole in-flight turn (the epoch moves; its
-                    // completion is discarded on arrival), which makes a tray
-                    // click a hidden interrupt — and the decree is that **Pause
-                    // is the only real interrupt**. The answer row is already
-                    // persisted; delivery is a pull; the next handover drains
-                    // it, so the exposure #27 worried about is now bounded at
-                    // the remainder of the current turn.
-                    //
-                    // An IDLE ring is the one case that still needs waking —
-                    // nothing will ever drain the row otherwise. Through
-                    // `user_responded`, the D28 single entry point; no mentions,
-                    // because a pick from a list carries no `@` to honour (D17).
+                    // No interrupt (D34). A live holder retains this notice
+                    // until its completion; an idle ring deals it now. Using
+                    // any_busy here again would lose answers during wind-down
+                    // or duplicate a wake against a stale activity reading.
                     if step.release {
                         // Release implies clear (2026-08-24): the row's KIND no
                         // longer decides the halt slot — a released ring with a
@@ -3096,36 +3071,142 @@ mod tests {
         assert!(!AppState::gate_release_suppressed(Some("system"), false));
     }
 
-    #[test]
-    fn tray_wake_covers_the_pause_record_and_running_combinations() {
-        // **This table changed subject at rc3 D34, and the old subject was the
-        // interrupt.** The `deliver` flag used to fire `tray-answer-preempt` at
-        // every agent and reset the ring — so answering a parked question threw
-        // away the holder's in-flight turn. Under "Pause is the only real
-        // interrupt" a running ring gets NOTHING from a tray answer: the row is
-        // persisted, and the next handover drains it.
+    #[tokio::test]
+    async fn a_resolved_gate_has_one_scheduling_owner_even_before_the_ring_runs() {
+        use crate::core::sequencer::SequencerCommand;
+        let (state, storage, _tmp) = state_with_stub().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state.bridge.register_session_sequencer("s1".into(), tx).await;
+        storage.insert_tray_entry("s1", "gate", "hands", crate::storage::QuestionKind::Choice,
+            "Approve?", Some(&["Approve".into(), "Reject".into()]), None, None).await.unwrap();
+        // Deliberately do not run a sequencer: its queued gate notification
+        // cannot mark a holder busy before AppState checks the idle snapshot.
+        state.resolve_choice("gate", "Reject".into(), false).await.unwrap();
+        let mut resolved = 0;
+        let mut releases = 0;
+        while let Ok(command) = rx.try_recv() {
+            match command {
+                SequencerCommand::GateResolved { .. } => resolved += 1,
+                SequencerCommand::UserMessage { .. } => releases += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(resolved, 1);
+        assert_eq!(releases, 0, "the gate already owns its wake; do not retain a phantom answer");
+        assert_eq!(state.sessions.lock().await["s1"].user_broadcasts.load(Ordering::Acquire), 1);
+    }
 
-        // Running + recorded: the answer rides the next boundary. No interrupt,
-        // no release — the exact case that used to abort the holder's turn.
+    #[tokio::test]
+    async fn a_gate_callback_does_not_erase_a_newer_ring_recap() {
+        use crate::core::sequencer::SequencerCommand;
+        let (state, storage, _tmp) = state_with_stub().await;
+        let state = Arc::new(state);
+        let awaiting = Arc::clone(&state.sessions.lock().await["s1"].awaiting);
+        state.bridge.register_session_awaiting("s1".into(), Arc::clone(&awaiting)).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state.bridge.register_session_sequencer("s1".into(), tx).await;
+        storage.insert_tray_entry("s1", "gate", "hands", crate::storage::QuestionKind::Choice,
+            "Approve?", Some(&["Approve".into(), "Reject".into()]), None, None).await.unwrap();
+        // Block AppState's post-bridge bookkeeping while its gate notification
+        // is delivered. The ring is allowed to write a new recap in this gap.
+        let held = state.sessions.lock().await;
+        let resolver = Arc::clone(&state);
+        let task = tokio::spawn(async move { resolver.resolve_choice("gate", "Reject".into(), false).await });
+        let command = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(command, SequencerCommand::GateResolved { .. }));
+        state.bridge.declare_host_halt("s1", "new ring recap".into()).await;
+        drop(held);
+        task.await.unwrap().unwrap();
+        assert_eq!(storage.session_halt("s1").await.unwrap().unwrap().1, "new ring recap");
+        assert!(awaiting.load(Ordering::Acquire));
+        assert!(rx.try_recv().is_err(), "no second release after the ring handled the gate");
+    }
+
+    #[tokio::test]
+    async fn a_gate_answer_preserves_agent_halts_and_clears_only_host_halts() {
+        use crate::core::sequencer::SequencerCommand;
+        for author in ["hands", "system"] {
+            let (state, storage, _tmp) = state_with_stub().await;
+            let awaiting = Arc::clone(&state.sessions.lock().await["s1"].awaiting);
+            awaiting.store(true, Ordering::Release);
+            state.bridge.register_session_awaiting("s1".into(), Arc::clone(&awaiting)).await;
+            storage.declare_session_halt("s1", author, "standing halt").await.unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            state.bridge.register_session_sequencer("s1".into(), tx).await;
+            storage.insert_tray_entry("s1", "gate", "hands", crate::storage::QuestionKind::Choice,
+                "Approve?", Some(&["Approve".into(), "Reject".into()]), None, None).await.unwrap();
+            let outcome = state.resolve_choice("gate", "Reject".into(), false).await.unwrap();
+            assert!(matches!(outcome, crate::signaling::ResolveOutcome::DeliveredOutOfBand { gate_notified: true, .. }));
+            let command = rx.try_recv().unwrap();
+            assert!(matches!(command, SequencerCommand::GateResolved { resume, .. } if resume == (author == "system")));
+            assert!(rx.try_recv().is_err());
+            assert_eq!(storage.session_halt("s1").await.unwrap().is_some(), author == "hands");
+            assert_eq!(awaiting.load(Ordering::Acquire), author == "hands");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolving_one_live_gate_keeps_the_wait_for_another() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        let awaiting = Arc::clone(&state.sessions.lock().await["s1"].awaiting);
+        state.bridge.register_session_awaiting("s1".into(), Arc::clone(&awaiting)).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        state.bridge.register_session_sequencer("s1".into(), tx).await;
+        state.bridge.park_gated_command("s1", "hands", "printf first").await.unwrap();
+        let gate_id = storage.tray_entries_for_session("s1").await.unwrap().into_iter()
+            .find(|row| row.command_text.as_deref() == Some("printf first")).unwrap().choice_id;
+        state.bridge.park_gated_command("s1", "hands", "printf second").await.unwrap();
+        while rx.try_recv().is_ok() {}
+        state.resolve_choice(&gate_id, "Reject".into(), false).await.unwrap();
+        assert!(awaiting.load(Ordering::Acquire));
+        assert_eq!(storage.pending_gate_ids("s1").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_absent_gate_notification_is_not_reported_as_a_queued_wake() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        storage.insert_tray_entry("s1", "gate", "hands", crate::storage::QuestionKind::Choice,
+            "Approve?", Some(&["Approve".into(), "Reject".into()]), None, None).await.unwrap();
+        let outcome = state.resolve_choice("gate", "Reject".into(), false).await.unwrap();
+        assert!(matches!(outcome, crate::signaling::ResolveOutcome::DeliveredOutOfBand { gate_notified: false, .. }));
+    }
+
+    #[tokio::test]
+    async fn question_answers_notify_the_ring_once_but_never_release_pause() {
+        use crate::core::sequencer::SequencerCommand;
+        for kind in [crate::storage::QuestionKind::Choice, crate::storage::QuestionKind::Request] {
+            for (busy, paused) in [(false, false), (true, false), (false, true), (true, true)] {
+                let (state, storage, _tmp) = state_with_stub().await;
+                let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+                state.bridge.register_session_sequencer("s1".into(), tx).await;
+                {
+                    let sessions = state.sessions.lock().await;
+                    let handle = &sessions["s1"];
+                    handle.activity.set_busy_slug("hands", busy);
+                    handle.activity.set_paused(paused);
+                }
+                storage.insert_tray_entry("s1", "question", "hands", kind,
+                    "Continue?", Some(&["Continue".into(), "Wait".into()]), None, None).await.unwrap();
+                state.resolve_choice("question", "Continue".into(), false).await.unwrap();
+                let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+                assert_eq!(commands.len(), usize::from(!paused), "busy={busy}, paused={paused}: {commands:?}");
+                assert!(commands.iter().all(|c| matches!(c, SequencerCommand::UserMessage { restarts_rotation: false, .. })));
+            }
+        }
+    }
+
+    #[test]
+    fn tray_wake_covers_pause_and_recorded_answers() {
+        // Notify without preempting; the ring decides when it is safe to deal.
         assert_eq!(
-            AppState::tray_wake(false, true, true),
-            TrayWake { clear_awaiting: true, release: false }
-        );
-        // Idle + recorded: the one case that needs waking — nothing else will
-        // ever drain the row. Through `user_responded`, the D28 entry point.
-        assert_eq!(
-            AppState::tray_wake(false, true, false),
+            AppState::tray_wake(false, true),
             TrayWake { clear_awaiting: true, release: true }
         );
         // Paused + recorded: no release. A tray answer must not lift a pause the
         // user deliberately set — whatever the busy flags say mid-drain. (There
         // is nothing to stash: the row is in the channel already.)
         assert_eq!(
-            AppState::tray_wake(true, true, false),
-            TrayWake { clear_awaiting: true, release: false }
-        );
-        assert_eq!(
-            AppState::tray_wake(true, true, true),
+            AppState::tray_wake(true, true),
             TrayWake { clear_awaiting: true, release: false }
         );
         // Unrecorded — the regression the flags exist for. The insert failing
@@ -3134,11 +3215,11 @@ mod tests {
         // releasing over a receipt that never landed would hand out a turn on
         // an empty backlog.
         assert_eq!(
-            AppState::tray_wake(false, false, false),
+            AppState::tray_wake(false, false),
             TrayWake { clear_awaiting: true, release: false }
         );
         assert_eq!(
-            AppState::tray_wake(true, false, true),
+            AppState::tray_wake(true, false),
             TrayWake { clear_awaiting: true, release: false }
         );
     }

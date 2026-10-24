@@ -939,13 +939,20 @@ impl SignalingBridge {
                 None => false,
             }
         };
-        // rc3 D35: a resolved approval lifts the ring's gate latch. Keyed on
-        // the durable row's options — the same Approve/Reject discriminator
-        // that seeds the latch — and gated on `flipped` so a duplicate resolve
-        // cannot decrement twice.
+        // The ring may resume as soon as it sees the resolution. Carry this
+        // through delivery so it never wakes before the answer/result exists
+        // or before the bridge has finished clearing the approval's wait flag.
+        let gate_resolution = if flipped {
+            gate_row.as_ref().map(|(session_id, kind, agent)| {
+                (session_id.clone(), agent.clone(),
+                 kind == crate::storage::QuestionKind::Close.as_str()
+                    && matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved))
+            })
+        } else {
+            None
+        };
         if flipped {
             if let Some((session_id, kind, agent)) = gate_row {
-                self.notify_ring_gate(&session_id, choice_id, false).await;
                 // 0081: a `close` card's verdict, on the flip only (so a duplicate
                 // resolve cannot close twice or decline twice). Approve → the same
                 // `SessionCloseRequest` the agent's direct close emits, routed by
@@ -955,7 +962,8 @@ impl SignalingBridge {
                 if kind == crate::storage::QuestionKind::Close.as_str() {
                     if matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved) {
                         tracing::info!(session = %session_id, %agent, "close card APPROVED by the user — closing");
-                        self.request_session_close(session_id.clone(), agent, false);
+                        // Requested below, after the ring receives its quiet
+                        // latch clear. The epilogue can then summon its turn.
                     } else {
                         let storage = self.storage.lock().await.clone();
                         if let Some(storage) = storage {
@@ -1010,6 +1018,7 @@ impl SignalingBridge {
                 }
             }
         }
+        let mut delivered: Result<ResolveOutcome> = async {
         let parked = self.pending.lock().await.remove(choice_id);
         match parked {
             Some(p) => {
@@ -1034,43 +1043,12 @@ impl SignalingBridge {
                         .await;
                 }
 
-                // Clear the awaiting halt the matching ask set (approvals only —
-                // an ordinary question sets none), BEFORE delivering the pick, so
-                // the input-lock state the flag drives is right by the time the
-                // answer is read. The bridge set the flag (set_session_awaiting),
-                // so the bridge clears it on resolve. Also covers the Err
-                // fall-through below (core then re-clears — harmlessly redundant).
-                //
-                // **Unless an AGENT-declared halt is standing over a gate answer**
-                // (12951cc3, the user's pick, 2026-08-24): the gate ran, but the
-                // session stays halted — the awaiting flag must keep deriving
-                // `awaiting_user`, so the banner and the input state stay true.
-                // Host-declared stops (`declared_by = "system"`: consensus,
-                // all-pass, round cap, spin) keep today's clear-and-resume.
-                // Read-failure counts as STANDING (review note on the 12951cc3
-                // batch): `.ok()` here cleared the awaiting flag on a DB
-                // hiccup — the exact behaviour the pick voted out — while the
-                // state-side half kept the slot. Both halves now fail the
-                // same direction.
-                let agent_halt_stands = p.gate
-                    && match self.storage.lock().await.clone() {
-                        Some(storage) => match storage
-                            .session_halt(&p.choice.session_id)
-                            .await
-                        {
-                            Ok(halt) => halt.is_some_and(|(by, _, _)| by != "system"),
-                            Err(e) => {
-                                tracing::warn!(
-                                    ?e,
-                                    session_id = %p.choice.session_id,
-                                    "halt read failed at gate resolve; keeping the awaiting flag"
-                                );
-                                true
-                            }
-                        },
-                        None => false,
-                    };
-                if !agent_halt_stands {
+                // Ready the live caller before unblocking its hook, preserving
+                // an agent halt or remaining gates. Recheck after a possible
+                // long OOB run, immediately before notifying the ring.
+                if p.gate {
+                    self.prepare_gate_release(&p.choice.session_id).await;
+                } else {
                     self.clear_session_awaiting(&p.choice.session_id).await;
                 }
                 match p.tx.send(picked) {
@@ -1207,6 +1185,51 @@ impl SignalingBridge {
                     .await)
             }
         }
+        }.await;
+        if let Some((session_id, agent, closing)) = gate_resolution {
+            let may_resume = self.prepare_gate_release(&session_id).await;
+            let notified = self.notify_ring_gate_with_resume(&session_id, choice_id, false, !closing && may_resume).await;
+            if let Ok(ResolveOutcome::DeliveredOutOfBand { gate_notified, .. }) = &mut delivered {
+                *gate_notified = notified;
+            }
+            if closing {
+                self.request_session_close(session_id, agent, false);
+            }
+        }
+        delivered
+    }
+
+    /// Complete the old approval's cleanup BEFORE handing scheduling to the
+    /// ring. AppState must not subsequently clear a recap the ring just wrote.
+    async fn prepare_gate_release(&self, session_id: &str) -> bool {
+        if let Some(storage) = self.storage.lock().await.clone() {
+            match storage.clear_host_session_halt(session_id).await {
+                Ok(true) => self.notify_halts_cleared(session_id.to_string()),
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(session_id, %error, "gate resolved but host halt could not be readied");
+                    return false;
+                }
+            }
+            match storage.session_halt(session_id).await {
+                Ok(Some((by, _, _))) if by != "system" => return false,
+                Err(error) => {
+                    tracing::warn!(session_id, %error, "gate resolved but halt state is unreadable; holding");
+                    return false;
+                }
+                _ => {}
+            }
+            match storage.pending_gate_ids(session_id).await {
+                Ok(pending) if !pending.is_empty() => return true,
+                Err(error) => {
+                    tracing::warn!(session_id, %error, "gate resolved but remaining gates are unreadable; holding");
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        self.clear_session_awaiting(session_id).await;
+        true
     }
 
     /// Persist + broadcast a tray answer as the user's row — **the primary
@@ -1428,6 +1451,7 @@ impl SignalingBridge {
             session_id,
             body,
             receipt,
+            gate_notified: false,
         }
     }
 
@@ -3090,7 +3114,7 @@ mod tests {
         let mut opened_second = false;
         while let Ok(cmd) = rx.try_recv() {
             match cmd {
-                SequencerCommand::GateResolved { choice_id } if choice_id == first_id => {
+                SequencerCommand::GateResolved { choice_id, .. } if choice_id == first_id => {
                     resolved_first = true
                 }
                 SequencerCommand::GateOpened { choice_id } if choice_id == second_id => {
@@ -3693,26 +3717,17 @@ mod tests {
             storage.session_halt("s1").await.unwrap().is_none(),
             "a host halt is cleared by the gate answer's release (release ⇒ clear)"
         );
-        let mut released = false;
+        let mut released = 0;
         while let Ok(cmd) = rx1.try_recv() {
-            if let SequencerCommand::UserMessage {
-                restarts_rotation, ..
-            } = cmd
-            {
-                released = true;
-                // The starvation fix's call-site pin (2026-08-27): a gate/tray
-                // ANSWER releases WITHOUT resetting the rotation — flipping
-                // resolve_choice's flag back to `true` re-deals the front on
-                // every approval and the position-1 participant starves (the
-                // 137-event measurement). This is the real path, so the pin
-                // covers state.rs → bridge → command, not just the enum.
-                assert!(
-                    !restarts_rotation,
-                    "a gate answer must not reset the rotation to the front"
-                );
+            match cmd {
+                SequencerCommand::GateResolved { resume: true, .. } => released += 1,
+                SequencerCommand::UserMessage { .. } => panic!("a gate must not get a second release"),
+                _ => {}
             }
         }
-        assert!(released, "the idle ring is released to drain the answer row");
+        // The gate handler continues from the anchor (pinned by the sequencer
+        // tests); AppState no longer sends a second, racy UserMessage.
+        assert_eq!(released, 1, "the idle ring receives one gate transition");
         assert!(!awaiting1.load(Ordering::Acquire), "the awaiting flag cleared");
 
         // --- Row 2: AGENT halt + gate → suppressed ("halt wins", 12951cc3).
@@ -3738,7 +3753,7 @@ mod tests {
         );
         while let Ok(cmd) = rx2.try_recv() {
             assert!(
-                !matches!(cmd, SequencerCommand::UserMessage { .. }),
+                !matches!(cmd, SequencerCommand::UserMessage { .. } | SequencerCommand::GateResolved { resume: true, .. }),
                 "no release under an agent's halt: {cmd:?}"
             );
         }
@@ -4361,6 +4376,13 @@ mod tests {
             saw_activity,
             "set_session_awaiting must refresh the registered tracker → emit SessionActivity awaiting_user"
         );
+        tracker.mark_busy_for_epoch("hands", 1);
+        bridge.clear_session_awaiting("s1").await;
+        let mut saw_working = false;
+        while let Ok(event) = sub.try_recv() {
+            saw_working |= matches!(event, SignalingEvent::SessionActivity { state, .. } if state == "busy");
+        }
+        assert!(saw_working, "clearing the wait must restore the working indicator immediately");
     }
 
     #[tokio::test]
@@ -4841,7 +4863,7 @@ mod tests {
         assert_eq!(storage.get_tray_entry(&card).await.unwrap().unwrap().status, "answered");
         assert!(matches!(
             ring_rx.try_recv(),
-            Ok(crate::core::sequencer::SequencerCommand::GateResolved { choice_id }) if choice_id == card
+            Ok(crate::core::sequencer::SequencerCommand::GateResolved { choice_id, resume: true }) if choice_id == card
         ));
         let mut close_requests = 0;
         while let Ok(ev) = sub.try_recv() {
@@ -4856,6 +4878,45 @@ mod tests {
             "the executor is told to keep working: {rows:?}"
         );
         assert!(!storage.close_approved_since_open("s1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gate_resolution_reaches_the_ring_only_after_its_answer_is_recorded() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "test", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        storage.insert_tray_entry("s1", "gate", "hands", crate::storage::QuestionKind::Choice,
+            "Approve this?", Some(&["Approve".into(), "Reject".into()]), None, None).await.unwrap();
+        let resolver = Arc::clone(&bridge);
+        let task = tokio::spawn(async move { resolver.resolve_choice("gate", "Reject — keep working".into()).await });
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(notification, crate::core::sequencer::SequencerCommand::GateResolved { resume: true, .. }));
+        let rows = storage.recent_row_bodies_upto("s1", i64::MAX, 20).await.unwrap();
+        assert!(rows.iter().any(|row| row.contains("Reject — keep working")), "the wake must see the answer");
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_approved_close_clears_its_gate_without_resuming_ordinary_work() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "test", None).await.unwrap();
+        bridge.set_storage(storage).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx).await;
+        let mut events = bridge.subscribe();
+        let card = bridge.park_close_card("s1", "hands", "recap").await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::GateOpened { .. })));
+        bridge.resolve_choice(&card, "Approve".into()).await.unwrap();
+        assert!(matches!(rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::GateResolved { resume: false, .. })));
+        let mut close = false;
+        while let Ok(event) = events.try_recv() {
+            close |= matches!(event, SignalingEvent::SessionCloseRequest { .. });
+        }
+        assert!(close, "the normal close path still runs");
     }
 
     #[tokio::test]
