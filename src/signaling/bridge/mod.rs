@@ -857,6 +857,18 @@ impl SignalingBridge {
         self.rearm_queued_outward_for(&session_id).await;
     }
 
+    /// Host-only scheduling primitive. The returned owner is tied to this
+    /// particular ring's channel; a restart never transfers its authority.
+    pub async fn reserve_roster_boundary(
+        &self,
+        session_id: &str,
+        operation: &str,
+    ) -> Result<crate::core::roster_boundary::RosterBoundary, String> {
+        let tx = self.session_sequencer.lock().await.get(session_id).cloned()
+            .ok_or_else(|| "The session has no running turn ring".to_string())?;
+        crate::core::roster_boundary::RosterBoundary::acquire(tx, operation.to_string()).await
+    }
+
     /// Tell the ring an approval gate opened (`opened = true`) or resolved
     /// (`false`) — rc3 **D35**: while any gate is open the ring deals no turns.
     /// `try_send` like every ring notify: this runs inside tool calls and

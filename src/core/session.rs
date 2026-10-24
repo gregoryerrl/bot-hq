@@ -996,6 +996,7 @@ async fn spawn_session_handle(
         }
         let ring = inputs.len();
         let deps = crate::core::sequencer::SequencerDeps {
+            in_atomic_tool: Arc::clone(&in_atomic_tool),
             // The ring holds every release and stage until boot tells it boot
             // ended (feedback #10). Its OWN latch, from the same value the
             // pumps' `booting` cell starts at — not the cell itself, which boot
@@ -7056,6 +7057,7 @@ mod tests {
             .await;
 
         let deps = crate::core::sequencer::SequencerDeps {
+            in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_id: "s1".into(),
             storage: s.clone(),
             inputs: std::collections::HashMap::new(),

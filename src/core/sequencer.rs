@@ -697,6 +697,7 @@
 //! rather than a counter, and so is this.
 
 use crate::agents::ParticipantInput;
+use super::roster_boundary::{BoundaryCommand, BoundaryState};
 use crate::signaling::SignalingBridge;
 use crate::storage::{MessageKind, Participant, PersistedMessage, Storage};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -885,6 +886,9 @@ fn orienting_now(deps: &SequencerDeps) -> std::collections::HashSet<i64> {
 /// router in `3adfc68` — a rustdoc link to a deleted type, which resolves to
 /// nothing and reads as a live sibling.)
 pub struct SequencerDeps {
+    /// The SAME flag the pumps set for an atomic tool; time alone is never a
+    /// proof that a roster mutation can retire its process safely.
+    pub in_atomic_tool: Arc<std::sync::atomic::AtomicBool>,
     /// The session whose turn cycle this task runs. Every ring, cursor and
     /// consensus query is scoped by it.
     pub session_id: Arc<str>,
@@ -1002,6 +1006,8 @@ pub struct SequencerDeps {
 /// capability to write to a process, not a message, and it carries no text.
 #[derive(Debug)]
 pub enum SequencerCommand {
+    /// Host-only live roster scheduling. Separate from user Pause and gates.
+    RosterBoundary(BoundaryCommand),
     /// The turn identified by `epoch` finished — advance the ring.
     ///
     /// **`ending` carries the consensus vote**, and it is a field on this
@@ -1378,6 +1384,7 @@ pub enum SequencerCommand {
 /// field doc. The individual field docs say why for each.
 #[derive(Default)]
 struct RingState {
+    boundary: Option<BoundaryState>,
     /// The turn in flight. `None` is "the cycle has not started", which is also
     /// what `next_active_participant` reads as "reset to the front".
     holder: Option<Participant>,
@@ -1710,7 +1717,9 @@ impl RingState {
                     record_turn_ending(deps, participant_id, ending).await;
                     // The old turn finished; duplicate completions and joins
                     // must not act on it while the release is still replaying.
-                    self.holder = None;
+                    if self.boundary.is_none() {
+                        self.holder = None;
+                    }
                     deps.storage.set_current_turn(&deps.session_id, None).await;
                     debug!(
                         session = %deps.session_id,
@@ -1943,6 +1952,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
     // stash, cleared by a pause (either reading) or by the stash leaving.
     let mut grace_deadline: Option<tokio::time::Instant> = None;
     loop {
+        poll_roster_boundary(&deps, &mut state).await;
         // **The one place this loop waits with a clock** (round 10, B1): while a
         // release is held for a halted holder's completion, `recv` is bounded by
         // `HALT_WIND_DOWN_GRACE`. The completion is expected in milliseconds
@@ -1970,7 +1980,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // re-arm the full grace; cleared while paused and re-armed in full
         // when the pause lifts.
         let tracker_paused = deps.activity.as_ref().is_some_and(|a| a.is_paused());
-        let bounded = state.stashed_release.is_some() && !state.paused && !tracker_paused;
+        let bounded = state.boundary.is_none()
+            && state.stashed_release.is_some() && !state.paused && !tracker_paused;
         if !bounded {
             grace_deadline = None;
         }
@@ -1992,6 +2003,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     tokio::time::timeout_at(deadline, rx.recv())
                         .await
                         .map_err(|_| ())
+                } else if state.boundary.as_ref().is_some_and(|b| !b.abandoned && !b.replaying) {
+                    // Observe cancellation/atomic-tool exit even without a new
+                    // command. This timer never licenses a live turn's retirement.
+                    match tokio::time::timeout(std::time::Duration::from_millis(25), rx.recv()).await {
+                        Ok(command) => Ok(command),
+                        Err(_) => continue,
+                    }
                 } else {
                     Ok(rx.recv().await)
                 }
@@ -2082,7 +2100,50 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // followed by a DELIVERY, and splitting the two would reorder a join
         // against a completion that arrived behind it. Nothing reads `inputs`
         // while paused, so waiting costs nothing.
-        if state.paused && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume) {
+        if let SequencerCommand::RosterBoundary(command) = cmd {
+            handle_roster_boundary(&mut deps, &mut rx, &mut state, command).await;
+            continue;
+        }
+        // A mutation hold is independent of Pause. Process only the signals
+        // that can prove the old generation ended; retain work in wire order.
+        let mut boundary_completion = false;
+        if state.boundary.as_ref().is_some_and(|b| !b.replaying) {
+            match cmd {
+                SequencerCommand::Pause => { state.paused = true; continue; }
+                SequencerCommand::Resume => {
+                    state.paused = false;
+                    release_held(&mut state.held, &mut state.deferred);
+                    continue;
+                }
+                SequencerCommand::TurnComplete { .. } | SequencerCommand::BootEnded => {
+                    boundary_completion = true;
+                }
+                SequencerCommand::HaltDeclared { participant_id } => {
+                    // Observe wind-down now, and replay the stop in order so
+                    // an earlier queued steer cannot clear a later halt.
+                    state.boundary.as_mut().unwrap().queued.push_back(
+                        SequencerCommand::HaltDeclared { participant_id });
+                    boundary_completion = true;
+                }
+                SequencerCommand::GateOpened { ref choice_id } => {
+                    state.boundary.as_mut().unwrap().queued.push_back(
+                        SequencerCommand::GateOpened { choice_id: choice_id.clone() });
+                    boundary_completion = true;
+                }
+                SequencerCommand::PauseReleased { mentions, restarts_rotation } => {
+                    state.pause_releases_pending = state.pause_releases_pending.saturating_sub(1);
+                    state.boundary.as_mut().unwrap().queued.push_back(
+                        SequencerCommand::UserMessage { mentions, restarts_rotation });
+                    continue;
+                }
+                command => {
+                    state.boundary.as_mut().unwrap().queued.push_back(command);
+                    continue;
+                }
+            }
+        }
+        if state.paused && !boundary_completion
+            && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume) {
             debug!(
                 session = %deps.session_id,
                 held = state.held.len() + 1,
@@ -2095,6 +2156,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             state.pause_releases_pending = state.pause_releases_pending.saturating_sub(1);
         }
         match cmd {
+            SequencerCommand::RosterBoundary(_) => unreachable!("handled above the pause gate"),
             SequencerCommand::TurnComplete {
                 participant_id,
                 epoch: completed,
@@ -2214,7 +2276,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
             }
             SequencerCommand::MessageStaged => {
-                if state.holder.is_none() && state.pause_releases_pending == 0 {
+                if state.boundary.is_some() {
+                    // Replay may also contain Unstaged. Let the fence observe
+                    // the final intent before asking AppState to deliver it.
+                    state.staged_pending = true;
+                } else if state.holder.is_none() && state.pause_releases_pending == 0 {
                     // No turn in flight — the ring is parked, yielded, or
                     // between deals. There is no boundary to wait for:
                     // deliver now, exactly as the Send an open box offers.
@@ -2253,6 +2319,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // the epoch does not change: no turn ended, one finally started.
                 let dealt = match state.holder.as_ref().filter(|h| {
                     h.id == participant_id && state.pause_releases_pending == 0
+                        && state.has_live_turn()
                 }) {
                     Some(to) => {
                         deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut state.deferred).await
@@ -2311,7 +2378,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // turn was superseded — must not cut the holder's turn (Pause
                 // is the only interrupt); the latch stops the NEXT deal, which
                 // is the halt taking effect at the boundary.
-                let ends_a_turn = state.holder
+                let ends_a_turn = state.has_live_turn() && state.holder
                     .as_ref()
                     .is_some_and(|h| Some(h.id) == participant_id);
                 debug!(
@@ -2450,7 +2517,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // what goes out is everything unread AS OF THE RESUME, and each
                 // row exactly once: `commit_delivery` moved the cursor past the
                 // prefix that landed and it never rewinds.
-                let dealt = match state.holder.as_ref().filter(|_| state.pause_releases_pending == 0) {
+                let dealt = match state.holder.as_ref().filter(|_| state.pause_releases_pending == 0
+                    && state.has_live_turn() && state.boundary.is_none()) {
                     Some(to) => {
                         deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut state.deferred).await
                     }
@@ -2476,6 +2544,149 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         }
     }
     debug!(session = %deps.session_id, "sequencer: control channel closed; exiting");
+}
+
+/// Replay retained controls under the reservation, then lift it at one fence.
+/// Calls to advance during replay coalesce; no prefix can deal before a later
+/// queued Pause/gate/typed steer has been observed.
+fn replay_roster_boundary(state: &mut RingState) {
+    let boundary = state.boundary.as_mut().expect("reservation exists");
+    boundary.replaying = true;
+    boundary.queued.push_back(SequencerCommand::RosterBoundary(
+        BoundaryCommand::Replayed { token: boundary.token.clone() }));
+    release_held(&mut boundary.queued, &mut state.deferred);
+}
+
+async fn poll_roster_boundary(deps: &SequencerDeps, state: &mut RingState) {
+    use std::sync::atomic::Ordering;
+    let Some(boundary) = state.boundary.as_ref() else { return };
+    if boundary.replaying || boundary.abandoned { return; }
+    if !boundary.alive.load(Ordering::Acquire) {
+        if !boundary.granted {
+            replay_roster_boundary(state);
+        } else {
+            let reason = format!(
+                "Participant change {} lost its worker after reserving the session. \
+                 The session remains stopped to protect a possibly partial change. \
+                 Restart the session to recover the recorded change before continuing.",
+                boundary.operation);
+            state.boundary.as_mut().unwrap().abandoned = true;
+            let _ = crate::core::post_system_notice(&deps.storage, deps.bridge.as_deref(),
+                &deps.session_id, MessageKind::SystemNotice, &reason, None).await;
+            if let Some(bridge) = &deps.bridge {
+                bridge.declare_host_halt(&deps.session_id, reason).await;
+            }
+        }
+        return;
+    }
+    if boundary.granted || state.has_live_turn() || state.winding_down.is_some()
+        || state.boot_hold || state.pause_releases_pending != 0 || !state.deferred.is_empty()
+        || deps.in_atomic_tool.load(Ordering::Acquire) {
+        return;
+    }
+    let open = matches!(deps.storage.get_session(&deps.session_id).await,
+        Ok(Some(session)) if session.closed_at.is_none());
+    let boundary = state.boundary.as_mut().unwrap();
+    if !open {
+        boundary.abandoned = true;
+        if let Some(reply) = boundary.reply.take() {
+            let _ = reply.send(Err("The session is closed or could not be read".into()));
+        }
+        return;
+    }
+    // Keep the completed participant as a POSITION anchor, but make its old
+    // epoch unusable even if a straggling completion arrives during install.
+    state.epoch = state.epoch.wrapping_add(1);
+    state.completed_turn = state.holder.as_ref().map(|p| (p.id, state.epoch));
+    deps.storage.set_current_turn(&deps.session_id, None).await;
+    boundary.granted = true;
+    if let Some(reply) = boundary.reply.take() { let _ = reply.send(Ok(())); }
+}
+
+async fn handle_roster_boundary(
+    deps: &mut SequencerDeps,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    state: &mut RingState,
+    command: BoundaryCommand,
+) {
+    match command {
+        BoundaryCommand::Reserve(request) => {
+            if state.boundary.is_some() {
+                let _ = request.reply.send(Err("Another participant change owns the turn boundary".into()));
+            } else {
+                state.boundary = Some(BoundaryState::new(request));
+                // Pause can have held the old completion. Process its ending
+                // through the reservation without lifting the user's Pause.
+                release_held(&mut state.held, &mut state.deferred);
+            }
+        }
+        BoundaryCommand::Bind { token, participant_id, binding, reply } => {
+            let owned = state.boundary.as_ref().is_some_and(|b| b.owns(&token));
+            let open = matches!(deps.storage.get_session(&deps.session_id).await,
+                Ok(Some(session)) if session.closed_at.is_none());
+            let result = if !owned || !open {
+                Err("No live reservation owns this participant installation".into())
+            } else {
+                if let Some((input, epoch)) = binding {
+                    epoch.store(0, std::sync::atomic::Ordering::Release);
+                    deps.inputs.insert(participant_id, input);
+                    deps.epochs.insert(participant_id, epoch);
+                } else {
+                    deps.inputs.remove(&participant_id);
+                    deps.epochs.remove(&participant_id);
+                }
+                Ok(())
+            };
+            let _ = reply.send(result);
+        }
+        BoundaryCommand::Release { token, reply } => {
+            if state.boundary.as_ref().is_some_and(|b| b.owns(&token)) {
+                state.boundary.as_mut().unwrap().release_reply = Some(reply);
+                replay_roster_boundary(state);
+            } else {
+                let _ = reply.send(Err("This reservation no longer owns the session".into()));
+            }
+        }
+        BoundaryCommand::Replayed { token } => {
+            if !state.boundary.as_ref().is_some_and(|b| b.token == token && b.replaying) {
+                return;
+            }
+            let boundary = state.boundary.take().unwrap();
+            let open = matches!(deps.storage.get_session(&deps.session_id).await,
+                Ok(Some(session)) if session.closed_at.is_none());
+            if open && state.staged_pending && !state.paused && !state.has_live_turn() {
+                // Staging during the hold belongs to THIS completed boundary,
+                // not to the end of a newly dealt peer's turn.
+                halt(deps, &mut state.holder, &mut state.epoch).await;
+                deliver_staged_if_pending(deps, &mut state.staged_pending).await;
+            } else if open {
+                if let Some((user_spoke, restarts_rotation)) = boundary.advance {
+                    if state.paused {
+                        state.held.push_back(SequencerCommand::RosterBoundary(
+                            BoundaryCommand::Continue { user_spoke, restarts_rotation }));
+                    } else {
+                        advance_turn(deps, rx, state, user_spoke, restarts_rotation).await;
+                    }
+                }
+            }
+            if let Some(reply) = boundary.release_reply {
+                let _ = reply.send(if open { Ok(()) } else { Err("The session closed during the change".into()) });
+            }
+        }
+        BoundaryCommand::Continue { user_spoke, restarts_rotation } => {
+            if state.paused {
+                state.held.push_back(SequencerCommand::RosterBoundary(
+                    BoundaryCommand::Continue { user_spoke, restarts_rotation }));
+            } else if !state.has_live_turn() {
+                if state.staged_pending {
+                    halt(deps, &mut state.holder, &mut state.epoch).await;
+                    deliver_staged_if_pending(deps, &mut state.staged_pending).await;
+                } else {
+                    advance_turn(deps, rx, state, user_spoke, restarts_rotation).await;
+                }
+            }
+        }
+    }
 }
 
 /// Move everything a pause held onto the FRONT of the deferred queue, in
@@ -2540,6 +2751,10 @@ async fn release_ring(
     mut mentions: Vec<i64>,
     mut restarts_rotation: bool,
 ) {
+    if let Some(boundary) = state.boundary.as_mut().filter(|b| !b.replaying) {
+        boundary.queued.push_back(SequencerCommand::UserMessage { mentions, restarts_rotation });
+        return;
+    }
     if state.pause_releases_pending != 0 {
         state.summons.queue.extend(mentions);
         state.pause_release_restarts |= restarts_rotation;
@@ -2723,6 +2938,10 @@ async fn advance_turn(
     user_spoke: bool,
     restarts_rotation: bool,
 ) {
+    if let Some(boundary) = state.boundary.as_mut() {
+        boundary.retain_advance(user_spoke, restarts_rotation);
+        return;
+    }
     // State changes held by Pause replay in order, but only their releasing
     // message may deal. This also covers a late orientation or a retry summons
     // in that replay, not just the interrupted holder's completion.
@@ -4836,6 +5055,7 @@ pub fn turn_ending(peer_ack: bool, peer_ack_final: bool, passed: bool, body: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("roster_boundary_tests.rs");
     use crate::agents::OutgoingUserMessage;
     use crate::policy::session_policy::write_session_policy;
     use crate::policy::{Policy, SessionPolicy};
@@ -5184,6 +5404,7 @@ mod tests {
             seats.push(Seat { id, rx });
         }
         let deps = SequencerDeps {
+            in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_id: "s1".into(),
             storage: storage.clone(),
             inputs,
@@ -12559,6 +12780,7 @@ mod tests {
         let before = storage.cursor_for(first).await.unwrap();
 
         let deps = SequencerDeps {
+            in_atomic_tool: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_id: session.as_str().into(),
             storage: storage.clone(),
             inputs,

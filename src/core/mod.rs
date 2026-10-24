@@ -17,6 +17,7 @@ pub mod pump;
 pub mod ipav;
 pub mod loopback;
 pub mod sequencer;
+pub mod roster_boundary;
 pub mod session;
 pub mod state;
 pub mod telemetry;

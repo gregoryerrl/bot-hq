@@ -115,8 +115,11 @@ model side by side. Migration 0102 applies on first launch.
   last active agent are refused. Roster preparation and rollback are now
   transactional; close/reopen settles unfinished changes, and failed additions
   retain their history. A conflicting newer edit is preserved and recorded
-  instead of preventing a close. Runtime execution and controls are being connected;
-  these storage operations are not yet exposed as live session controls.
+  instead of preventing a close. The host can now reserve a completed turn,
+  keeping Pause and queued directions intact while replacing the participant's
+  input and turn identity together. Loss of that reservation's worker leaves a
+  recovery recap. Runtime execution and controls are still being connected;
+  these operations are not yet exposed as live session controls.
 - **Auto-allowed publications still receive review.** Both connectors and
   `action_gate` queue unread publication content for the reviewer, then the
   background worker runs it without a user approval card. The queue survives

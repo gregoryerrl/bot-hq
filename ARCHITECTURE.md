@@ -1651,8 +1651,15 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   a newer external edit is preserved and recorded as a failed change rather
   than blocking closure. Database errors are not acknowledged as recovery.
   cold-start recovery rolls back applying work instead of replaying it.
-  Runtime authorization, safe-boundary/process execution, startup recovery
-  wiring, context transfer and the UI remain integration work.
+  The host can reserve the turn ring before claim: it waits for the current
+  completion, halt wind-down, boot and the shared atomic-tool flag; preserves
+  queued steering and Pause; installs input and epoch together without a deal;
+  and releases once. A cancelled waiter resumes normally; loss of an acknowledged
+  owner keeps the ring stopped with a recap. Reservations belong to one ring
+  instance and preserve the completed member's position when it is removed.
+  Runtime authorization/process execution, startup recovery wiring, context
+  transfer and the UI remain integration work; no user control invokes these
+  storage or scheduling primitives yet.
 - `participant_cursors` (participant → last read message id) and
   `participant_deliveries` (participant, message_id, delivered_at,
   withheld_reason) — the ring's per-participant read position and its
