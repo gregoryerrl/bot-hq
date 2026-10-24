@@ -521,6 +521,8 @@ mod tests {
             run_not_before: Some("2026-10-13T01:18:00.000Z".into()),
             run_not_after: Some("2026-10-13T01:24:00.000Z".into()),
             run_started_at: None,
+            approval_required: true,
+            reviewed_at: None,
         };
         let view: SessionTrayView = entry.into();
         assert_eq!(view.urgent_reason.as_deref(), Some("prod budget overrun"));

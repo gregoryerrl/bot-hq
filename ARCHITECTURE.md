@@ -1327,6 +1327,16 @@ runs in four places:
 - `action_gate`, before it parks or runs, under `gate_shell`;
 - `terminal_exec`, under the terminal's `$SHELL`.
 
+**Review authority storage (0104, automatic publication wiring in progress).**
+`session_tray.approval_required` defaults true for existing and new user gates.
+An automatic publish opts out at insertion, and `reviewed_at` is bound to its
+current body row; a revision clears it and a stronger request can require user
+approval, never remove that requirement. Automatic execution has a separate
+atomic claim checking that proof, body identity, session openness and explicit
+approval metadata. Its `auto_running` / `auto_resolved` states retain NULL user
+answer fields. The hook and MCP entry points still use their existing behavior
+until the automatic-run worker is connected.
+
 **A run window lets the user approve any time while the command waits for its
 slot** (feedback #66a, the user's pick). `action_gate`'s `run_not_after`
 (required; RFC3339, at most `RUN_WINDOW_MAX_AHEAD_SECS` = 24 h ahead) and

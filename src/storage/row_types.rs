@@ -398,7 +398,18 @@ pub struct SessionTrayEntry {
     #[serde(default)]
     #[sqlx(default)]
     pub run_started_at: Option<String>,
+    /// Whether execution needs a human gate answer (0104). False is reserved
+    /// for outward publishes authorized by auto_allow after content review.
+    /// Old serialized rows remain approval-required, never implicitly auto.
+    #[serde(default = "approval_required_by_default")]
+    pub approval_required: bool,
+    /// When the current body row cleared review for an automatic run (0104).
+    /// Reposting a revised body invalidates this proof.
+    #[serde(default)]
+    pub reviewed_at: Option<String>,
 }
+
+fn approval_required_by_default() -> bool { true }
 
 impl SessionTrayEntry {
     /// Decode `options_json` into a Vec<String>. Returns None for non-choice

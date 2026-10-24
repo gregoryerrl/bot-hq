@@ -10,7 +10,8 @@ use super::*;
 const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
      body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
-     run_timeout_secs, pinned_scripts, urgent_reason, run_not_before, run_not_after, run_started_at";
+     run_timeout_secs, pinned_scripts, urgent_reason, run_not_before, run_not_after, run_started_at, \
+     approval_required, reviewed_at";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -264,13 +265,28 @@ impl Storage {
         prompt: &str,
         command: &str,
     ) -> Result<i64> {
+        self.insert_queued_gate_with_approval(session_id, choice_id, agent, prompt, command, true).await
+    }
+
+    /// The authority is stored in the INSERT, before a reviewer can settle
+    /// the row. A later flag flip could race a fast review or downgrade an
+    /// existing user gate. This is host state, never a tool-supplied flag.
+    pub async fn insert_queued_gate_with_approval(
+        &self,
+        session_id: &str,
+        choice_id: &str,
+        agent: &str,
+        prompt: &str,
+        command: &str,
+        approval_required: bool,
+    ) -> Result<i64> {
         // F10: the card's prompt is redacted like every tray prompt; the
         // command is stored as written (see `insert_tray_entry`).
         let prompt = crate::policy::secret_scan::redact(prompt);
         let res = sqlx::query(
             "INSERT INTO session_tray \
-                (session_id, choice_id, agent, kind, prompt, options_json, command_text, asked_at, status) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (session_id, choice_id, agent, kind, prompt, options_json, command_text, asked_at, status, approval_required) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(session_id)
         .bind(choice_id)
@@ -281,6 +297,7 @@ impl Storage {
         .bind(command)
         .bind(now_utc())
         .bind(TRAY_STATUS_QUEUED)
+        .bind(approval_required)
         .execute(&self.pool)
         .await
         .with_context(|| format!("queueing outward gate {choice_id} for session {session_id}"))?;
@@ -290,7 +307,8 @@ impl Storage {
     /// Record which posted body row a queued gate waits on.
     pub async fn set_tray_body_row(&self, choice_id: &str, body_row_id: i64) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_tray SET body_row_id = ? WHERE choice_id = ? AND status = 'queued'",
+            "UPDATE session_tray SET body_row_id = ?, reviewed_at = NULL \
+             WHERE choice_id = ? AND status = 'queued' AND run_started_at IS NULL",
         )
         .bind(body_row_id)
         .bind(choice_id)
@@ -298,6 +316,63 @@ impl Storage {
         .await
         .with_context(|| format!("recording the body row of queued gate {choice_id}"))?;
         Ok(res.rows_affected())
+    }
+
+    /// A stronger request can require user approval, never remove it. It
+    /// invalidates automatic review authority before a run can be claimed.
+    pub async fn require_queued_gate_approval(&self, choice_id: &str) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET approval_required = 1, reviewed_at = NULL \
+             WHERE choice_id = ? AND status = 'queued' AND run_started_at IS NULL",
+        ).bind(choice_id).execute(&self.pool).await
+            .context("requiring user approval for queued gate")?;
+        Ok(res.rows_affected())
+    }
+
+    /// Revoke the old body BEFORE replacing its hashes/pins and posting its
+    /// revision. Clearing just the timestamp would let a stale settlement
+    /// re-authorize the old body while the replacement is still being built.
+    /// The re-poster must stop when this loses to a run claim or newer revision.
+    pub async fn begin_queued_gate_revision(&self, choice_id: &str, body_row_id: i64) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET body_row_id = NULL, reviewed_at = NULL \
+             WHERE choice_id = ? AND body_row_id = ? AND status = 'queued' AND run_started_at IS NULL",
+        ).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+            .context("revoking queued gate review before revision")?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Record review of exactly the body that the caller checked. A concurrent
+    /// revision, stronger approval requirement or second settlement loses.
+    pub async fn mark_auto_gate_reviewed(&self, choice_id: &str, body_row_id: i64) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET reviewed_at = ? \
+             WHERE choice_id = ? AND status = 'queued' AND kind = 'approval' \
+               AND approval_required = 0 AND body_row_id = ? AND reviewed_at IS NULL \
+               AND run_started_at IS NULL AND run_refusal IS NULL \
+               AND command_text IS NOT NULL AND result_row_id IS NULL \
+               AND exec_kind IS NULL AND urgent_reason IS NULL \
+               AND run_not_before IS NULL AND run_not_after IS NULL",
+        ).bind(now_utc()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+            .context("recording review authority for automatic gate")?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Durable work for the automatic-run worker, including after restart.
+    /// No user answer is manufactured; ready rows retain NULL picked_option
+    /// and answered_at. Closed sessions are never runnable.
+    pub async fn reviewed_auto_gates(&self) -> Result<Vec<SessionTrayEntry>> {
+        sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray \
+             WHERE status = 'queued' AND kind = 'approval' AND approval_required = 0 \
+               AND reviewed_at IS NOT NULL AND run_started_at IS NULL \
+               AND run_refusal IS NULL AND result_row_id IS NULL \
+               AND command_text IS NOT NULL \
+               AND exec_kind IS NULL AND urgent_reason IS NULL \
+               AND run_not_before IS NULL AND run_not_after IS NULL \
+               AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_tray.session_id AND s.closed_at IS NULL) \
+             ORDER BY id"
+        )).fetch_all(&self.pool).await.context("reading reviewed automatic gates")
     }
 
     /// Every QUEUED outward gate in a session, oldest-first.
@@ -339,7 +414,7 @@ impl Storage {
     /// call did the flip, so a racing second settlement cannot double-latch.
     pub async fn promote_queued_gate(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_tray SET status = 'pending', asked_at = ? \
+            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL \
              WHERE choice_id = ? AND status = 'queued'",
         )
         .bind(now_utc())
@@ -438,13 +513,31 @@ impl Storage {
         let res = sqlx::query(
             "UPDATE session_tray SET run_started_at = ? \
              WHERE choice_id = ? AND run_started_at IS NULL \
-               AND result_row_id IS NULL AND run_refusal IS NULL",
+               AND result_row_id IS NULL AND run_refusal IS NULL AND approval_required = 1",
         )
         .bind(now_utc())
         .bind(choice_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("claiming the run of gate {choice_id}"))?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// A separate claim for policy-authorized work. The authority and exact
+    /// reviewed body are rechecked in the UPDATE: a racing stronger request
+    /// cannot turn an automatic worker into a user-approved executor.
+    pub async fn claim_auto_gate_run(&self, choice_id: &str, body_row_id: i64) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET run_started_at = ?, status = 'auto_running' \
+             WHERE choice_id = ? AND body_row_id = ? AND status = 'queued' \
+               AND kind = 'approval' AND approval_required = 0 AND reviewed_at IS NOT NULL \
+               AND command_text IS NOT NULL AND run_started_at IS NULL \
+               AND result_row_id IS NULL AND run_refusal IS NULL \
+               AND exec_kind IS NULL AND urgent_reason IS NULL \
+               AND run_not_before IS NULL AND run_not_after IS NULL \
+               AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_tray.session_id AND s.closed_at IS NULL)",
+        ).bind(now_utc()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+            .context("claiming reviewed automatic gate")?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -513,7 +606,9 @@ impl Storage {
     /// Record that an APPROVED gate was refused at run time (0085) — so
     /// `gate_status` says "approved but NOT RUN" instead of "executed".
     pub async fn set_tray_run_refusal(&self, choice_id: &str, refusal: &str) -> Result<()> {
-        sqlx::query("UPDATE session_tray SET run_refusal = ? WHERE choice_id = ?")
+        sqlx::query("UPDATE session_tray SET run_refusal = ?, \
+            status = CASE WHEN status = 'auto_running' THEN 'auto_resolved' ELSE status END \
+            WHERE choice_id = ?")
             .bind(refusal)
             .bind(choice_id)
             .execute(&self.pool)
@@ -534,7 +629,9 @@ impl Storage {
         ran_ms: u64,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE session_tray SET result_row_id = ?, exit_code = ?, ran_ms = ? WHERE choice_id = ?",
+            "UPDATE session_tray SET result_row_id = ?, exit_code = ?, ran_ms = ?, \
+             status = CASE WHEN status = 'auto_running' THEN 'auto_resolved' ELSE status END \
+             WHERE choice_id = ?",
         )
         .bind(result_row_id)
         .bind(exit_code)
@@ -866,6 +963,139 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn automatic_gate(s: &Storage, id: &str) -> i64 {
+        let body = s.post_to_channel("s-auto", "system", None, "system_notice", "review this body", None)
+            .await.unwrap().message_id();
+        s.insert_queued_gate_with_approval("s-auto", id, "hands", "fixture", "publish fixture", false)
+            .await.unwrap();
+        s.set_tray_body_row(id, body).await.unwrap();
+        body
+    }
+
+    #[tokio::test]
+    async fn automatic_review_never_inherits_authority_from_legacy_rows() {
+        // Exercise the actual migration over a row that predates its columns.
+        let old = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql("CREATE TABLE session_tray (id INTEGER PRIMARY KEY); INSERT INTO session_tray (id) VALUES (1);")
+            .execute(&old).await.unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/0104_tray_review_authority.sql"))
+            .execute(&old).await.unwrap();
+        let migrated: (bool, Option<String>) = sqlx::query_as("SELECT approval_required, reviewed_at FROM session_tray WHERE id = 1")
+            .fetch_one(&old).await.unwrap();
+        assert_eq!(migrated, (true, None));
+        assert!(sqlx::query("UPDATE session_tray SET approval_required = 2").execute(&old).await.is_err());
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-auto", "fixture", None).await.unwrap();
+        s.insert_queued_gate("s-auto", "old", "hands", "fixture", "publish fixture").await.unwrap();
+        let row = s.get_tray_entry("old").await.unwrap().unwrap();
+        assert!(row.approval_required);
+        let mut old_json = serde_json::to_value(&row).unwrap();
+        old_json.as_object_mut().unwrap().remove("approval_required");
+        old_json.as_object_mut().unwrap().remove("reviewed_at");
+        let old_row: SessionTrayEntry = serde_json::from_value(old_json).unwrap();
+        assert!(old_row.approval_required, "old serialized rows fail closed too");
+        assert!(!s.mark_auto_gate_reviewed("old", 1).await.unwrap());
+        assert!(s.reviewed_auto_gates().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn automatic_review_is_bound_to_the_body_and_a_stronger_request_wins() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-auto", "fixture", None).await.unwrap();
+        let body = automatic_gate(&s, "auto").await;
+        assert!(!s.claim_auto_gate_run("auto", body).await.unwrap(), "unread auto publish cannot run");
+        assert!(!s.mark_auto_gate_reviewed("auto", body + 1).await.unwrap());
+        assert!(s.mark_auto_gate_reviewed("auto", body).await.unwrap());
+        assert!(!s.mark_auto_gate_reviewed("auto", body).await.unwrap(), "one settlement wins");
+        assert_eq!(s.reviewed_auto_gates().await.unwrap().len(), 1);
+        assert!(s.begin_queued_gate_revision("auto", body).await.unwrap());
+        assert!(!s.mark_auto_gate_reviewed("auto", body).await.unwrap(), "stale review loses while the revision is being built");
+        assert!(!s.claim_auto_gate_run("auto", body).await.unwrap());
+        let revision = s.post_to_channel("s-auto", "system", None, "system_notice", "revised body", None)
+            .await.unwrap().message_id();
+        s.set_tray_body_row("auto", revision).await.unwrap();
+        assert!(!s.claim_auto_gate_run("auto", body).await.unwrap(), "revision invalidates review");
+        assert!(!s.mark_auto_gate_reviewed("auto", body).await.unwrap(), "stale review cannot authorize a revision");
+        assert!(s.mark_auto_gate_reviewed("auto", revision).await.unwrap());
+        assert_eq!(s.require_queued_gate_approval("auto").await.unwrap(), 1);
+        assert!(s.reviewed_auto_gates().await.unwrap().is_empty());
+        assert!(!s.claim_auto_gate_run("auto", revision).await.unwrap(), "a stale automatic worker loses to a stronger request");
+        assert!(!s.mark_auto_gate_reviewed("auto", revision).await.unwrap());
+        assert_eq!(s.promote_queued_gate("auto").await.unwrap(), 1);
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert!(row.approval_required && row.reviewed_at.is_none());
+        assert_eq!(row.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn automatic_claim_is_once_and_never_manufactures_a_user_answer() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-auto", "fixture", None).await.unwrap();
+        let body = automatic_gate(&s, "auto").await;
+        s.mark_auto_gate_reviewed("auto", body).await.unwrap();
+        assert!(!s.claim_gate_run("auto").await.unwrap(), "the human-approval executor cannot claim automatic work");
+        let (a, b) = tokio::join!(s.claim_auto_gate_run("auto", body), s.claim_auto_gate_run("auto", body));
+        assert_eq!(usize::from(a.unwrap()) + usize::from(b.unwrap()), 1);
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert_eq!(row.status, "auto_running");
+        assert!(!s.begin_queued_gate_revision("auto", body).await.unwrap());
+        assert!(row.picked_option.is_none() && row.answered_at.is_none());
+        assert_eq!(s.set_tray_body_row("auto", body).await.unwrap(), 0, "a running body is frozen");
+        assert_eq!(s.require_queued_gate_approval("auto").await.unwrap(), 0);
+        assert!(s.pending_gate_ids("s-auto").await.unwrap().is_empty());
+        assert!(s.reviewed_auto_gates().await.unwrap().is_empty());
+        s.set_tray_run_result("auto", Some(body), Some(0), 12).await.unwrap();
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert_eq!(row.status, "auto_resolved");
+        assert!(row.picked_option.is_none() && row.answered_at.is_none());
+        assert!(!s.has_pending_tray("s-auto").await.unwrap());
+        assert!(!s.claim_auto_gate_run("auto", body).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn automatic_work_survives_restart_but_never_repeats_an_interrupted_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let s = Storage::open(&path).await.unwrap();
+        s.create_session("s-auto", "fixture", None).await.unwrap();
+        let body = automatic_gate(&s, "auto").await;
+        s.mark_auto_gate_reviewed("auto", body).await.unwrap();
+        s.pool().close().await;
+        let s = Storage::open(&path).await.unwrap();
+        assert_eq!(s.reviewed_auto_gates().await.unwrap().len(), 1);
+        assert!(s.claim_auto_gate_run("auto", body).await.unwrap());
+        s.pool().close().await;
+        let s = Storage::open(&path).await.unwrap();
+        assert!(s.reviewed_auto_gates().await.unwrap().is_empty());
+        assert_eq!(s.interrupted_gate_runs().await.unwrap().len(), 1);
+        s.set_tray_run_refusal("auto", "interrupted; outcome unknown").await.unwrap();
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert_eq!(row.status, "auto_resolved");
+        assert!(row.picked_option.is_none());
+        assert!(s.interrupted_gate_runs().await.unwrap().is_empty());
+        assert!(!s.has_pending_tray("s-auto").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn automatic_claim_rechecks_closure_and_explicit_approval_metadata() {
+        for restriction in ["closed", "prod_read", "urgent", "window"] {
+            let s = Storage::memory().await.unwrap();
+            s.create_session("s-auto", "fixture", None).await.unwrap();
+            let body = automatic_gate(&s, "auto").await;
+            s.mark_auto_gate_reviewed("auto", body).await.unwrap();
+            match restriction {
+                "closed" => { sqlx::query("UPDATE sessions SET closed_at = 'now' WHERE id = 's-auto'").execute(s.pool()).await.unwrap(); }
+                "prod_read" => { s.set_tray_exec_kind("auto", "prod_read").await.unwrap(); }
+                "urgent" => { s.set_tray_urgent_reason("auto", "fixture").await.unwrap(); }
+                "window" => { s.set_tray_run_window("auto", "2099-01-01T00:00:00Z", "2099-01-02T00:00:00Z").await.unwrap(); }
+                _ => unreachable!(),
+            }
+            assert!(s.reviewed_auto_gates().await.unwrap().is_empty(), "{restriction}");
+            assert!(!s.claim_auto_gate_run("auto", body).await.unwrap(), "{restriction}");
+        }
+    }
 
     async fn pending_count(s: &Storage, session_id: &str) -> usize {
         s.tray_entries_for_session(session_id)
