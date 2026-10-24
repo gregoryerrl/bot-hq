@@ -363,6 +363,13 @@ just completed with means every later completion carries a retired number, is
 discarded, and the ring stops on a participant it is waiting on. There is no hold queue and no forward that can be lost:
 policies gate delivery, never persistence.
 
+An interrupted completion carries the host's interrupt epoch even when the
+model produced no earlier event. Both connectors preserve their explicit abort
+reason; a completion cannot claim a newer deal just because it arrived after
+that deal. Busy marks also belong to an epoch, so an old completion or an empty
+read clears only its own mark. Interrupted, stale, or failed reviewer turns do
+not settle queued publishes; the next successful current turn can do so.
+
 **A turn nobody dealt stays unbound, and is stopped while someone else holds the
 ring.** claude-code starts a turn by itself when a background task it ran
 finishes. Its events are stragglers: it opens no epoch, and its completion leaves

@@ -1394,6 +1394,58 @@ pub async fn pump_agent(
             }
             continue;
         }
+        let interrupted_completion = matches!(
+            &event,
+            AgentEvent::TurnComplete { stop_reason: Some(reason), .. }
+                if matches!(reason.as_str(), "interrupted" | "aborted_streaming" | "aborted_tools")
+        );
+        if interrupted_completion && !cfg.is_booting() {
+            // An interrupted thinking turn can produce its FIRST event after
+            // a newer deal. The interrupt was stamped before that deal, so its
+            // completion must carry that stamp, not the live cell we read now.
+            let stamp = cfg.interrupted_epoch.load(Ordering::Acquire);
+            let pending_stamp = stamp != crate::agents::NO_INTERRUPT_EPOCH
+                && last_completed_epoch.is_none_or(|last| stamp > last);
+            let interrupted = if pending_stamp {
+                // One interrupt completion consumes this stamp. Do not let a
+                // later connector-internal abort inherit an older host preempt;
+                // CAS leaves a newer concurrent interrupt untouched.
+                let _ = cfg.interrupted_epoch.compare_exchange(
+                    stamp,
+                    crate::agents::NO_INTERRUPT_EPOCH,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+                stamp
+            } else {
+                // A connector-internal interrupt (for example its hook check)
+                // has no host preempt stamp. Keep an already-bound turn; with
+                // none bound, do not invent ownership of a newer generation.
+                turn_epoch.unwrap_or(0)
+            };
+            if turn_epoch.is_some_and(|bound| bound != interrupted) {
+                // Already seeing the new turn's output: preserve its buffer,
+                // tools and flags. Only report the old completion to the ring
+                // so a pending wind-down can finish; it cannot settle a review.
+                if let AgentEvent::TurnComplete { context, .. } = &event {
+                    if let Err(e) = storage.record_context_reading(&cfg.session_id, &cfg.slug, context).await {
+                        warn!(?e, "persisting interrupted context reading");
+                    }
+                }
+                if let (Some(seq), Some(participant_id)) = (&cfg.sequencer_tx, cfg.participant_id) {
+                    if seq.send(crate::core::sequencer::SequencerCommand::TurnComplete {
+                        participant_id,
+                        epoch: interrupted,
+                        ending: crate::core::sequencer::TurnEnding::Spoke,
+                    }).await.is_err() {
+                        warn!(agent = %cfg.slug, "interrupted completion dropped: ring closed");
+                    }
+                }
+                debug!(agent = %cfg.slug, interrupted, current = ?turn_epoch, "late interrupt completion left the newer pump turn intact");
+                continue;
+            }
+            turn_epoch = Some(interrupted);
+        }
         // First event of a turn: bind it to whichever epoch the sequencer had
         // handed out when the agent started speaking. Deliberately BEFORE the
         // match, so every event kind opens a turn — the agent may lead with a
@@ -1778,12 +1830,16 @@ pub async fn pump_agent(
                 api_error_status,
                 ..
             } => {
+                let completed_epoch = turn_epoch;
+                let current_completion = cfg.turn_epoch.as_ref().is_none_or(|cell| {
+                    completed_epoch.is_some_and(|epoch| epoch != 0 && epoch == cell.load(Ordering::Acquire))
+                });
                 // Context occupancy rides the turn-complete event because that
                 // is the only place claude-code reports `contextWindow`.
                 // Publish it BEFORE the error branch below: a failed turn still
                 // consumed context, and the meter going stale exactly when a
                 // session starts erroring would hide the most useful reading.
-                if let (Some(c), Some(bridge)) = (context.usable(), &cfg.bridge) {
+                if let (true, Some(c), Some(bridge)) = (current_completion, context.usable(), &cfg.bridge) {
                     bridge.notify_agent_context(
                         cfg.session_id.to_string(),
                         &cfg.slug,
@@ -1964,7 +2020,7 @@ pub async fn pump_agent(
                 // account carries a limit mark: the account answered, so a
                 // mark the turn postdates is cleared (0091). A turn that was
                 // already in flight when the mark was set leaves it.
-                if !is_error && cfg.bills_subscription {
+                if !is_error && !interrupted_completion && current_completion && cfg.bills_subscription {
                     if let Some(started) = turn_started_at {
                         clear_account_mark_after(&storage, &cfg, started).await;
                     }
@@ -2007,8 +2063,8 @@ pub async fn pump_agent(
                     let stamp = cfg
                         .interrupted_epoch
                         .load(std::sync::atomic::Ordering::Acquire);
-                    let host_interrupted =
-                        stamp != crate::agents::NO_INTERRUPT_EPOCH && Some(stamp) == this_turn;
+                    let host_interrupted = interrupted_completion
+                        || (stamp != crate::agents::NO_INTERRUPT_EPOCH && Some(stamp) == this_turn);
                     // The errored turn's last line — what the halt banner
                     // quotes, and (round 12) what the retry ladder classifies.
                     // Feedback #18: an errored turn with no text used to read
@@ -2310,7 +2366,7 @@ pub async fn pump_agent(
                     // before the next deal is decided. The bridge skips rows
                     // whose reviewer is someone else and rows whose body this
                     // participant's cursor has not passed.
-                    if let Some(bridge) = &cfg.bridge {
+                    if let (true, Some(bridge)) = (current_completion && !interrupted_completion && !is_error, &cfg.bridge) {
                         bridge
                             .settle_queued_outward(&cfg.session_id, participant_id)
                             .await;
@@ -2343,7 +2399,7 @@ pub async fn pump_agent(
                 // SECOND stray turn in a row bound the retired epoch, and the
                 // self-halt that ended it read as an error (s-b175d9c0,
                 // 2026-09-25 07:19–07:20Z).
-                last_completed_epoch = turn_epoch.or(last_completed_epoch);
+                last_completed_epoch = completed_epoch.filter(|epoch| *epoch != 0).or(last_completed_epoch);
                 turn_epoch = None;
                 // The clock for the NEXT turn's "how long until it spoke"
                 // starts here — the ring hands the next turn out within
@@ -2360,7 +2416,7 @@ pub async fn pump_agent(
                 // for the sub-second gap between two turns.
                 {
                     if let Some(activity) = &cfg.activity {
-                        activity.set_busy_slug(&cfg.slug, false);
+                        activity.clear_busy_for_epoch(&cfg.slug, completed_epoch);
                     }
                 }
                 // Batch 7: turn done → no tools can still be in flight; reset so a
@@ -2905,28 +2961,118 @@ mod tests {
         let _ = task.await;
     }
 
-    /// The BOOT TIMEOUT path, which is where D21's hard part actually bites.
-    ///
-    /// D21 §4: the ring starts *"when every participant has finished orienting —
-    /// or a timeout fires, because one slow agent must not hold the session"*.
-    /// So a participant CAN still be mid-boot when the ring hands out turn one,
-    /// and that is the case the epoch-bind guard exists for.
-    ///
-    /// Without it the pump binds `turn_epoch = Some(0)` on its first boot event.
-    /// `turn_epoch` is only re-read when it is `None`, so when the real turn
-    /// arrives the pump is still holding 0 — and every completion from then on
-    /// carries an epoch the ring never issued and discards. That is the
-    /// `s-206e8921` wedge exactly, reached through boot instead of through a
-    /// straggler.
-    /// **A respawned participant that speaks before any deal binds no turn**
-    /// (EYES 211957d6; the test bench's Astra HANDS, 2026-10-21). Not a boot:
-    /// the view or the relaunch respawned the roster, and a Codex process
-    /// sends its `Init` and spawn notices at once. Those must not open a
-    /// turn on the cell's initial 0 — the first real deal's completion would
-    /// carry 0 and the ring would discard it, one stalled turn per respawn.
-    /// The deal comes; the completion carries ITS epoch.
+    /// The s-fc4651c9 thinking-turn race, through each real connector translator.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_interrupted_codex_completion_before_first_output_keeps_its_old_epoch() {
+        use crate::agents::codex::client::{Incoming, Notification};
+        let mut translator = crate::agents::codex::events::Translator::new("test-model", "");
+        let events = translator.translate(&Incoming::Notification(Notification {
+            method: "turn/completed".into(),
+            params: serde_json::json!({"turn": {"id": "old-turn", "status": "interrupted", "error": null}}),
+        }));
+        assert_interrupted_completion_keeps_its_old_epoch(events).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_interrupted_claude_completion_before_first_output_keeps_its_old_epoch() {
+        for reason in ["aborted_streaming", "aborted_tools"] {
+            let event = serde_json::from_value::<crate::agents::StreamEvent>(serde_json::json!({
+                "type": "result", "is_error": true, "stop_reason": null,
+                "terminal_reason": reason, "subtype": "error_during_execution",
+            })).unwrap();
+            let events = crate::agents::events::translate(event, &mut None);
+            assert_interrupted_completion_keeps_its_old_epoch(events).await;
+        }
+    }
+
+    async fn assert_interrupted_completion_keeps_its_old_epoch(events: Vec<AgentEvent>) {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        // The old model turn was still thinking when interrupted at epoch 1.
+        // Its result arrives only after the ring has already dealt epoch 2.
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(2)));
+        cfg.interrupted_epoch.store(1, Ordering::Release);
+        let activity = crate::core::ActivityTracker::new(
+            "s1", Arc::new(AtomicBool::new(false)), SignalingBridge::new(), vec!["hands".into()],
+        );
+        activity.mark_busy_for_epoch("hands", 2);
+        cfg.activity = Some(Arc::clone(&activity));
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        for event in events {
+            ev_tx.send(event).await.unwrap();
+        }
+        assert_eq!(next_epoch(&mut ring_rx).await, 1, "an old interrupted result cannot finish the new deal");
+        assert!(activity.is_busy_slug("hands"), "the old completion cannot mark the new turn idle");
+        ev_tx.send(AgentEvent::Text("the new task is now running".into())).await.unwrap();
+        // A later connector-internal abort has no new host interrupt stamp.
+        // It still belongs to the new turn, not the consumed old interrupt.
+        let mut new_end = turn_end();
+        if let AgentEvent::TurnComplete { stop_reason, .. } = &mut new_end {
+            *stop_reason = Some("interrupted".into());
+        }
+        ev_tx.send(new_end).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 2, "the actual new turn keeps its own completion");
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_late_interrupted_completion_preserves_the_new_turns_tools() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(2)));
+        cfg.interrupted_epoch.store(1, Ordering::Release);
+        let atomic = Arc::new(AtomicBool::new(false));
+        cfg.in_atomic_tool = Some(Arc::clone(&atomic));
+        let (ev_tx, ev_rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+        ev_tx.send(AgentEvent::ToolUse {
+            id: "new-commit".into(), name: "Bash".into(),
+            input: serde_json::json!({"command": "git commit -m fixture"}),
+        }).await.unwrap();
+        for _ in 0..200 {
+            if atomic.load(Ordering::Acquire) { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(atomic.load(Ordering::Acquire), "the new turn opened before the old completion");
+        let mut old_end = turn_end();
+        if let AgentEvent::TurnComplete { stop_reason, .. } = &mut old_end {
+            *stop_reason = Some("interrupted".into());
+        }
+        ev_tx.send(old_end).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 1);
+        assert!(atomic.load(Ordering::Acquire), "a stale completion cannot clear the new atomic tool");
+        ev_tx.send(turn_end()).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 2);
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn silent_success_and_failure_do_not_inherit_an_old_interrupt_stamp() {
+        for is_error in [false, true] {
+            let (storage, state) = setup().await;
+            let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+            cfg.turn_epoch = Some(Arc::new(std::sync::atomic::AtomicU64::new(2)));
+            cfg.interrupted_epoch.store(1, Ordering::Release);
+            let (ev_tx, ev_rx) = mpsc::channel(8);
+            let task = tokio::spawn(pump_agent(cfg, ev_rx, storage, state));
+            let mut end = turn_end();
+            if let AgentEvent::TurnComplete { is_error: error, .. } = &mut end {
+                *error = is_error;
+            }
+            ev_tx.send(end).await.unwrap();
+            assert_eq!(next_epoch(&mut ring_rx).await, 2, "genuine silent completion, is_error={is_error}");
+            drop(ev_tx);
+            task.await.unwrap();
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn a_respawned_participants_init_before_any_deal_binds_no_turn() {
+        // EYES 211957d6: Init/notices before the first deal must not bind epoch
+        // zero and make the later real completion disappear after a respawn.
         let (storage, state) = setup().await;
         let (mut cfg, mut ring_rx) = cfg_with_ring("eyes");
         let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -2968,6 +3114,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn a_participant_still_booting_when_the_ring_starts_binds_the_real_epoch() {
+        // D21's timeout can start the ring while a participant is still reading.
+        // Boot output must not bind epoch zero (the s-206e8921 wedge).
         let (storage, state) = setup().await;
         let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
         let cell = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -5389,14 +5537,33 @@ mod tests {
         storage.commit_delivery(eyes, &[(body.message_id(), None)]).await.unwrap();
         while ring_rx.try_recv().is_ok() {}
 
+        let epoch = Arc::new(std::sync::atomic::AtomicU64::new(2));
         let cfg = PumpConfig {
             bridge: Some(Arc::clone(&bridge)),
             participant_id: Some(eyes),
             sequencer_tx: Some(ring_tx),
+            turn_epoch: Some(Arc::clone(&epoch)),
+            interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             ..fast_cfg("eyes")
         };
         let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(8);
         let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        ev_tx.send(AgentEvent::TurnComplete {
+            stop_reason: Some("interrupted".into()), subtype: None, is_error: false,
+            api_error_status: None, context: ContextReport::none(ContextVerdict::NoWindow),
+        }).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 1);
+        assert_eq!(storage.get_tray_entry("q-1").await.unwrap().unwrap().status, "queued",
+            "an interrupted review cannot promote the publish just because the cursor passed its body");
+        let mut failed = turn_end();
+        if let AgentEvent::TurnComplete { is_error, .. } = &mut failed {
+            *is_error = true;
+        }
+        ev_tx.send(failed).await.unwrap();
+        assert_eq!(next_epoch(&mut ring_rx).await, 2);
+        assert_eq!(storage.get_tray_entry("q-1").await.unwrap().unwrap().status, "queued",
+            "a failed review cannot promote it either");
+        epoch.store(3, Ordering::Release);
         ev_tx
             .send(AgentEvent::TurnComplete {
                 stop_reason: None,

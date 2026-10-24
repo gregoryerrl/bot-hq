@@ -3210,7 +3210,7 @@ async fn start_turn(
     // column — clearing it, nobody is active — and marks nobody. This also
     // means a SUMMONED turn is now recorded and marked like any other, which
     // the eager placement never did.
-    hand_turn_to(deps, holder.as_ref()).await;
+    hand_turn_to(deps, holder.as_ref(), *epoch).await;
     let Some(to) = holder.as_ref() else {
         return Dealt::Live;
     };
@@ -3276,7 +3276,7 @@ async fn unwind_wedged_turn(
         return;
     };
     if let Some(activity) = &deps.activity {
-        activity.set_busy_slug(&stuck.slug, false);
+        activity.clear_busy_for_epoch(&stuck.slug, Some(*epoch));
     }
     // Clears the holder, bumps the epoch, and NULLs the column — leaving a dead
     // participant named there is how a wedged session reads as working.
@@ -3379,7 +3379,7 @@ async fn pass_empty_turn(
     // the flag has to come down here or the input stays locked on a turn that
     // never ran.
     if let Some(activity) = &deps.activity {
-        activity.set_busy_slug(&to.slug, false);
+        activity.clear_busy_for_epoch(&to.slug, Some(epoch));
     }
     debug!(
         session = %deps.session_id,
@@ -3989,7 +3989,7 @@ async fn hand_over(deps: &SequencerDeps, current: Option<&Participant>) -> Hando
 /// turn is in flight there, so the message takes the designed fresh-turn path
 /// rather than landing mid-turn. A permanently locked input is worse than a
 /// window whose worst case is the intended behaviour.
-async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>) {
+async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>, epoch: u64) {
     // Say who holds it. The ring has always known; the column that exists to
     // report it was never written, so the UI could not tell a participant
     // waiting its turn from one that had died.
@@ -3997,7 +3997,7 @@ async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>) {
         .set_current_turn(&deps.session_id, next.map(|p| p.id))
         .await;
     if let (Some(activity), Some(p)) = (&deps.activity, next) {
-        activity.set_busy_slug(&p.slug, true);
+        activity.mark_busy_for_epoch(&p.slug, epoch);
     }
     // A deal used to be SILENT in the log — the s-f6a441ff dissection spent an
     // hour proving a busy flag near a yield could not have come from here,
@@ -4007,6 +4007,7 @@ async fn hand_turn_to(deps: &SequencerDeps, next: Option<&Participant>) {
             session = %deps.session_id,
             participant_id = p.id,
             slug = %p.slug,
+            epoch,
             "sequencer: turn dealt"
         );
     }

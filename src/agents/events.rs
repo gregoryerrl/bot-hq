@@ -226,7 +226,9 @@ pub fn translate(
                 None => ContextReport::none(ContextVerdict::NoWindow),
             };
             vec![AgentEvent::TurnComplete {
-                stop_reason: r.stop_reason,
+                stop_reason: r.terminal_reason
+                    .filter(|reason| matches!(reason.as_str(), "aborted_streaming" | "aborted_tools"))
+                    .or(r.stop_reason),
                 subtype: r.subtype,
                 is_error,
                 api_error_status,

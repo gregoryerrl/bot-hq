@@ -206,6 +206,9 @@ pub enum UserContentBlock {
 pub struct ResultEvent {
     #[serde(default)]
     pub stop_reason: Option<String>,
+    /// Claude reports host interrupts here even when stop_reason is null.
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
     #[serde(default)]
     pub subtype: Option<String>,
     /// Turn-failure flag. `false` on success; `true` when the turn failed

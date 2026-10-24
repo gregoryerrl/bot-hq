@@ -13,6 +13,12 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **An interrupted turn cannot finish a newer turn.** A completion arriving
+  after a new deal keeps the interrupted turn's identity, including when the
+  old turn had not produced output. Its busy flag cannot clear the new turn's,
+  and an interrupted or failed review cannot release a queued publish.
+  After a transient review failure, the publish waits for the retried turn
+  to complete successfully.
 - **Resuming after Pause hands out one turn.** An interrupted completion
   held by Pause used to hand out the new message before the resume itself
   handed it out again. That could show an all-pass halt while an agent was

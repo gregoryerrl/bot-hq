@@ -93,6 +93,9 @@ struct Inner {
     ///
     /// An absent slug reads as `false`; nothing pre-registers a roster here.
     busy: HashMap<String, bool>,
+    /// The dealt generation owning each busy mark. Boot and process teardown
+    /// use unscoped marks; a turn completion may clear only its own generation.
+    busy_epochs: HashMap<String, u64>,
     cancelling: bool,
     /// Last derived state we emitted — so we only fire on an actual change.
     last: SessionActivity,
@@ -182,6 +185,7 @@ impl ActivityTracker {
         Arc::new(Self {
             inner: Mutex::new(Inner {
                 busy: HashMap::new(),
+                busy_epochs: HashMap::new(),
                 cancelling: false,
                 last: SessionActivity::Idle,
                 last_busy: HashMap::new(),
@@ -202,7 +206,29 @@ impl ActivityTracker {
     pub fn set_busy_slug(&self, slug: &str, busy: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.busy.insert(slug.to_string(), busy);
+        g.busy_epochs.remove(slug);
         self.recompute_locked(&mut g);
+    }
+
+    /// A ring deal owns this mark until that generation ends or the process dies.
+    pub fn mark_busy_for_epoch(&self, slug: &str, epoch: u64) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.busy.insert(slug.to_string(), true);
+        g.busy_epochs.insert(slug.to_string(), epoch);
+        self.recompute_locked(&mut g);
+    }
+
+    /// Return false for a stale completion; it must not make a newer turn idle.
+    /// None clears an unscoped boot mark, never a dealt generation.
+    pub fn clear_busy_for_epoch(&self, slug: &str, epoch: Option<u64>) -> bool {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if g.busy_epochs.get(slug).copied() != epoch {
+            return false;
+        }
+        g.busy.insert(slug.to_string(), false);
+        g.busy_epochs.remove(slug);
+        self.recompute_locked(&mut g);
+        true
     }
 
     /// Is any participant mid-turn right now? The ring hands a turn out by
@@ -474,6 +500,28 @@ impl ActivityTracker {
 mod tests {
     use super::*;
     use crate::signaling::SignalingEvent;
+
+    #[test]
+    fn a_stale_completion_cannot_clear_a_newer_generations_busy_mark() {
+        let t = ActivityTracker::new(
+            "s1",
+            Arc::new(AtomicBool::new(false)),
+            SignalingBridge::new(),
+            vec!["hands".into()],
+        );
+        t.mark_busy_for_epoch("hands", 1);
+        t.mark_busy_for_epoch("hands", 2);
+        assert!(!t.clear_busy_for_epoch("hands", Some(1)));
+        assert!(!t.clear_busy_for_epoch("hands", None));
+        assert!(t.is_busy_slug("hands"));
+        assert!(t.clear_busy_for_epoch("hands", Some(2)));
+        assert!(!t.any_busy());
+        t.set_busy_slug("hands", true);
+        assert!(t.clear_busy_for_epoch("hands", None), "boot has no dealt epoch");
+        t.mark_busy_for_epoch("hands", 3);
+        t.set_busy_slug("hands", false);
+        assert!(!t.any_busy(), "process teardown can clear any generation");
+    }
 
     #[test]
     fn as_str_wire_contract() {
