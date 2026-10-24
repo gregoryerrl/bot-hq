@@ -241,13 +241,14 @@ pub(crate) fn idle_unflagged_decision(
 /// The idle-unflagged watchdog's handles into one session, threaded from the
 /// spawn site. Separate struct so `run_stall_watchdog`'s signature stays
 /// readable.
+#[derive(Clone)]
 pub struct IdleWatch {
     pub storage: Storage,
     /// The participant the nudge summons — the first one holding `edit_files`
     /// (rc3 D10/D11: a capability, not a name), falling back to slot 0 when
     /// nobody does, because a review-only session still deserves the nudge.
-    /// The choice is made ONCE, at the spawn site (`core/session.rs`, where
-    /// `hands_slot` is computed); this field only carries it.
+    /// Computed at spawn and refreshed with a live roster change; this field
+    /// carries the current target rather than re-resolving it on every tick.
     ///
     /// An id to SUMMON with, not a stdin to write to. The nudge used to go
     /// straight into that stdin, which woke a generation the ring had not dealt:
@@ -263,8 +264,24 @@ pub struct IdleWatch {
     pub user_broadcasts: Arc<AtomicU64>,
 }
 
+#[derive(Clone)]
+pub struct WatchdogRoster {
+    pub scope: Arc<crate::agents::incarnation::Incarnation>,
+    pub agents: Vec<(String, Weak<AgentLiveness>)>,
+    pub hands_slug: Option<String>,
+    pub idle_watch: Option<IdleWatch>,
+    pub changing: bool,
+}
+
+pub(crate) type LiveWatchdogRoster = Arc<std::sync::Mutex<WatchdogRoster>>;
+
+#[cfg(test)]
+pub(crate) fn empty_roster() -> LiveWatchdogRoster {
+    Arc::new(std::sync::Mutex::new(WatchdogRoster { scope: crate::agents::incarnation::Incarnation::new(), agents: vec![], hands_slug: None, idle_watch: None, changing: false }))
+}
+
 /// Per-session watchdog loop. Holds `Weak<AgentLiveness>` per agent so it
-/// self-terminates once every pump has exited (the session ended) — no leaked
+/// self-terminates when its live roster registry is dropped — no leaked
 /// task. Emits health only on change via the bridge registry, and runs the
 /// idle-unflagged nudge (see [`IdleWatch`]).
 ///
@@ -292,23 +309,26 @@ pub struct IdleWatch {
 /// repo runs. If a third turns up, the block is the defect, not the sentence.
 pub async fn run_stall_watchdog(
     session_id: String,
-    agents: Vec<(String, Weak<AgentLiveness>)>,
-    hands_slug: Option<String>,
+    roster: Weak<std::sync::Mutex<WatchdogRoster>>,
     activity: Arc<ActivityTracker>,
     bridge: Arc<SignalingBridge>,
-    idle_watch: Option<IdleWatch>,
 ) {
     // Idle-unflagged tracking (loop-local; see `idle_unflagged_decision`).
     let mut idle_since: Option<Instant> = None;
     let mut nudged_at: Option<u64> = None;
     loop {
         tokio::time::sleep(POLL_INTERVAL).await;
-        let mut any_alive = false;
+        let Some(roster) = roster.upgrade() else { break };
+        let snapshot = roster.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        drop(roster);
+        if snapshot.changing { idle_since = None; continue; }
+        let scope = snapshot.scope.clone();
+        let Some(_lease) = scope.enter().await else { continue };
+        let WatchdogRoster { agents, hands_slug, idle_watch, .. } = snapshot;
         for (slug, weak) in &agents {
             let Some(liveness) = weak.upgrade() else {
                 continue; // this agent's pump has exited
             };
-            any_alive = true;
             let current = bridge.current_agent_health(&session_id, slug);
             let decision = stall_decision(
                 activity.is_busy_slug(slug),
@@ -464,9 +484,6 @@ pub async fn run_stall_watchdog(
                 // calling this every non-idle poll is a cheap no-op).
                 bridge.notify_session_attention(session_id.clone(), None);
             }
-        }
-        if !any_alive {
-            break; // all pumps gone → session ended
         }
     }
 }

@@ -190,6 +190,34 @@ async fn settle(conn: &mut SqliteConnection, row: &ParticipantChange, reason: &s
 }
 
 impl Storage {
+    /// Runtime recovery after an owned rollback. The worker still holds the
+    /// same ring reservation; a close or a later roster edit wins in storage.
+    pub(crate) async fn publish_recovered_participant_spawn(&self, session: &str, id: &str,
+        participant_id: i64, revision: i64, metadata: &ParticipantSpawnMetadata) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let Some(row) = read_change(&mut tx, id).await?.filter(|r| r.session_id == session && r.status == "failed") else { return Ok(false) };
+        let target = match row.request()? {
+            ParticipantChangeRequest::Remove { participant_id } | ParticipantChangeRequest::SwitchModel { participant_id, .. } => participant_id,
+            ParticipantChangeRequest::Add { .. } => return Ok(false),
+        };
+        if target != participant_id { return Ok(false); }
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND closed_at IS NULL AND archived = 0 AND roster_revision = ?) \
+            AND NOT EXISTS(SELECT 1 FROM session_participant_changes WHERE session_id = ? AND status IN ('pending', 'applying'))")
+            .bind(session).bind(revision).bind(session).fetch_one(&mut *tx).await?;
+        if !valid { return Ok(false); }
+        let current = participant(&mut tx, session, participant_id).await?;
+        if !current.enabled || current.runtime != metadata.runtime { return Ok(false); }
+        sqlx::query("UPDATE session_participants SET runtime_version_at_spawn = ?, claude_session_id = ?, \
+            account_dir_at_spawn = ?, account_email_at_spawn = ?, account_org_at_spawn = ?, \
+            effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = 1, prompt = ? WHERE session_id = ? AND id = ?")
+            .bind(&metadata.runtime_version).bind(&metadata.resume_id).bind(&metadata.account_dir)
+            .bind(&metadata.account_email).bind(&metadata.account_org).bind(&metadata.effort)
+            .bind(metadata.ultracode.map(i64::from)).bind(&metadata.system_prompt).bind(session).bind(participant_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
     /// The only write of a candidate's observed metadata. Close/recovery and
     /// publication serialize in one transaction: a late probe/candidate cannot
     /// overwrite a rolled-back participant or reopen an already-failed intent.

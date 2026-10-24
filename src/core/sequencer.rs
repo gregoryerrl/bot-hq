@@ -1006,6 +1006,8 @@ pub struct SequencerDeps {
 /// capability to write to a process, not a message, and it carries no text.
 #[derive(Debug)]
 pub enum SequencerCommand {
+    /// Host lifecycle shutdown, acknowledged after the ring stops dealing.
+    SessionEnded(tokio::sync::oneshot::Sender<()>),
     /// Process-origin control. Keep this envelope through deferred/paused/
     /// reservation queues; a replacement must never inherit an old callback.
     FromIncarnation {
@@ -2119,6 +2121,10 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // followed by a DELIVERY, and splitting the two would reorder a join
         // against a completion that arrived behind it. Nothing reads `inputs`
         // while paused, so waiting costs nothing.
+        if let SequencerCommand::SessionEnded(reply) = cmd {
+            let _ = reply.send(());
+            break;
+        }
         let (incarnation, cmd) = match cmd {
             SequencerCommand::FromIncarnation { incarnation, command } => (Some(incarnation), *command),
             command => (None, command),
@@ -2183,6 +2189,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             state.pause_releases_pending = state.pause_releases_pending.saturating_sub(1);
         }
         match cmd {
+            SequencerCommand::SessionEnded(_) => unreachable!("handled before holds"),
             SequencerCommand::FromIncarnation { .. } => unreachable!("nested incarnation envelope"),
             SequencerCommand::RosterBoundary(_) => unreachable!("handled above the pause gate"),
             SequencerCommand::TurnComplete {
@@ -4583,6 +4590,11 @@ async fn deliver_backlog(
                 // whole point is that a full stdin cannot hide it.
                 biased;
                 cmd = rx.recv() => match cmd {
+                    Some(cmd @ SequencerCommand::SessionEnded(_)) => {
+                        deferred.push_front(cmd);
+                        stop = Some(Stop::SessionEnd);
+                        break;
+                    }
                     Some(cmd @ SequencerCommand::UserMessage { restarts_rotation: true, .. }) => {
                         deferred.push_back(cmd);
                         stop = Some(Stop::Superseded);

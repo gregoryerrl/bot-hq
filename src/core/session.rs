@@ -21,12 +21,19 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+#[path = "live_participant.rs"]
+mod live_participant;
+pub(crate) use live_participant::{LiveContext, CandidateDraft, LiveCandidate, refresh_runtime_roster};
+
 /// One live participant: its process handle plus its roster identity.
 ///
 /// B4b: replaces `SessionHandle`'s `brian` + `rain: Option` pair. Ordered by
 /// `turn_position` inside the handle, which is the order B5's fixed ring will
 /// advance through.
 pub struct SessionAgent {
+    pub(crate) config_snapshot: Option<AgentConfig>,
+    pub(crate) _spawn_temp: Option<TempDir>,
+    pub(crate) mcp_token: Option<String>,
     /// `session_participants.id`. `None` only when the roster read failed — a
     /// spawned agent is never dropped because its row could not be loaded, so
     /// every consumer must tolerate the gap.
@@ -93,6 +100,8 @@ impl SessionAgent {
 
 /// A live session — the handles owned by `AppState`.
 pub struct SessionHandle {
+    pub(crate) change_run: Option<Arc<super::participant_runtime::ChangeRun>>,
+    pub(crate) watchdog_roster: super::watchdog::LiveWatchdogRoster,
     pub id: String,
     pub title: String,
     pub working_repo_path: Option<PathBuf>,
@@ -216,9 +225,10 @@ impl SessionHandle {
     /// backoff (the supervisor still holds the receiver then), so a recovering
     /// agent is never wrongly evicted.
     pub fn is_stale(&self) -> bool {
+        if self.change_run.as_ref().is_some_and(|run| !run.is_done()) { return false; }
         self.participants
             .iter()
-            .any(|a| a.handle.input().is_closed())
+            .any(|a| a.handle.input().is_closed() || !a.handle.incarnation().is_active())
     }
 }
 
@@ -723,7 +733,7 @@ async fn spawn_session_handle(
     // `SpawnConfig` that names it is consumed by the spawn one line later and
     // the session view reads it back (rc3 P1). Pushed in `live` order, so the
     // slot IS the index (round 10 dropped a slot element nothing read).
-    let mut spawned: Vec<(AgentHandle, PathBuf)> = Vec::with_capacity(live.len());
+    let mut spawned: Vec<(AgentHandle, PathBuf, String, AgentConfig)> = Vec::with_capacity(live.len());
     // Per slot, the window the registry claims for the model this participant
     // spawns on — the pump compares it with what the CLI reports (0079's
     // companion notice). Captured here because `cfg` is consumed by
@@ -774,7 +784,7 @@ async fn spawn_session_handle(
         // Everything this participant spawns WITH — its role's Claude-config
         // overrides included — is decided in one place off the participant row;
         // see `participant_spawn_config` for why they are not unpacked here.
-        let spawn_cfg = participant_spawn_config(
+        let draft = build_participant_spawn(
             &storage,
             p,
             cfg,
@@ -787,8 +797,11 @@ async fn spawn_session_handle(
             &bridge,
             &*auth_probe,
             &*codex_probe,
+            SpawnPersistence::Immediate,
+            None,
         )
         .await?;
+        let spawn_cfg = draft.config;
         accounts.push((
             p.slug.clone(),
             ParticipantAccount {
@@ -813,8 +826,9 @@ async fn spawn_session_handle(
         // fails here rather than being routed somewhere else; `validate_model`'s
         // pre-flight is what surfaces that at configure time.
         let system_prompt_path = spawn_cfg.system_prompt_path.clone();
+        let config_snapshot = spawn_cfg.config.clone();
         let handle = spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await?;
-        spawned.push((handle, system_prompt_path));
+        spawned.push((handle, system_prompt_path, draft.mcp_token, config_snapshot));
     }
     if let Some(text) = account_straddle_notice(&accounts) {
         crate::core::post_system_notice(
@@ -918,14 +932,18 @@ async fn spawn_session_handle(
     // signal, stdin, etc.).
     let mut handles: Vec<AgentHandle> = Vec::with_capacity(spawned.len());
     let mut prompt_paths: Vec<PathBuf> = Vec::with_capacity(spawned.len());
+    let mut mcp_tokens = Vec::with_capacity(spawned.len());
+    let mut config_snapshots = Vec::with_capacity(spawned.len());
     let mut event_rxs = Vec::with_capacity(spawned.len());
-    for (mut handle, prompt_path) in spawned {
+    for (mut handle, prompt_path, mcp_token, config_snapshot) in spawned {
         event_rxs.push(std::mem::replace(
             &mut handle.event_rx,
             tokio::sync::mpsc::channel(1).1,
         ));
         handles.push(handle);
         prompt_paths.push(prompt_path);
+        mcp_tokens.push(mcp_token);
+        config_snapshots.push(config_snapshot);
     }
     // Batch 7: per-agent liveness for the stall watchdog. The watchdog holds Weak
     // refs, so it self-terminates once the pumps drop their Arcs (session end).
@@ -1243,18 +1261,22 @@ async fn spawn_session_handle(
     let hands_slug = live.get(hands_slot).map(|p| p.slug.clone());
     // The Pause snapshot reads the same list (feedback #44(2)).
     let liveness = watchdog_agents.clone();
+    let watchdog_roster = Arc::new(std::sync::Mutex::new(crate::core::watchdog::WatchdogRoster {
+        scope: crate::agents::incarnation::Incarnation::new(),
+        agents: watchdog_agents, hands_slug, idle_watch, changing: false,
+    }));
     tokio::spawn(crate::core::watchdog::run_stall_watchdog(
         session.id.clone(),
-        watchdog_agents,
-        hands_slug,
+        Arc::downgrade(&watchdog_roster),
         Arc::clone(&activity),
         Arc::clone(&bridge),
-        idle_watch,
     ));
 
     info!(session_id = %session.id, title = %session.title, "session opened");
 
     Ok(SessionHandle {
+        change_run: None,
+        watchdog_roster,
         id: session.id,
         title: session.title,
         working_repo_path,
@@ -1269,7 +1291,12 @@ async fn spawn_session_handle(
             .zip(handles)
             .zip(prompt_paths)
             .zip(turn_epochs)
-            .map(|(((p, handle), system_prompt_path), turn_epoch)| SessionAgent {
+            .zip(mcp_tokens)
+            .zip(config_snapshots)
+            .map(|(((((p, handle), system_prompt_path), turn_epoch), mcp_token), config_snapshot)| SessionAgent {
+                config_snapshot: Some(config_snapshot),
+                _spawn_temp: None,
+                mcp_token: Some(mcp_token),
                 participant_id: Some(p.id),
                 slug: p.slug.clone(),
                 turn_position: p.turn_position,
@@ -2098,6 +2125,7 @@ pub(crate) fn account_straddle_notice(accounts: &[(String, ParticipantAccount)])
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn participant_spawn_config(
     storage: &Storage,
     p: &crate::storage::Participant,
@@ -3596,12 +3624,17 @@ pub(crate) async fn stub_session_for_tests(
     let (itx, irx) = tokio::sync::mpsc::channel(4);
     let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handle = SessionHandle {
+        change_run: None,
+        watchdog_roster: crate::core::watchdog::empty_roster(),
         id: id.to_string(),
         title: "t".into(),
         working_repo_path: None,
         session_start_sha: None,
         ipav: Arc::new(Mutex::new(IpavState::default())),
         participants: vec![SessionAgent {
+            config_snapshot: None,
+            _spawn_temp: None,
+            mcp_token: None,
             participant_id: None,
             slug: "hands".into(),
             turn_position: 0,
@@ -3617,6 +3650,7 @@ pub(crate) async fn stub_session_for_tests(
                 let (ctx, _crx) = tokio::sync::mpsc::channel(1);
                 let (ktx, _krx) = tokio::sync::oneshot::channel();
                 AgentHandle::from_parts("hands".to_string(), id, erx, itx, ctx, ktx)
+                    .with_stop_observer(tokio::sync::watch::channel(Some(Ok(()))).1)
             },
             turn_epoch: None,
         }],
@@ -3886,6 +3920,9 @@ mod tests {
         storage.create_session("s1", "t", None).await.unwrap();
         let (itx, mut irx) = tokio::sync::mpsc::channel(4);
         let agent = SessionAgent {
+            config_snapshot: None,
+            _spawn_temp: None,
+            mcp_token: None,
             participant_id: None,
             slug: "hands".into(),
             turn_position: 0,
@@ -4219,6 +4256,9 @@ mod tests {
             let agents: Vec<SessionAgent> = live
                 .iter()
                 .map(|p| SessionAgent {
+                    config_snapshot: None,
+                    _spawn_temp: None,
+                    mcp_token: None,
                     participant_id: Some(p.id),
                     slug: p.slug.clone(),
                     turn_position: p.turn_position,
@@ -4299,6 +4339,9 @@ mod tests {
 
     fn stub_agent(slug: &str, turn_position: i64, caps: &[&str]) -> SessionAgent {
         SessionAgent {
+            config_snapshot: None,
+            _spawn_temp: None,
+            mcp_token: None,
             participant_id: None,
             slug: slug.into(),
             turn_position,

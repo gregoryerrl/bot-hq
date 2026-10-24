@@ -298,6 +298,7 @@ pub struct AppState {
     /// so close_session can't reap them). Only the spawn path takes this; the
     /// fast already-running check short-circuits before acquiring it.
     spawn_gate: Mutex<()>,
+    lifecycle_locks: std::sync::Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     /// Populated from Tauri's `setup()` once the AppHandle exists. The
     /// signaling MCP server starts BEFORE Tauri setup (see main.rs ordering), so
     /// any MCP tool that needs the webview (screenshot, click, scroll, etc.)
@@ -510,6 +511,7 @@ impl AppState {
             signaling_server: Mutex::new(Some(server)),
             sessions: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
+            lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
             pending_reconcile: Mutex::new(HashSet::new()),
@@ -531,6 +533,15 @@ impl AppState {
             .lock()
             .map(|c| c.contains(session_id))
             .unwrap_or(false)
+    }
+
+    fn lifecycle_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.lifecycle_locks.lock().unwrap_or_else(|p| p.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(session_id).and_then(std::sync::Weak::upgrade) { return lock; }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(session_id.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     /// Set (`true`) or clear (`false`) the closing mark. Returns whether the
@@ -586,6 +597,9 @@ impl AppState {
         // waited. Without this double-check two callers both pass the fast
         // check and spawn duplicate rosters (one gets orphaned).
         let _gate = self.spawn_gate.lock().await;
+        let lifecycle = self.lifecycle_lock(session_id);
+        let _lifecycle = lifecycle.lock().await;
+        let mut retired_handle = None;
         {
             let mut sessions = self.sessions.lock().await;
             // Read under the SAME lock `teardown_session` inserts under: a
@@ -604,11 +618,20 @@ impl AppState {
                 // Evict the stale (crashed) handle before re-spawning. Killing
                 // already-dead agents is a no-op.
                 if let Some(mut stale) = sessions.remove(session_id) {
+                    if let Some(run) = &stale.change_run { run.cancel(); }
                     for agent in stale.agents_mut() {
                         agent.handle.kill();
                     }
+                    retired_handle = Some(stale);
                     tracing::info!(session_id, "evicted stale session handle; re-spawning");
                 }
+            }
+        }
+        if let Some(mut stale) = retired_handle {
+            if let Err(error) = self.quiesce_session_handle(&mut stale).await {
+                self.sessions.lock().await.insert(session_id.to_string(), stale);
+                self.bridge.declare_host_halt(session_id, "Agent shutdown could not be confirmed; automatic restart is held. Retry restarting the session's agents.".into()).await;
+                return Err(error);
             }
         }
         // **A closed row does not respawn** (round 10, B4 — the user's pick: a
@@ -692,6 +715,8 @@ impl AppState {
     /// A row that was not closed reopens nothing and spawns nothing: the
     /// SessionView's mount respawn already covers a live session.
     pub async fn reopen_session(&self, session_id: &str) -> Result<()> {
+        let lifecycle = self.lifecycle_lock(session_id);
+        let guard = lifecycle.lock().await;
         let moved = self.storage.reopen_session(session_id).await?;
         if !moved {
             // Not closed (or unknown): a second click that beat the view's
@@ -735,6 +760,7 @@ impl AppState {
                 "reopen: announce row not posted; the respawned roster has no on-screen account of the reopen"
             );
         }
+        drop(guard);
         let started = self.ensure_session_started(session_id).await;
         // The row moved either way, so the frontend is told BEFORE the spawn
         // result is returned: the dashboard lists the session again, and a
@@ -751,15 +777,28 @@ impl AppState {
     /// resumes its prior claude-code conversation via `--resume`, so context
     /// is preserved. Unlike `close_session`, the session row stays open.
     pub async fn restart_session(&self, session_id: &str) -> Result<()> {
+        let lifecycle = self.lifecycle_lock(session_id);
+        let gate = lifecycle.lock().await;
+        let mut retired_handle = None;
         {
             let mut sessions = self.sessions.lock().await;
+            anyhow::ensure!(!self.is_closing(session_id), "session is closing");
             if let Some(mut handle) = sessions.remove(session_id) {
+                if let Some(run) = &handle.change_run { run.cancel(); }
                 for agent in handle.agents_mut() {
                     agent.handle.kill();
                 }
+                retired_handle = Some(handle);
                 tracing::info!(session_id, "restarting session to apply config change");
             }
         }
+        if let Some(mut handle) = retired_handle {
+            if let Err(error) = self.quiesce_session_handle(&mut handle).await {
+                self.sessions.lock().await.insert(session_id.to_string(), handle);
+                return Err(error);
+            }
+        }
+        drop(gate);
         // Handle now absent → ensure_session_started re-spawns from scratch
         // (re-running build_command, which re-reads claude-overrides.json + the
         // per-agent mcp-config).
@@ -1250,6 +1289,10 @@ impl AppState {
         let activity = {
             let sessions = self.sessions.lock().await;
             match sessions.get(id) {
+                // A roster worker may have retired the writer but not yet
+                // installed its replacement. No epilogue can run in that gap.
+                Some(handle) if handle.change_run.as_ref().is_some_and(|run| !run.is_done()) =>
+                    return close_learnings::Epilogue::SkipBusy,
                 // A STALE handle is treated as no session at all, and that is
                 // the sharpest edge here: `broadcast` auto-heals a stale
                 // session by RESPAWNING it, so asking one for its learnings
@@ -1456,6 +1499,9 @@ impl AppState {
     /// closed it — the row is closed once, before the epilogue, so the UI never
     /// waits on a learnings turn.
     async fn teardown_session(&self, id: &str, archive: Option<bool>) -> Result<()> {
+        let lifecycle = self.lifecycle_lock(id);
+        let _lifecycle = lifecycle.lock().await;
+        let mut retired_handle = None;
         // **The global `sessions` lock is held for the remove + kill only.**
         // It used to be taken at the top and held to the end — across the PTY
         // reap, the DB close, the tray withdrawal, the policy-file cleanup, the
@@ -1508,9 +1554,20 @@ impl AppState {
                 }
             }
             if let Some(mut handle) = handle {
+                if let Some(run) = &handle.change_run { run.cancel(); }
                 for agent in handle.agents_mut() {
                     agent.handle.kill();
                 }
+                retired_handle = Some(handle);
+            }
+        }
+        if let Some(mut handle) = retired_handle {
+            if let Err(error) = self.quiesce_session_handle(&mut handle).await {
+                // Keep prompt/config files owned while shutdown is unproven.
+                // Do not remove the worktree under a possibly live process.
+                self.sessions.lock().await.insert(id.to_string(), handle);
+                self.mark_closing(id, false);
+                return Err(error);
             }
         }
         // A stage the user left on this session can never deliver now — drop

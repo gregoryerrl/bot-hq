@@ -343,6 +343,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let (input_tx, input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(None);
 
     let mut cmd = build_codex_command(&cfg, &codex);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
@@ -416,14 +417,17 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
             crate::process::kill_process_tree(pid);
         }
         kill_group(child_pid);
-        let _ = child.kill().await;
+        let _ = child.start_kill();
+        let result = child.wait().await.map(|_| ()).map_err(|e| format!("waiting for codex app-server: {e}"));
         if let Some(pid) = child_pid {
             CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
         }
+        let _ = stopped_tx.send(Some(result));
         let _ = event_tx_for_lifecycle.send(AgentEvent::Exited("codex app-server ended".into())).await;
     });
 
-    Ok(AgentHandle::from_parts(cfg.agent_name, cfg.session_id, event_rx, input_tx, control_tx, kill_tx))
+    Ok(AgentHandle::from_parts(cfg.agent_name, cfg.session_id, event_rx, input_tx, control_tx, kill_tx)
+        .with_stop_observer(stopped_rx))
 }
 
 fn kill_group(pid: Option<u32>) {

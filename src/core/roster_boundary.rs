@@ -52,6 +52,12 @@ pub struct RosterBoundary {
 }
 
 impl RosterBoundary {
+    /// The parent runtime was closed/restarted. Do not replay its retained
+    /// controls into old inputs or let a dropped owner declare a new halt.
+    pub(crate) async fn shutdown(self) {
+        let (reply, ack) = oneshot::channel();
+        if self.tx.send(SequencerCommand::SessionEnded(reply)).await.is_ok() { let _ = ack.await; }
+    }
     pub(crate) async fn acquire(
         tx: mpsc::Sender<SequencerCommand>,
         operation: String,

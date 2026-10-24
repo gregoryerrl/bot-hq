@@ -357,6 +357,7 @@ impl Storage {
             "UPDATE session_tray SET reviewed_at = ? \
              WHERE choice_id = ? AND status = 'queued' AND kind = 'approval' \
                AND approval_required = 0 AND body_row_id = ? AND reviewed_at IS NULL \
+               AND NOT EXISTS (SELECT 1 FROM session_participant_changes pc WHERE pc.session_id = session_tray.session_id AND pc.status = 'applying') \
                AND run_started_at IS NULL AND run_refusal IS NULL \
                AND command_text IS NOT NULL AND result_row_id IS NULL \
                AND exec_kind IS NULL AND urgent_reason IS NULL \
@@ -562,6 +563,7 @@ impl Storage {
                AND exec_kind IS NULL AND urgent_reason IS NULL \
                AND run_not_before IS NULL AND run_not_after IS NULL \
                AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_tray.session_id AND s.closed_at IS NULL) \
+               AND NOT EXISTS (SELECT 1 FROM session_participant_changes pc WHERE pc.session_id = session_tray.session_id AND pc.status = 'applying') \
                AND EXISTS (SELECT 1 FROM session_participants p, \
                    json_each(CASE WHEN json_valid(p.capabilities) THEN p.capabilities ELSE '[]' END) cap \
                    WHERE p.session_id = session_tray.session_id AND p.slug = session_tray.agent \

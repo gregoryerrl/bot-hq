@@ -260,6 +260,8 @@ impl SignalingBridge {
         approve_after: Option<&str>,
         run_timeout_secs: Option<u64>,
     ) -> Result<AutoPublishPreparation> {
+        let roster_control = self.participant_control_lock(session_id).await;
+        let _roster_control = roster_control.lock().await;
         let lock = self.gate_preparation_lock(session_id, command).await;
         let _guard = lock.lock().await;
         let storage = self
@@ -2461,6 +2463,8 @@ impl SignalingBridge {
         };
         let mut ran = 0;
         for row in rows {
+            let roster_control = self.participant_control_lock(&row.session_id).await;
+            let Ok(_roster_control) = roster_control.try_lock() else { continue };
             let activity = self.session_activity.lock().await.get(&row.session_id).and_then(std::sync::Weak::upgrade);
             if activity.is_some_and(|a| a.holds_wakes()) { continue; }
             let (Some(command), Some(body_row)) = (row.command_text.as_deref(), row.body_row_id) else { continue };
@@ -2503,6 +2507,39 @@ impl SignalingBridge {
             }
         }
         ran
+    }
+
+    /// Called by the lifecycle owner while publication is excluded. A changed
+    /// reviewer must read outstanding bodies itself; an old automatic review
+    /// never silently becomes authority for a different electorate.
+    pub(crate) async fn reconcile_roster_publications(&self, session: &str) -> Result<()> {
+        let storage = self.storage.lock().await.clone().ok_or_else(|| anyhow::anyhow!("storage unavailable"))?;
+        for row in storage.queued_gates_for_session(session).await? {
+            if !row.approval_required {
+                if let Some(body) = row.body_row_id { storage.invalidate_auto_gate_review(&row.choice_id, body).await?; }
+            }
+            if let Some(reviewer) = self.queued_reviewer(session, &row.agent).await {
+                if let Some(body_id) = row.body_row_id {
+                    let body: Option<String> = sqlx::query_scalar("SELECT content FROM messages WHERE session_id = ? AND id = ?")
+                        .bind(session).bind(body_id).fetch_optional(storage.pool()).await?;
+                    if let Some(body) = body {
+                        if !storage.begin_queued_gate_revision(&row.choice_id, body_id).await? { continue; }
+                        // A switched reviewer keeps its cursor, but has a fresh
+                        // provider context. Deliver the exact stored body again.
+                        let message = crate::core::post_system_notice(&storage, Some(self), session,
+                            crate::storage::MessageKind::SystemNotice,
+                            format!("Agent change: review this outstanding decision again ({}).\n\n{body}", row.choice_id), None)
+                            .await.ok_or_else(|| anyhow::anyhow!("could not deliver the outstanding decision to the new roster"))?;
+                        storage.set_tray_body_row(&row.choice_id, message.message_id()).await?;
+                    }
+                }
+                self.summon_participant(session, reviewer.id).await;
+            } else {
+                self.promote_queued_row(&storage, session, &row,
+                    format!("Session agents changed; queued decision {} now needs your approval because its reviewer is no longer available. Nothing ran.", row.choice_id)).await;
+            }
+        }
+        Ok(())
     }
 
     /// Withdraw a queued row a blocking finding vetoes, and say why in the

@@ -19,6 +19,7 @@ pub mod loopback;
 pub mod sequencer;
 pub mod roster_boundary;
 pub mod session;
+pub mod participant_runtime;
 pub mod state;
 pub mod telemetry;
 pub mod term_text;

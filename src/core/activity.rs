@@ -159,7 +159,7 @@ pub struct ActivityTracker {
     idled_since_cancel: AtomicBool,
     bridge: Arc<SignalingBridge>,
     session_id: String,
-    /// This session's participant slugs in TURN ORDER, fixed at spawn.
+    /// This session's participant slugs in turn order, refreshed on publication.
     ///
     /// One job, which used to be done by the literal strings `"brian"` and
     /// `"rain"` (rc3 D10): filling the frozen two-boolean wire payload
@@ -172,10 +172,17 @@ pub struct ActivityTracker {
     /// A session with one participant has one entry and a session with three has
     /// three; the frozen pair carries the first two, `busy_slots` (round 12)
     /// carries every busy one.
-    slugs: Vec<String>,
+    slugs: Mutex<Vec<String>>,
 }
 
 impl ActivityTracker {
+    pub(crate) fn replace_roster(&self, slugs: Vec<String>) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.busy.retain(|slug, _| slugs.contains(slug));
+        g.busy_epochs.retain(|slug, _| slugs.contains(slug));
+        *self.slugs.lock().unwrap_or_else(|p| p.into_inner()) = slugs;
+        self.recompute_locked(&mut g, true);
+    }
     pub fn new(
         session_id: impl Into<String>,
         awaiting: Arc<AtomicBool>,
@@ -195,7 +202,7 @@ impl ActivityTracker {
             idled_since_cancel: AtomicBool::new(false),
             bridge,
             session_id: session_id.into(),
-            slugs,
+            slugs: Mutex::new(slugs),
         })
     }
 
@@ -207,7 +214,7 @@ impl ActivityTracker {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.busy.insert(slug.to_string(), busy);
         g.busy_epochs.remove(slug);
-        self.recompute_locked(&mut g);
+        self.recompute_locked(&mut g, false);
     }
 
     /// A ring deal owns this mark until that generation ends or the process dies.
@@ -215,7 +222,7 @@ impl ActivityTracker {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.busy.insert(slug.to_string(), true);
         g.busy_epochs.insert(slug.to_string(), epoch);
-        self.recompute_locked(&mut g);
+        self.recompute_locked(&mut g, false);
     }
 
     /// Return false for a stale completion; it must not make a newer turn idle.
@@ -227,7 +234,7 @@ impl ActivityTracker {
         }
         g.busy.insert(slug.to_string(), false);
         g.busy_epochs.remove(slug);
-        self.recompute_locked(&mut g);
+        self.recompute_locked(&mut g, false);
         true
     }
 
@@ -251,7 +258,7 @@ impl ActivityTracker {
             // its SIGKILL.
             self.idled_since_cancel.store(false, Ordering::Release);
         }
-        self.recompute_locked(&mut g);
+        self.recompute_locked(&mut g, false);
     }
 
     /// Whether every participant has been idle at any point since the current cancel
@@ -274,7 +281,7 @@ impl ActivityTracker {
     pub fn set_paused(&self, paused: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         self.paused.store(paused, Ordering::Release);
-        self.recompute_locked(&mut g);
+        self.recompute_locked(&mut g, false);
     }
 
     /// Whether the pause latch is set. The sequencer reads it at its D35 gate;
@@ -296,7 +303,7 @@ impl ActivityTracker {
     /// (the dispatch path owns that flag; this reflects the change into activity).
     pub fn refresh(&self) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        self.recompute_locked(&mut g);
+        self.recompute_locked(&mut g, false);
     }
 
     /// Current derived state (test/observability).
@@ -429,7 +436,7 @@ impl ActivityTracker {
         }
     }
 
-    fn recompute_locked(&self, g: &mut Inner) {
+    fn recompute_locked(&self, g: &mut Inner, force: bool) {
         // A cancel auto-completes once EVERY participant has gone idle (the kill
         // settled) — clear `cancelling` so the state transitions
         // Cancelling → Paused (Stop sets the pause latch) or → Idle, instead
@@ -454,7 +461,7 @@ impl ActivityTracker {
         // Fire on a change to the derived state OR to any per-participant flag —
         // the latter so a within-`Busy` transition (broadcast both-busy, peer
         // hand-off) still reaches the UI to relabel who's working.
-        if next != g.last || g.per_agent_changed() {
+        if force || next != g.last || g.per_agent_changed() {
             g.last = next;
             g.last_busy.clone_from(&g.busy);
             // The wire payload carries exactly two booleans, derived from the
@@ -470,16 +477,16 @@ impl ActivityTracker {
             // unit owns those files") was a merge-era instruction that outlived
             // its merge, and round 4 deleted the same premise from the three
             // sites that restated it.
+            let slugs = self.slugs.lock().unwrap_or_else(|p| p.into_inner());
             let slot = |i: usize| {
-                self.slugs
+                slugs
                     .get(i)
                     .is_some_and(|s| g.busy_of(s))
             };
             let (slot0_busy, slot1_busy) = (slot(0), slot(1));
             // Every busy slot (round 12): the frozen pair reaches slots 0 and
             // 1; a roster of three or more carries the rest here.
-            let busy_slots: Vec<u32> = self
-                .slugs
+            let busy_slots: Vec<u32> = slugs
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| g.busy_of(s))
@@ -498,6 +505,29 @@ impl ActivityTracker {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn replacing_the_roster_preserves_peer_epochs_and_relabels_slots() {
+        let bridge = crate::signaling::SignalingBridge::new();
+        let mut events = bridge.subscribe();
+        let tracker = super::ActivityTracker::new("s1", std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bridge, vec!["removed".into(), "peer".into()]);
+        tracker.mark_busy_for_epoch("removed", 4);
+        tracker.mark_busy_for_epoch("peer", 9);
+        while events.try_recv().is_ok() {}
+        tracker.replace_roster(vec!["peer".into(), "new".into()]);
+        assert!(tracker.any_busy());
+        tracker.clear_busy_for_epoch("peer", Some(8));
+        assert!(tracker.any_busy(), "a stale epoch cannot clear the remaining peer");
+        let event = events.try_recv().unwrap();
+        match event {
+            crate::signaling::SignalingEvent::SessionActivity { slot0_busy, slot1_busy, busy_slots, .. } => {
+                assert!(slot0_busy); assert!(!slot1_busy); assert_eq!(busy_slots, vec![0]);
+            }
+            _ => panic!("expected reordered activity event"),
+        }
+        tracker.clear_busy_for_epoch("peer", Some(9));
+        assert!(!tracker.any_busy(), "removed participant leaves no phantom busy mark");
+    }
     use super::*;
     use crate::signaling::SignalingEvent;
 

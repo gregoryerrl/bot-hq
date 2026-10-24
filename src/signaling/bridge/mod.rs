@@ -431,6 +431,7 @@ pub struct SignalingBridge {
     /// Serialize identical gate preparations, including hook/MCP retries.
     /// Weak entries keep an in-flight lock stable without retaining commands.
     gate_preparations: Mutex<HashMap<(String, String), Weak<Mutex<()>>>>,
+    participant_controls: Mutex<HashMap<String, Weak<Mutex<()>>>>,
     event_tx: broadcast::Sender<SignalingEvent>,
     pending: Mutex<HashMap<String, Parked>>,
     violations: Option<ViolationsLog>,
@@ -730,6 +731,7 @@ impl SignalingBridge {
             session_awaiting: Mutex::new(HashMap::new()),
             session_sequencer: Mutex::new(HashMap::new()),
             gate_preparations: Mutex::new(HashMap::new()),
+            participant_controls: Mutex::new(HashMap::new()),
             session_activity: Mutex::new(HashMap::new()),
             session_phase: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
@@ -869,6 +871,29 @@ impl SignalingBridge {
         let tx = self.session_sequencer.lock().await.get(session_id).cloned()
             .ok_or_else(|| "The session has no running turn ring".to_string())?;
         crate::core::roster_boundary::RosterBoundary::acquire(tx, operation.to_string()).await
+    }
+
+    pub(crate) async fn stop_session_ring(&self, session_id: &str) {
+        let tx = self.session_sequencer.lock().await.get(session_id).cloned();
+        if let Some(tx) = tx {
+            let (reply, ack) = tokio::sync::oneshot::channel();
+            if tx.send(crate::core::sequencer::SequencerCommand::SessionEnded(reply)).await.is_ok() { let _ = ack.await; }
+        }
+    }
+
+    pub(crate) async fn session_ring(&self, session_id: &str) -> Option<tokio::sync::mpsc::Sender<crate::core::sequencer::SequencerCommand>> {
+        self.session_sequencer.lock().await.get(session_id).cloned()
+    }
+
+    /// Publication authority and participant registration share this lock.
+    /// It is per session; a slow candidate never holds the global registry.
+    pub(crate) async fn participant_control_lock(&self, session: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.participant_controls.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(session).and_then(Weak::upgrade) { return lock; }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(session.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     /// Tell the ring an approval gate opened (`opened = true`) or resolved
@@ -1382,6 +1407,9 @@ impl SignalingBridge {
     /// lifetime. Idempotent — absent entries are fine. Called from
     /// `core::close_session`.
     pub async fn unregister_session(&self, session_id: &str) {
+        // An in-flight lifecycle/publication owner keeps the same lock across
+        // close; retain it until its final strong reference is gone.
+        self.participant_controls.lock().await.retain(|_, lock| lock.strong_count() > 0);
         // Keep an active preparation's lock through teardown/reopen; dead
         // entries are also pruned whenever another preparation starts.
         self.gate_preparations.lock().await.retain(|(sid, _), lock| sid != session_id || lock.strong_count() > 0);

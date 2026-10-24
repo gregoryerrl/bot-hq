@@ -214,6 +214,9 @@ check.
 |---|---|---|
 | `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the big glue fn); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
 | `src/core/spawn_draft_tests.rs` | async draft/publication wire tests for both connectors: close/rollback during probe, frozen input settings, staged metadata/token/notices and operation-owned publication | — |
+| `src/core/participant_runtime.rs` | host-owned live change worker: reserve/claim, retire, stage, publish or restore; cancellation and process shutdown receipts | M |
+| `src/core/live_participant.rs` | candidate prompt/config/pump construction, bounded attributed history excerpts, dynamic activity/watchdog/reviewer roster refresh | M |
+| `src/core/participant_runtime_tests.rs` | injected connector tests through the runtime worker, real ring, storage and close path | — |
 | `src/core/close_learnings.rs` | pure `decide`/`plan(decision, claimed, in_flight)` for the D15 close-out epilogue (in-flight decides first, round 11), `outcome_notice` | M |
 | `src/core/watchdog.rs` | `run_stall_watchdog`: stall + idle-unflagged loop → `session:attention` chip / nudge / halt escalation | L |
 | `src/core/worktree.rs` | `ensure_worktree`/`remove_worktree_if_clean` (argv-array `git`, no shell) | M |

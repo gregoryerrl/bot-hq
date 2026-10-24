@@ -1681,9 +1681,25 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   Every spawn recovers an interrupted applying change before project setup or
   roster selection, including temporary-halt respawns. Recovery conflicts stop
   startup with a recap; pending intent stays pending and is not replayed as work.
-  Runtime authorization/process execution, context
-  transfer and the UI remain integration work; no user control invokes these
-  storage or scheduling primitives yet.
+  `core::participant_runtime` now owns the host's asynchronous operation:
+  reserve, claim, drain watchdog/target writes, revoke the old token, await
+  connector shutdown, prepare a frozen draft, bind the new input/epoch, then
+  publish metadata and the runtime. Failed setup restores only its target from
+  the prior spawn configuration; failed recovery keeps a recap and the ring held.
+  Connector lifecycle tasks acknowledge child cleanup before sending their final
+  event; supervisors await that receipt even with a full event queue. This does
+  not claim Windows process-tree parity or control of escaped daemon processes.
+  Per-session lifecycle locks serialize close/restart/start; teardown cancels and
+  joins the worker outside the global session map before deleting resources.
+  Runtime publication and automatic-publication authority share a per-session
+  lock. Queued decisions are re-presented to the resulting reviewer, or promoted
+  to a user decision when no reviewer remains. Pending user gates survive removal
+  of their requester. Activity slots and the weak watchdog roster refresh together.
+  Candidate prompt excerpts (phase docs, own handoff, first three/latest six
+  user rows) cap encoded bytes at64KB and never advance a reader cursor.
+  Full bootstrap/history budgeting, meter reset, UI controls and delegated-agent
+  authorization remain integration work; no Session Settings control invokes the
+  host API yet. A connector startup receipt is not proof of a successful model turn.
 - `participant_cursors` (participant → last read message id) and
   `participant_deliveries` (participant, message_id, delivered_at,
   withheld_reason) — the ring's per-participant read position and its

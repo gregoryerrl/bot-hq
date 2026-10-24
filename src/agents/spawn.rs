@@ -818,6 +818,7 @@ impl ParticipantInput {
 /// Driver handle for one running agent subprocess.
 pub struct AgentHandle {
     incarnation: Arc<crate::agents::incarnation::Incarnation>,
+    stopped: Option<StopObserver>,
     pub name: String,
     pub event_rx: mpsc::Receiver<AgentEvent>,
     /// Private so the only way to this agent's stdin is [`AgentHandle::input`],
@@ -827,7 +828,7 @@ pub struct AgentHandle {
     /// path). Separate from `input_tx` so an interrupt preempts queued user
     /// messages, exactly as the binary's control protocol expects.
     pub control_tx: mpsc::Sender<ControlRequest>,
-    kill_tx: Option<oneshot::Sender<()>>,
+    kill_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     /// The turn epoch that was live the last time bot-hq ITSELF interrupted this
     /// agent (`NO_INTERRUPT_EPOCH` = never). Shared with the agent's pump, which
     /// reads it when a turn completes `is_error:true`: claude-code reports an
@@ -849,7 +850,63 @@ pub struct AgentHandle {
 /// [`AgentHandle::interrupted_epoch`]'s "never interrupted" value.
 pub const NO_INTERRUPT_EPOCH: u64 = u64::MAX;
 
+/// None is still running; a terminal result is sent after connector cleanup
+/// and child wait, independently of a possibly full event channel.
+pub(crate) type StopObserver = tokio::sync::watch::Receiver<Option<std::result::Result<(), String>>>;
+
+#[derive(Clone)]
+pub(crate) struct StopControl {
+    incarnation: Arc<crate::agents::incarnation::Incarnation>,
+    kill: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    stopped: Option<StopObserver>,
+}
+
+impl StopControl {
+    pub fn kill(&self) {
+        if let Some(tx) = self.kill.lock().unwrap_or_else(|p| p.into_inner()).take() { let _ = tx.send(()); }
+    }
+    pub async fn retire_and_wait(&self, timeout: Duration) -> std::result::Result<(), String> {
+        self.incarnation.retire().await;
+        self.kill();
+        let observer = self.stopped.clone().ok_or("runtime has no shutdown observer")?;
+        tokio::time::timeout(timeout, observe_stop(observer)).await
+            .map_err(|_| "runtime shutdown was not acknowledged before the deadline".to_string())?
+    }
+}
+
+async fn observe_stop(mut observer: StopObserver) -> std::result::Result<(), String> {
+    loop {
+        if let Some(result) = observer.borrow().clone() { return result; }
+        observer.changed().await.map_err(|_| "runtime stopped reporting before shutdown was acknowledged".to_string())?;
+    }
+}
+
 impl AgentHandle {
+    pub(crate) fn stop_control(&self) -> StopControl {
+        StopControl { incarnation: self.incarnation.clone(), kill: self.kill_tx.clone(), stopped: self.stopped.clone() }
+    }
+    pub(crate) fn with_stop_observer(mut self, observer: StopObserver) -> Self {
+        self.stopped = Some(observer);
+        self
+    }
+
+    pub async fn wait_stopped(&self) -> std::result::Result<(), String> {
+        let observer = self.stopped.clone().ok_or("runtime has no shutdown observer")?;
+        observe_stop(observer).await
+    }
+
+    /// Stop the owned runtime and wait for its cleanup receipt. A missing,
+    /// failed or timed-out receipt is NOT proof of shutdown.
+    pub async fn stop_and_wait(&mut self, timeout: Duration) -> std::result::Result<(), String> {
+        self.kill();
+        tokio::time::timeout(timeout, self.wait_stopped()).await
+            .map_err(|_| "runtime shutdown was not acknowledged before the deadline".to_string())?
+    }
+
+    pub async fn retire_and_wait(&mut self, timeout: Duration) -> std::result::Result<(), String> {
+        self.incarnation.retire().await;
+        self.stop_and_wait(timeout).await
+    }
     /// The host-write fence shared with THIS handle's pump, never re-derived
     /// from a slug. A model/account replacement gets a fresh handle and fence.
     pub fn incarnation(&self) -> Arc<crate::agents::incarnation::Incarnation> {
@@ -891,10 +948,11 @@ impl AgentHandle {
     ) -> Self {
         Self {
             name,
+            stopped: None,
             event_rx,
             input_tx: ParticipantInput::new(session_id, input_tx),
             control_tx,
-            kill_tx: Some(kill_tx),
+            kill_tx: Arc::new(Mutex::new(Some(kill_tx))),
             interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
             incarnation: crate::agents::incarnation::Incarnation::new(),
         }
@@ -911,9 +969,7 @@ impl AgentHandle {
 
     /// Best-effort kill. Idempotent (subsequent calls no-op).
     pub fn kill(&mut self) {
-        if let Some(tx) = self.kill_tx.take() {
-            let _ = tx.send(());
-        }
+        self.stop_control().kill();
     }
 
     /// Best-effort interrupt: queue a `control_request` to abort the in-flight
@@ -963,6 +1019,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let (input_tx, input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
     let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(None);
 
     let mut cmd = build_command(&cfg);
     cmd.stdin(Stdio::piped())
@@ -1018,7 +1075,7 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let event_tx_for_lifecycle = event_tx.clone();
     let agent_name = cfg.agent_name.clone();
     tokio::spawn(async move {
-        tokio::select! {
+        let (result, message) = tokio::select! {
             _ = kill_rx => {
                 info!(agent = %agent_name, "kill signalled");
                 // Reap the whole process group, not just the leader: tool
@@ -1031,36 +1088,35 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
                     // SAFETY: kill(2) is thread-safe; -pid targets the group.
                     unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
                 }
-                let _ = child.kill().await;
-                if let Some(pid) = child_pid {
-                    CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
-                }
-                let _ = event_tx_for_lifecycle
-                    .send(AgentEvent::Exited("killed by supervisor".into()))
-                    .await;
+                let _ = child.start_kill();
+                let result = child.wait().await.map(|_| ()).map_err(|e| format!("waiting for killed child: {e}"));
+                (result, "killed by supervisor".to_string())
             }
             res = child.wait() => {
-                if let Some(pid) = child_pid {
-                    CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
-                }
-                let msg = match res {
+                let msg = match &res {
                     Ok(status) => format!("status={status:?}"),
                     Err(e) => format!("wait error: {e}"),
                 };
                 warn!(agent = %agent_name, msg = %msg, "agent exited");
-                let _ = event_tx_for_lifecycle.send(AgentEvent::Exited(msg)).await;
+                (res.map(|_| ()).map_err(|e| format!("waiting for child: {e}")), msg)
             }
+        };
+        if let Some(pid) = child_pid {
+            CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
         }
+        let _ = stopped_tx.send(Some(result));
+        let _ = event_tx_for_lifecycle.send(AgentEvent::Exited(message)).await;
     });
 
     info!(agent = %cfg.agent_name, "agent spawned");
 
     Ok(AgentHandle {
         name: cfg.agent_name,
+        stopped: Some(stopped_rx),
         event_rx,
         input_tx: ParticipantInput::new(cfg.session_id, input_tx),
         control_tx,
-        kill_tx: Some(kill_tx),
+        kill_tx: Arc::new(Mutex::new(Some(kill_tx))),
         interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
         incarnation: crate::agents::incarnation::Incarnation::new(),
     })
@@ -1116,6 +1172,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     let (out_input_tx, out_input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
     let (out_control_tx, out_control_rx) = mpsc::channel::<ControlRequest>(8);
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
+    let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(None);
 
     let name = cfg.agent_name.clone();
     // Cloned before `cfg` moves into `supervise`. The OUTER handle's stdin is
@@ -1127,7 +1184,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     match cfg.config.runtime() {
         crate::agents::runtime::Runtime::Codex => {
             let first = crate::agents::codex::spawn::spawn_codex_agent(cfg.clone()).await?;
-            tokio::spawn(supervise(
+            tokio::spawn(async move { let result = supervise(
                 cfg,
                 policy,
                 first,
@@ -1136,11 +1193,11 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
                 out_control_rx,
                 kill_rx,
                 crate::agents::codex::spawn::spawn_codex_agent,
-            ));
+            ).await; let _ = stopped_tx.send(Some(result)); });
         }
         crate::agents::runtime::Runtime::ClaudeCode => {
             let first = spawn_agent(cfg.clone()).await?;
-            tokio::spawn(supervise(
+            tokio::spawn(async move { let result = supervise(
                 cfg,
                 policy,
                 first,
@@ -1149,16 +1206,17 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
                 out_control_rx,
                 kill_rx,
                 spawn_agent,
-            ));
+            ).await; let _ = stopped_tx.send(Some(result)); });
         }
     }
 
     Ok(AgentHandle {
         name,
+        stopped: Some(stopped_rx),
         event_rx: out_event_rx,
         input_tx: ParticipantInput::new(session_id, out_input_tx),
         control_tx: out_control_tx,
-        kill_tx: Some(kill_tx),
+        kill_tx: Arc::new(Mutex::new(Some(kill_tx))),
         interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
         incarnation: crate::agents::incarnation::Incarnation::new(),
     })
@@ -1177,7 +1235,7 @@ async fn supervise<S, Fut>(
     mut out_control_rx: mpsc::Receiver<ControlRequest>,
     mut kill_rx: oneshot::Receiver<()>,
     mut spawn_next: S,
-) where
+) -> std::result::Result<(), String> where
     S: FnMut(SpawnConfig) -> Fut + Send,
     Fut: std::future::Future<Output = Result<AgentHandle>> + Send,
 {
@@ -1189,14 +1247,23 @@ async fn supervise<S, Fut>(
     // can't busy-loop on `None`. The user-input `None` arm tears the loop down first.
     let mut control_open = true;
 
+    // A full event/input queue must not prevent a stop from reaching the
+    // child. Await the same shutdown receipt on every cancellation boundary.
+    macro_rules! interruptible {
+        ($future:expr) => {
+            tokio::select! {
+                biased;
+                _ = &mut kill_rx => return incarnation.stop_and_wait(Duration::from_secs(30)).await,
+                value = $future => value,
+            }
+        };
+    }
+
     loop {
         // A freshly respawned `--resume` child idles until it receives input —
         // nudge it to pick up the interrupted turn.
         if let Some(nudge) = pending_nudge.take() {
-            let _ = incarnation
-                .input_tx
-                .relay(OutgoingUserMessage::text(nudge))
-                .await;
+            let _ = interruptible!(incarnation.input_tx.relay(OutgoingUserMessage::text(nudge)));
         }
 
         let mut last_error_status: Option<u16> = None;
@@ -1211,8 +1278,7 @@ async fn supervise<S, Fut>(
             tokio::select! {
                 biased;
                 _ = &mut kill_rx => {
-                    incarnation.kill();
-                    return;
+                    return incarnation.stop_and_wait(Duration::from_secs(30)).await;
                 }
                 ctl = out_control_rx.recv(), if control_open => {
                     match ctl {
@@ -1230,7 +1296,7 @@ async fn supervise<S, Fut>(
                 msg = out_input_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            if let Err(e) = incarnation.input_tx.relay(msg).await {
+                            if let Err(e) = interruptible!(incarnation.input_tx.relay(msg)) {
                                 // The incarnation's stdin pump has died (its
                                 // receiver dropped), so the child is now deaf to
                                 // ALL input — yet its event channel can stay open
@@ -1242,14 +1308,12 @@ async fn supervise<S, Fut>(
                                 // the public sender → `is_stale()` → the next
                                 // `ensure_session_started` evicts + respawns.
                                 warn!(agent = %agent, error = %e, "incarnation input pump died; terminating supervisor so the session goes stale and respawns");
-                                incarnation.kill();
-                                return;
+                                return incarnation.stop_and_wait(Duration::from_secs(30)).await;
                             }
                         }
                         None => {
                             // Caller dropped the handle → tear down.
-                            incarnation.kill();
-                            return;
+                            return incarnation.stop_and_wait(Duration::from_secs(30)).await;
                         }
                     }
                 }
@@ -1273,9 +1337,7 @@ async fn supervise<S, Fut>(
                                         // A healthy turn clears the retry budget;
                                         // if we'd been retrying, signal recovery.
                                         if consecutive_transient > 0 {
-                                            let _ = out_event_tx
-                                                .send(AgentEvent::Health(AgentHealth::Running))
-                                                .await;
+                                            let _ = interruptible!(out_event_tx.send(AgentEvent::Health(AgentHealth::Running)));
                                         }
                                         consecutive_transient = 0;
                                         last_error_status = None;
@@ -1283,7 +1345,7 @@ async fn supervise<S, Fut>(
                                 }
                                 _ => {}
                             }
-                            let _ = out_event_tx.send(ev).await;
+                            let _ = interruptible!(out_event_tx.send(ev));
                         }
                         None => break, // incarnation fully ended
                     }
@@ -1291,6 +1353,7 @@ async fn supervise<S, Fut>(
             }
         }
 
+        incarnation.wait_stopped().await?;
         let transient = last_error_status
             .map(is_transient_api_error)
             .unwrap_or(false);
@@ -1304,11 +1367,9 @@ async fn supervise<S, Fut>(
                 delay_ms = delay.as_millis() as u64,
                 "agent hit transient API error; auto-resuming after backoff"
             );
-            let _ = out_event_tx
-                .send(AgentEvent::Health(AgentHealth::Retrying))
-                .await;
+            let _ = interruptible!(out_event_tx.send(AgentEvent::Health(AgentHealth::Retrying)));
             tokio::select! {
-                _ = &mut kill_rx => return,
+                _ = &mut kill_rx => return Ok(()),
                 _ = tokio::time::sleep(delay) => {}
             }
             pending_nudge = Some(format!(
@@ -1324,13 +1385,11 @@ async fn supervise<S, Fut>(
                 }
                 Err(e) => {
                     warn!(agent = %agent, error = %e, "respawn failed after transient error");
-                    let _ = out_event_tx
-                        .send(AgentEvent::Notice(format!(
+                    let _ = interruptible!(out_event_tx.send(AgentEvent::Notice(format!(
                             "could not resume after a transient API error (HTTP {status}): {e}. \
                              Reopen the session to retry."
-                        )))
-                        .await;
-                    return;
+                        ))));
+                    return Ok(());
                 }
             }
         }
@@ -1339,17 +1398,15 @@ async fn supervise<S, Fut>(
             // Budget exhausted — a real outage, not a blip. Surface it.
             let status = last_error_status.unwrap_or(0);
             warn!(agent = %agent, status, retries = consecutive_transient, "transient API errors exhausted retry budget");
-            let _ = out_event_tx
-                .send(AgentEvent::Notice(format!(
+            let _ = interruptible!(out_event_tx.send(AgentEvent::Notice(format!(
                     "Stopped after {consecutive_transient} consecutive transient API errors \
                      (last: HTTP {status}). The upstream API stayed unavailable — reopen the \
                      session to resume from here."
-                )))
-                .await;
+                ))));
         }
         // Clean exit / permanent error / retries exhausted: returning drops
         // `out_event_tx`, so the peer pump sees its channel close and unwinds.
-        return;
+        return Ok(());
     }
 }
 
@@ -2889,10 +2946,12 @@ mod tests {
         let (kill_tx, _kill_rx) = oneshot::channel::<()>();
         let handle = AgentHandle {
             name: "fake".into(),
+            // No OS process exists in this pure event-stream fixture.
+            stopped: Some(tokio::sync::watch::channel(Some(Ok(()))).1),
             event_rx: ev_rx,
             input_tx: ParticipantInput::new("test-session", in_tx),
             control_tx,
-            kill_tx: Some(kill_tx),
+            kill_tx: Arc::new(Mutex::new(Some(kill_tx))),
             interrupted_epoch: Arc::new(std::sync::atomic::AtomicU64::new(NO_INTERRUPT_EPOCH)),
             incarnation: crate::agents::incarnation::Incarnation::new(),
         };
@@ -2925,6 +2984,60 @@ mod tests {
             base_delay: Duration::ZERO,
             max_delay: Duration::ZERO,
         }
+    }
+
+    #[tokio::test]
+    async fn shutdown_receipt_is_required_and_cannot_precede_the_connector() {
+        let (mut handle, _events, _inputs) = fake_incarnation();
+        handle.stopped = None;
+        assert!(handle.wait_stopped().await.unwrap_err().contains("no shutdown observer"));
+        let (receipt, observer) = tokio::sync::watch::channel(None);
+        handle.stopped = Some(observer);
+        assert!(tokio::time::timeout(Duration::from_millis(20), handle.wait_stopped()).await.is_err());
+        receipt.send_replace(Some(Err("cleanup failed".into())));
+        assert_eq!(handle.wait_stopped().await.unwrap_err(), "cleanup failed");
+        receipt.send_replace(Some(Ok(())));
+        handle.wait_stopped().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn supervisor_stop_crosses_a_full_event_queue_and_awaits_child_receipt() {
+        let (mut child, events, _inputs) = fake_incarnation();
+        let (child_stop, child_stopped) = oneshot::channel();
+        child.kill_tx = Arc::new(Mutex::new(Some(child_stop)));
+        let (receipt, observer) = tokio::sync::watch::channel(None);
+        child.stopped = Some(observer);
+        let (out, _unread) = mpsc::channel(1);
+        out.send(AgentEvent::Text("full".into())).await.unwrap();
+        let (_input, inputs) = mpsc::channel(1);
+        let (_control, controls) = mpsc::channel(1);
+        let (stop, stopped) = oneshot::channel();
+        let task = tokio::spawn(supervise(cfg(), instant_policy(0), child, out, inputs, controls, stopped,
+            |_| async { anyhow::bail!("must not respawn") }));
+        events.send(AgentEvent::Text("blocked forward".into())).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), child_stopped).await.unwrap().unwrap();
+        assert!(!task.is_finished(), "sending kill is not a shutdown receipt");
+        receipt.send_replace(Some(Ok(())));
+        tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_lifecycle_acknowledges_a_reaped_owned_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-claude");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 120\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = cfg();
+        config.claude_bin = Some(script.to_string_lossy().into_owned());
+        config.working_dir = Some(dir.path().to_path_buf());
+        let mut handle = spawn_supervised_agent(config, instant_policy(0)).await.unwrap();
+        handle.retire_and_wait(Duration::from_secs(3)).await.unwrap();
+        assert!(!handle.incarnation().is_active());
+        assert!(handle.input().is_closed(), "supervisor returned only after its child cleanup");
     }
 
     #[tokio::test]
@@ -2977,7 +3090,7 @@ mod tests {
         ev2.send(clean_turn()).await.unwrap();
         drop(ev2);
 
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
 
         let mut got = Vec::new();
         while let Some(ev) = out_ev_rx.recv().await {
@@ -3044,7 +3157,7 @@ mod tests {
             .await
             .unwrap();
 
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
 
         assert!(
             out_in_tx.is_closed(),
@@ -3083,7 +3196,7 @@ mod tests {
         ev1.send(errored_turn(400)).await.unwrap(); // permanent
         drop(ev1);
 
-        task.await.unwrap(); // returns without a respawn
+        task.await.unwrap().unwrap(); // returns without a respawn
 
         // A terminated supervisor drops its input receiver, so the stable
         // sender now reads closed — exactly the signal `SessionHandle::is_stale`
@@ -3152,7 +3265,7 @@ mod tests {
         ev3.send(errored_turn(529)).await.unwrap();
         drop(ev3);
 
-        task.await.unwrap();
+        task.await.unwrap().unwrap();
 
         let mut got = Vec::new();
         while let Some(ev) = out_ev_rx.recv().await {
