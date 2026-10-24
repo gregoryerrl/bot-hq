@@ -11,7 +11,7 @@ export type GateChip = {
    *  `failed` with another code, `refused` never ran after the approval —
    *  refused at run time or unable to start (feedback #104 — "approved" used
    *  to be shown over all of these). */
-  state: "pending" | "approved" | "ran" | "failed" | "refused" | "rejected" | "withdrawn";
+  state: "pending" | "approved" | "automatic" | "ran" | "failed" | "refused" | "rejected" | "withdrawn";
   /** What the chip shows: the state, or `exit N` for a failed run. */
   label: string;
   /** The gate's full id, for the title. */
@@ -58,9 +58,13 @@ function outcomeOf(r: {
   run_refusal?: string | null;
 }): Pick<GateChip, "state" | "label" | "detail"> {
   if (r.status === "pending") return { state: "pending", label: "pending" };
-  if (r.status !== "answered") return { state: "withdrawn", label: "withdrawn" };
-  if (r.picked_option !== "Approve") return { state: "rejected", label: "rejected" };
+  const automatic = r.status === "auto_running" || r.status === "auto_resolved";
+  if (!automatic && r.status !== "answered") return { state: "withdrawn", label: "withdrawn" };
+  if (!automatic && r.picked_option !== "Approve") return { state: "rejected", label: "rejected" };
   if (r.run_refusal) return { state: "refused", label: "not run", detail: r.run_refusal };
+  if (automatic && (r.exit_code === null || r.exit_code === undefined)) {
+    return { state: "automatic", label: "auto-allowed", detail: "Authorized by auto_allow after review; no user approval was requested." };
+  }
   if (r.exit_code === null || r.exit_code === undefined) return { state: "approved", label: "approved" };
   if (r.exit_code === 0) return { state: "ran", label: "ran" };
   return { state: "failed", label: r.exit_code === 124 ? "timed out" : `exit ${r.exit_code}` };

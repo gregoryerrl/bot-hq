@@ -31,7 +31,7 @@ pub const FINDING_WITHDRAWAL_REASON: &str = "withdrawn: the reviewer filed a blo
 /// comparing `status === "pending"` (EYES P8): a future `!== "answered"` there
 /// would otherwise surface a queued row as an approvable card, and approving
 /// one would publish before the reviewer had been dealt.
-const TRAY_VISIBLE_STATUSES: &str = "'pending', 'answered', 'superseded', 'withdrawn'";
+const TRAY_VISIBLE_STATUSES: &str = "'pending', 'answered', 'superseded', 'withdrawn', 'auto_running', 'auto_resolved'";
 
 /// The options an approval gate parks with, verbatim — the discriminator that
 /// tells a GATE (action gate, push gate) from an ordinary parked question.
@@ -358,6 +358,13 @@ impl Storage {
         Ok(res.rows_affected() == 1)
     }
 
+    pub async fn invalidate_auto_gate_review(&self, choice_id: &str, body_row_id: i64) -> Result<()> {
+        sqlx::query("UPDATE session_tray SET reviewed_at = NULL WHERE choice_id = ? AND body_row_id = ? AND status = 'queued' AND approval_required = 0")
+            .bind(choice_id).bind(body_row_id).execute(&self.pool).await
+            .context("invalidating automatic review after a revision request")?;
+        Ok(())
+    }
+
     /// Durable work for the automatic-run worker, including after restart.
     /// No user answer is manufactured; ready rows retain NULL picked_option
     /// and answered_at. Closed sessions are never runnable.
@@ -422,6 +429,17 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("promoting queued gate {choice_id}"))?;
+        Ok(res.rows_affected())
+    }
+
+    /// Bridge promotion is based on a reviewed snapshot. A revision that
+    /// changed/cleared its body pointer must not inherit that promotion.
+    pub async fn promote_queued_gate_for_body(&self, choice_id: &str, body_row_id: Option<i64>) -> Result<u64> {
+        let res = sqlx::query(
+            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL \
+             WHERE choice_id = ? AND body_row_id IS ? AND status = 'queued' AND run_started_at IS NULL",
+        ).bind(now_utc()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+            .context("promoting the reviewed body to user approval")?;
         Ok(res.rows_affected())
     }
 
@@ -535,7 +553,16 @@ impl Storage {
                AND result_row_id IS NULL AND run_refusal IS NULL \
                AND exec_kind IS NULL AND urgent_reason IS NULL \
                AND run_not_before IS NULL AND run_not_after IS NULL \
-               AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_tray.session_id AND s.closed_at IS NULL)",
+               AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = session_tray.session_id AND s.closed_at IS NULL) \
+               AND EXISTS (SELECT 1 FROM session_participants p, \
+                   json_each(CASE WHEN json_valid(p.capabilities) THEN p.capabilities ELSE '[]' END) cap \
+                   WHERE p.session_id = session_tray.session_id AND p.slug = session_tray.agent \
+                     AND p.enabled <> 0 AND cap.value = 'edit_files') \
+               AND NOT EXISTS (SELECT 1 FROM findings f WHERE f.session_id = session_tray.session_id \
+                   AND f.status = 'open' AND ( \
+                     (f.severity = 'blocking' AND (f.gate_id = session_tray.choice_id \
+                       OR (f.gate_id IS NULL AND f.created_at > session_tray.asked_at))) \
+                     OR (f.severity = 'advisory' AND f.gate_id = session_tray.choice_id)))",
         ).bind(now_utc()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
             .context("claiming reviewed automatic gate")?;
         Ok(res.rows_affected() == 1)
@@ -949,8 +976,8 @@ impl Storage {
         let cutoff = crate::storage::cutoff_days_ago(retention_days);
         let res = sqlx::query(
             "DELETE FROM session_tray \
-             WHERE status NOT IN ('pending', 'queued') \
-               AND COALESCE(answered_at, asked_at) < ?",
+             WHERE status NOT IN ('pending', 'queued', 'auto_running') \
+               AND COALESCE(answered_at, run_started_at, asked_at) < ?",
         )
         .bind(cutoff)
         .execute(&self.pool)
@@ -965,6 +992,9 @@ mod tests {
     use super::*;
 
     async fn automatic_gate(s: &Storage, id: &str) -> i64 {
+        if s.participant_by_slug("s-auto", "hands").await.unwrap().is_none() {
+            s.insert_participant("s-auto", "hands", "Fixture", None, None, r#"["edit_files","run_bash"]"#, "active", 0).await.unwrap();
+        }
         let body = s.post_to_channel("s-auto", "system", None, "system_notice", "review this body", None)
             .await.unwrap().message_id();
         s.insert_queued_gate_with_approval("s-auto", id, "hands", "fixture", "publish fixture", false)
@@ -1375,6 +1405,23 @@ mod tests {
         let queued = s.queued_gates_for_session("s1").await.unwrap();
         assert_eq!(queued.len(), 1, "the queued row survived the GC");
         assert_eq!(queued[0].choice_id, "c-queued");
+    }
+
+    #[tokio::test]
+    async fn tray_retention_keeps_running_auto_work_and_dates_results_by_the_run() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-auto", "fixture", None).await.unwrap();
+        for id in ["running", "finished"] {
+            let body = automatic_gate(&s, id).await;
+            s.mark_auto_gate_reviewed(id, body).await.unwrap();
+            assert!(s.claim_auto_gate_run(id, body).await.unwrap());
+            sqlx::query("UPDATE session_tray SET asked_at = '2000-01-01T00:00:00Z' WHERE choice_id = ?")
+                .bind(id).execute(s.pool()).await.unwrap();
+            if id == "finished" { s.set_tray_run_result(id, Some(body), Some(0), 1).await.unwrap(); }
+        }
+        assert_eq!(s.purge_resolved_tray(90).await.unwrap(), 0, "a recent run of an old request is still recent");
+        assert_eq!(s.purge_resolved_tray(-1).await.unwrap(), 1, "only the finished run may be purged");
+        assert_eq!(s.get_tray_entry("running").await.unwrap().unwrap().status, "auto_running");
     }
 
     /// F10: the store redacts a tray row's prompt and each option (before the

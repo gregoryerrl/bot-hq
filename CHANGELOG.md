@@ -13,6 +13,8 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Automatic and scheduled command results display as host notices.** They
+  no longer appear in the chat as if the user had written their output.
 - **Scheduled command results wake the agent that requested them.** The
   result is recorded before queuing a turn, which waits behind live work,
   Pause, declared halts and other approvals. A removed requester passes
@@ -72,7 +74,8 @@ model side by side. Migration 0102 applies on first launch.
 
 - **Review for auto-allowed publications (in progress).** The queue now stores
   review authority separately from user approval and preserves it across a
-  restart. The automatic-run and hook paths are still being connected.
+  restart. Reviewed runs share the body/script checks and report their results
+  as automatic execution. Hook and direct-tool activation are still pending.
 - **A saved model names the CLI it runs through.** The Model dialog has a
   **Runtime** field — Claude Code (the claude CLI, as before) or Codex
   (OpenAI's Codex CLI). For a Codex row the account field is its **Codex

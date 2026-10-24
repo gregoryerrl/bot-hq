@@ -128,6 +128,12 @@ enum GateRunOutcome {
     Unchanged,
 }
 
+#[derive(Clone, Copy)]
+enum GateRunAuthority {
+    UserApproval,
+    ReviewedAuto { body_row_id: i64 },
+}
+
 impl GateRunOutcome {
     fn into_ran(self) -> Option<GateRan> {
         match self {
@@ -1566,6 +1572,18 @@ impl SignalingBridge {
         if !matches!(gate_verdict(picked), crate::policy::ViolationOutcome::Approved) {
             return GateRunOutcome::Unchanged;
         }
+        self.run_authorized_gate(session_id, choice_id, command, body, deferred, GateRunAuthority::UserApproval).await
+    }
+
+    async fn run_authorized_gate(
+        &self,
+        session_id: &str,
+        choice_id: &str,
+        command: &str,
+        body: &mut String,
+        deferred: bool,
+        authority: GateRunAuthority,
+    ) -> GateRunOutcome {
         // The gate's row: the body hash its review covered (0084), for an
         // edit the live body its reviewer's diff was made against (0088), and
         // the bound the agent asked for (0093).
@@ -1573,6 +1591,12 @@ impl SignalingBridge {
             Some(storage) => storage.get_tray_entry(choice_id).await.ok().flatten(),
             None => None,
         };
+        if let GateRunAuthority::ReviewedAuto { body_row_id } = authority {
+            if !row.as_ref().is_some_and(|r| !r.approval_required && r.body_row_id == Some(body_row_id)
+                && r.reviewed_at.is_some() && r.status == "queued") {
+                return GateRunOutcome::Unchanged;
+            }
+        }
         // The run window (0098, feedback #66a): closed → refused; not yet open
         // → the run is SCHEDULED for its start (the scheduler calls back here
         // with `deferred`), and this approval delivers only the promise.
@@ -1623,8 +1647,18 @@ impl SignalingBridge {
         // in progress or done — nothing runs twice, and this is not a refusal
         // of the gate, so no refusal is recorded.
         if let Some(storage) = self.storage.lock().await.clone() {
-            match storage.claim_gate_run(choice_id).await {
-                Ok(true) => {}
+            let claim = match authority {
+                GateRunAuthority::UserApproval => storage.claim_gate_run(choice_id).await,
+                GateRunAuthority::ReviewedAuto { body_row_id } => storage.claim_auto_gate_run(choice_id, body_row_id).await,
+            };
+            match claim {
+                Ok(true) => {
+                    if matches!(authority, GateRunAuthority::ReviewedAuto { .. }) {
+                        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+                            choice_id: choice_id.into(), picked: "Auto-run started".into(),
+                        });
+                    }
+                }
                 Ok(false) => {
                     let started = row
                         .as_ref()
@@ -1732,7 +1766,7 @@ impl SignalingBridge {
                 )),
                 (Some(then), Ok((now, _))) if then != now => Some((
                     "NOT RUN: a body file of this command changed after it was reviewed, so \
-                     nothing was published — the approved card no longer matches what would go \
+                     nothing was published — the reviewed command no longer matches what would go \
                      out. Re-issue the command; the reviewer reads the new body first."
                         .to_string(),
                     "a body file changed after it was reviewed".to_string(),
@@ -1889,6 +1923,41 @@ impl SignalingBridge {
         })
     }
 
+    /// Execute only a previously reviewed policy-authorized row. This never
+    /// resolves a user choice or records user words; the result is a host row.
+    pub(super) async fn execute_reviewed_auto_gate(&self, row: &crate::storage::SessionTrayEntry) -> bool {
+        let Some(storage) = self.storage.lock().await.clone() else { return false };
+        let (Some(command), Some(body_row_id)) = (row.command_text.as_deref(), row.body_row_id) else { return false };
+        let mut output = String::new();
+        let outcome = self.run_authorized_gate(
+            &row.session_id, &row.choice_id, command, &mut output, true,
+            GateRunAuthority::ReviewedAuto { body_row_id },
+        ).await;
+        if matches!(outcome, GateRunOutcome::Unchanged) { return false; }
+        let body = format!(
+            "Automatic publication {} — authorized by auto_allow after review; no user approval was requested.\n`{}`\n{}",
+            row.choice_id, crate::policy::secret_scan::redact(command), crate::policy::secret_scan::redact(&output),
+        );
+        let receipt = crate::core::post_system_notice(&storage, Some(self), &row.session_id, MessageKind::SystemNotice, body, None).await;
+        let (code, ms) = match &outcome {
+            GateRunOutcome::Ran(run) => (run.exit_code, run.ran_ms),
+            GateRunOutcome::Refused => (None, 0),
+            GateRunOutcome::Unchanged => unreachable!(),
+        };
+        let linked = storage.set_tray_run_result(&row.choice_id, receipt.as_ref().map(|r| r.message_id()), code, ms).await;
+        if let Err(error) = &linked {
+            tracing::warn!(%error, choice_id = %row.choice_id, "automatic publication result could not be linked");
+        }
+        drop(outcome);
+        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+            choice_id: row.choice_id.clone(), picked: "Auto-allowed after review".into(),
+        });
+        if receipt.is_some() && linked.is_ok() {
+            self.wake_gate_result_reader(&storage, row).await;
+        }
+        true
+    }
+
     /// Run every scheduled gate whose window has opened (feedback #66a): the
     /// approved, windowed rows with no result and no refusal whose
     /// `run_not_before` is at or before now. Each runs through the same
@@ -1931,7 +2000,7 @@ impl SignalingBridge {
                 &storage,
                 Some(self),
                 &row.session_id,
-                MessageKind::Text,
+                MessageKind::SystemNotice,
                 body,
                 None,
             )
@@ -1952,7 +2021,7 @@ impl SignalingBridge {
             // never advertised as available to the participant.
             drop(outcome);
             if receipt.is_some() && linked.is_ok() {
-                self.wake_scheduled_result_reader(&storage, &row).await;
+                self.wake_gate_result_reader(&storage, &row).await;
             }
             // The tray tab and the scheduled strip refetch on this.
             let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
@@ -1964,7 +2033,7 @@ impl SignalingBridge {
         ran
     }
 
-    async fn wake_scheduled_result_reader(&self, storage: &Storage, row: &crate::storage::SessionTrayEntry) {
+    async fn wake_gate_result_reader(&self, storage: &Storage, row: &crate::storage::SessionTrayEntry) {
         if !matches!(storage.get_session(&row.session_id).await, Ok(Some(session)) if session.closed_at.is_none()) {
             return;
         }
@@ -1989,7 +2058,7 @@ impl SignalingBridge {
         let Some(reader) = reader else { return };
         let tx = self.session_sequencer.lock().await.get(&row.session_id).cloned();
         if let Some(tx) = tx {
-            // The scheduler is outside the ring and holds no bridge lock, so
+            // These result workers are outside the ring and hold no bridge lock, so
             // it can wait for queue space. A Summon queues behind live work,
             // gates, Pause and declared halts; a UserMessage would release them.
             if tx.send(crate::core::sequencer::SequencerCommand::Summon { participant_id: reader.id }).await.is_err() {
@@ -2060,6 +2129,7 @@ impl SignalingBridge {
                 tokio::time::sleep(SCHEDULED_GATE_TICK).await;
                 let Some(bridge) = weak.upgrade() else { break };
                 bridge.run_due_scheduled_gates().await;
+                bridge.run_reviewed_auto_publications().await;
             }
         });
     }
@@ -2186,6 +2256,8 @@ impl SignalingBridge {
         audit: &str,
     ) {
         body.push_str(refusal);
+        let automatic = row.is_some_and(|r| !r.approval_required);
+        let authority = if automatic { "Automatic publication" } else { "Approved gate" };
         if let Some(log) = self.violations.as_ref() {
             let _ = log
                 .record(
@@ -2194,7 +2266,7 @@ impl SignalingBridge {
                     crate::policy::ViolationKind::ToolBlocklist,
                     command.to_string(),
                     crate::policy::ViolationOutcome::Denied,
-                    Some(audit.into()),
+                    Some(if automatic { format!("auto_allow after review: {audit}") } else { audit.into() }),
                 )
                 .await;
         }
@@ -2207,7 +2279,7 @@ impl SignalingBridge {
                 Some(self),
                 session_id,
                 crate::storage::MessageKind::SystemNotice,
-                format!("⛔ Approved gate {choice_id} did not run — {refusal}: `{command}`"),
+                format!("⛔ {authority} {choice_id} did not run — {refusal}: `{command}`"),
                 None,
             )
             .await;

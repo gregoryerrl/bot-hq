@@ -10075,6 +10075,11 @@ mod tests {
         assert_eq!(bridge.run_due_scheduled_gates().await, 1);
         let row = storage.get_tray_entry("scheduled").await.unwrap().unwrap();
         assert_eq!(row.result_row_id.is_some(), state != "unrecorded", "{state}");
+        if let Some(result_id) = row.result_row_id {
+            let kind: String = sqlx::query_scalar("SELECT kind FROM messages WHERE id = ?")
+                .bind(result_id).fetch_one(storage.pool()).await.unwrap();
+            assert_eq!(kind, "system_notice", "a scheduled result is host output in the UI too");
+        }
         if state == "refused" {
             assert!(row.run_refusal.is_some());
             assert!(!repo.path().join("ran.txt").exists());

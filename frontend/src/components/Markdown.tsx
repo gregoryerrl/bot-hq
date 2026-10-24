@@ -37,7 +37,7 @@ function InlineCode({ children }: { children: React.ReactNode }) {
           title={`gate ${chip.choiceId}: ${chip.label}${chip.detail ? ` — ${chip.detail}` : ""}`}
           className={cn(
             "ml-1 rounded px-1 py-0.5 align-middle font-label-caps text-label-caps",
-            (chip.state === "approved" || chip.state === "ran") && "bg-primary/15 text-primary",
+            (chip.state === "approved" || chip.state === "automatic" || chip.state === "ran") && "bg-primary/15 text-primary",
             chip.state === "pending" && "bg-tertiary-container/40 text-on-surface",
             (chip.state === "rejected" || chip.state === "failed" || chip.state === "refused") &&
               "bg-error-container/40 text-on-error-container",

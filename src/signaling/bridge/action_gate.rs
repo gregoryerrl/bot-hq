@@ -889,7 +889,10 @@ impl SignalingBridge {
     /// One ledger row's state, from the tray row and the running mark.
     pub(super) async fn gate_ledger_state(&self, storage: &crate::storage::Storage, row: &crate::storage::SessionTrayEntry) -> String {
         match row.status.as_str() {
+            "queued" if !row.approval_required && row.reviewed_at.is_some() => "reviewed; auto_allow run queued".into(),
+            "queued" if !row.approval_required => "queued for review, then auto_allow run".into(),
             "queued" => "queued for the reviewer's read".to_string(),
+            "auto_running" | "auto_resolved" => self.automatic_gate_status(storage, row, false).await,
             "pending" => "pending the user's approval".to_string(),
             "answered" => {
                 let picked = row.picked_option.as_deref().unwrap_or("");
@@ -927,6 +930,31 @@ impl SignalingBridge {
                 None => other.to_string(),
             },
         }
+    }
+
+    async fn automatic_gate_status(&self, storage: &crate::storage::Storage, row: &crate::storage::SessionTrayEntry, with_output: bool) -> String {
+        let state = if let Some(why) = &row.run_refusal {
+            format!("NOT RUN: {why}")
+        } else if let Some(code) = row.exit_code {
+            format!("exit {code} after {}", human_ms(row.ran_ms.unwrap_or(0)))
+        } else if row.ran_ms.is_some() {
+            "could not start".into()
+        } else if let Some(run) = self.gate_run_info(&row.session_id, &row.choice_id) {
+            format!("RUNNING for {}s (bound {}s)", run.started.elapsed().as_secs(), run.limit.as_secs())
+        } else {
+            "run claimed; outcome not yet recorded".into()
+        };
+        let mut text = format!("auto_allow after review — {state}; no user approval was requested");
+        if with_output {
+            text.push_str(&format!(". Command: `{}`. Do not re-run it.", row.command_text.as_deref().unwrap_or("")));
+            if let Some(id) = row.result_row_id {
+                match storage.message_content(id).await {
+                    Ok(Some(content)) => text.push_str(&gate_output_excerpt(&content, id)),
+                    _ => text.push_str(&format!("\nIts output row (message {id}) could not be read.")),
+                }
+            }
+        }
+        text
     }
 
     /// [`gate_status`](Self::gate_status) scoped to the caller's session
@@ -1020,14 +1048,20 @@ impl SignalingBridge {
             _ => None,
         };
         Ok(match (row.status.as_str(), revise) {
+            ("auto_running" | "auto_resolved", _) => self.automatic_gate_status(&storage, &row, true).await,
             ("queued", Some(f)) => format!(
                 "queued, HELD for a revision — the reviewer read `{command}` and filed advisory finding {} \
-                 ({}). It will not park for the user on its own. Change the body file and re-issue the \
+                 ({}). It will not proceed on its own. Change the body file and re-issue the \
                  identical command (the new body is re-posted for the reviewer and the finding is \
-                 settled as fixed), or rebut the finding with disposition_finding to let it park \
+                 settled as fixed), or rebut the finding with disposition_finding to let it proceed \
                  unchanged — either way at the reviewer's next turn end, not at once.",
                 &f.finding_uid[..8],
                 f.summary.replace('\n', " ")
+            ),
+            ("queued", None) if !row.approval_required => format!(
+                "{} — `{command}` will run under auto_allow after review, without a user card. \
+                 A blocking finding withdraws it and a revision request holds it. Do not re-issue it.",
+                if row.reviewed_at.is_some() { "reviewed; automatic run queued" } else { "queued for the reviewer's read" }
             ),
             ("queued", None) => format!(
                 "queued — `{command}` is an outward publish waiting for the reviewer to read \
@@ -1331,7 +1365,7 @@ impl SignalingBridge {
                     if format!("{:x}", Sha256::digest(&bytes)) != *then {
                         return Err((
                             format!(
-                                "NOT RUN: the script `{script}` changed after it was parked, so the approved card \
+                                "NOT RUN: the script `{script}` changed after it was parked, so the recorded command \
                                  no longer matches what would run. Re-issue the command to park the script as \
                                  it is now."
                             ),
@@ -1957,21 +1991,26 @@ impl SignalingBridge {
         reviewer_id: i64,
     ) {
         let Ok(Some(row)) = storage.get_tray_entry(gate_id).await else { return };
+        if row.status != "queued" || row.run_started_at.is_some() { return; }
         let Some(Ok(now_sha)) = self.body_files_digest(session_id, command).await else { return };
-        if row.body_sha256.as_deref() == Some(now_sha.as_str()) {
+        if row.body_sha256.as_deref() == Some(now_sha.as_str()) && row.body_row_id.is_some() {
             return;
+        }
+        if let Some(old_body) = row.body_row_id {
+            if !storage.begin_queued_gate_revision(gate_id, old_body).await.unwrap_or(false) { return; }
         }
         if let Err(e) = storage.set_tray_body_sha(gate_id, &now_sha).await {
             tracing::warn!(%gate_id, error = %e, "could not record the revised body's hash");
             return;
         }
         let body = self.queued_body_text(session_id, command).await;
+        let after_review = if row.approval_required { "park for the user" } else { "run automatically under auto_allow" };
         let notice = format!(
             "📨 Revised outward publish re-queued for review (gate {gate_id}) — {agent} changed the \
              body and re-issued:\n`{command}`\n\n{body}\n\n[Reviewer: the earlier body of this \
              gate was revised; read this one on this turn. To stop THIS publish, file a `blocking` \
              finding with gate_id \"{gate_id}\"; to ask for another revision, an `advisory` one with \
-             that gate_id. Anything else lets it park for the user after your turn.]"
+             that gate_id. Anything else lets it {after_review} after your turn.]"
         );
         let Some(posted) = crate::core::post_system_notice(
             storage,
@@ -1985,8 +2024,10 @@ impl SignalingBridge {
         else {
             return;
         };
-        if let Err(e) = storage.set_tray_body_row(gate_id, posted.message_id()).await {
-            tracing::warn!(%gate_id, error = %e, "could not point the queued gate at its revised body");
+        match storage.set_tray_body_row(gate_id, posted.message_id()).await {
+            Ok(1) => {}
+            Ok(_) => return,
+            Err(e) => { tracing::warn!(%gate_id, error = %e, "could not point the queued gate at its revised body"); return; }
         }
         // The advisories that asked for the revision are answered by it.
         if let Ok(findings) = storage.findings_for_session(session_id).await {
@@ -2098,6 +2139,22 @@ impl SignalingBridge {
             if findings.iter().any(|f| revises_queued_gate(f, &row)) {
                 continue;
             }
+            if !row.approval_required {
+                // Settlement is on the reviewer pump's completion path. The
+                // background tick owns execution; even a slow publish must
+                // not hold this turn (or another session's reviewer) open.
+                if !storage.mark_auto_gate_reviewed(&row.choice_id, body_row).await.unwrap_or(false) {
+                    if let Ok(Some(current)) = storage.get_tray_entry(&row.choice_id).await {
+                        // A stronger request raced the old auto-mode snapshot.
+                        // This completed review still covers the same body.
+                        if current.approval_required && current.body_row_id == Some(body_row) {
+                            self.promote_queued_row(&storage, session_id, &current,
+                                format!("Reviewed publication {} now requires the user's approval.", row.choice_id)).await;
+                        }
+                    }
+                }
+                continue;
+            }
             let notice = if row.kind == crate::storage::QuestionKind::Close.as_str() {
                 format!(
                     "✅ The close card {} is now PARKED for the user (the reviewer read the recap and \
@@ -2113,6 +2170,61 @@ impl SignalingBridge {
             };
             self.promote_queued_row(&storage, session_id, &row, notice).await;
         }
+    }
+
+    /// Recoverable automatic work, driven by the background gate tick,
+    /// including after restart. Read errors never authorize a
+    /// run; a current policy restriction becomes an explicit user gate.
+    pub async fn run_reviewed_auto_publications(&self) -> usize {
+        let Some(storage) = self.storage.lock().await.clone() else { return 0 };
+        let rows = match storage.reviewed_auto_gates().await {
+            Ok(rows) => rows,
+            Err(error) => { tracing::warn!(%error, "automatic publication queue unreadable"); return 0; }
+        };
+        let mut ran = 0;
+        for row in rows {
+            let activity = self.session_activity.lock().await.get(&row.session_id).and_then(std::sync::Weak::upgrade);
+            if activity.is_some_and(|a| a.holds_wakes()) { continue; }
+            let (Some(command), Some(body_row)) = (row.command_text.as_deref(), row.body_row_id) else { continue };
+            let findings = match storage.findings_for_session(&row.session_id).await {
+                Ok(findings) => findings,
+                Err(error) => { tracing::warn!(%error, "automatic publication held: findings unreadable"); continue; }
+            };
+            if let Some(veto) = findings.iter().find(|f| vetoes_queued_gate(f, &row)) {
+                self.withdraw_vetoed_row(&storage, &row.session_id, &row, veto).await;
+                continue;
+            }
+            if findings.iter().any(|f| revises_queued_gate(f, &row)) {
+                let _ = storage.invalidate_auto_gate_review(&row.choice_id, body_row).await;
+                continue;
+            }
+            let keywords = self.data_dir.as_ref().map(|d| tool_gate::resolve_keywords(d, Some(&row.session_id))).unwrap_or_default();
+            let policy = self.resolve_policy_for(&row.session_id).await;
+            let caller_can_execute = storage.participant_by_slug(&row.session_id, &row.agent).await.ok().flatten()
+                .filter(|p| p.enabled).and_then(|p| crate::agents::CapabilitySet::from_json(&p.capabilities))
+                .is_some_and(|c| c.contains(crate::agents::Capability::EditFiles));
+            let reason = match policy {
+                Err(_) => Some("the current policy could not be read"),
+                Ok(ref p) if crate::policy::data_reads::match_command(p, command).is_some() => Some("the command is now a listed data read"),
+                _ if !caller_can_execute => Some("the requester is no longer enabled for shell writes"),
+                _ if !outward_command(command) || tool_gate::match_keyword("Bash", command, &keywords) != Some(GateMode::AutoAllow) => Some("the command no longer has an outward auto_allow rule"),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                self.promote_queued_row(&storage, &row.session_id, &row,
+                    format!("Automatic publication {} now needs user approval: {reason}. Nothing ran.", row.choice_id)).await;
+                continue;
+            }
+            if self.execute_reviewed_auto_gate(&row).await {
+                ran += 1;
+            } else if let Ok(Some(current)) = storage.get_tray_entry(&row.choice_id).await {
+                if current.approval_required && current.body_row_id == Some(body_row) {
+                    self.promote_queued_row(&storage, &row.session_id, &current,
+                        format!("Reviewed publication {} now requires the user's approval.", row.choice_id)).await;
+                }
+            }
+        }
+        ran
     }
 
     /// Withdraw a queued row a blocking finding vetoes, and say why in the
@@ -2175,7 +2287,7 @@ impl SignalingBridge {
         row: &crate::storage::SessionTrayEntry,
         notice: String,
     ) -> bool {
-        if storage.promote_queued_gate(&row.choice_id).await.unwrap_or(0) != 1 {
+        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id).await.unwrap_or(0) != 1 {
             return false;
         }
         let command = row.command_text.clone().unwrap_or_default();
@@ -4062,6 +4174,212 @@ mod tests {
         let path = repo.path().join("draft.md");
         std::fs::write(&path, &body).unwrap();
         (bridge, storage, eyes, posix_path(&path), body)
+    }
+
+    /// A policy-authorized queue entry with a strictly local publisher.
+    async fn automatic_publish_fixture(
+        data: &tempfile::TempDir,
+        repo: &tempfile::TempDir,
+    ) -> (Arc<SignalingBridge>, crate::storage::Storage, i64, i64, std::path::PathBuf, String) {
+        let (bridge, storage, reviewer, path, body) = outward_fixture(data, repo).await;
+        tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+        let marker = repo.path().join("published.txt");
+        // A shell-local gh stub: no PATH changes and no network publication.
+        // No returned URL means read-back has no remote target to query.
+        let command = format!("gh() {{ cat {path} >> {}; printf 'local fixture\\n'; }}; gh issue create --title fixture --body-file {path}", posix_path(&marker));
+        assert!(outward_command(&command));
+        storage.insert_queued_gate_with_approval("s1", "auto-publish", "hands", "fixture", &command, false).await.unwrap();
+        bridge.record_body_digest("s1", "auto-publish", &command).await;
+        let receipt = storage.post_to_channel("s1", "system", None, "system_notice", &body, None).await.unwrap();
+        storage.set_tray_body_row("auto-publish", receipt.message_id()).await.unwrap();
+        (bridge, storage, reviewer, receipt.message_id(), marker, body)
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_publish_runs_once_without_a_user_answer() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, reviewer, body_row, marker, body) = automatic_publish_fixture(&data, &repo).await;
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert!(!marker.exists(), "unread content cannot run");
+        storage.commit_delivery(reviewer, &[(body_row, None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert!(!marker.exists(), "review settlement must not execute a command in the pump's completion path");
+        assert!(storage.get_tray_entry("auto-publish").await.unwrap().unwrap().reviewed_at.is_some());
+        assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+        assert!(marker.exists(), "reviewed auto-allowed content should run without a user card");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), body);
+        let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+        assert_eq!(row.status, "auto_resolved");
+        assert!(row.picked_option.is_none() && row.answered_at.is_none());
+        assert_eq!(row.exit_code, Some(0));
+        let result = message_by_id(&storage, row.result_row_id.expect("linked result")).await;
+        // The legacy Message projection folds non-participants into "user";
+        // origin is the authoritative provenance used by the channel wire.
+        let origin: String = sqlx::query_scalar("SELECT origin FROM messages WHERE id = ?")
+            .bind(result.id).fetch_one(storage.pool()).await.unwrap();
+        assert_eq!(origin, "system");
+        assert_eq!(result.kind, "system_notice", "the legacy UI must not render this as user speech");
+        assert!(result.content.contains("auto_allow"));
+        assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), body, "duplicate settlement did not execute twice");
+        let status = bridge.gate_status("auto-publish").await.unwrap();
+        assert!(status.contains("auto_allow") && status.contains("exit 0"), "{status}");
+    }
+
+    #[tokio::test]
+    async fn revoked_auto_allow_promotes_the_reviewed_command_to_a_user_gate() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, reviewer, body_row, marker, _) = automatic_publish_fixture(&data, &repo).await;
+        storage.commit_delivery(reviewer, &[(body_row, None)]).await.unwrap();
+        tool_gate::save(data.path(), &[gk("gh", GateMode::Gate)]).unwrap();
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+        assert!(!marker.exists());
+        let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert!(row.approval_required);
+        assert!(row.picked_option.is_none());
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_work_recovers_from_a_new_bridge_and_runs_once() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _, body_row, marker, body) = automatic_publish_fixture(&data, &repo).await;
+        storage.mark_auto_gate_reviewed("auto-publish", body_row).await.unwrap();
+        drop(bridge);
+        let recovered = SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
+        recovered.set_storage(storage.clone()).await;
+        assert_eq!(recovered.run_reviewed_auto_publications().await, 1);
+        assert_eq!(recovered.run_reviewed_auto_publications().await, 0);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), body);
+        assert!(storage.tray_entries_for_session("s1").await.unwrap().iter().any(|r| r.status == "auto_resolved"));
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_body_change_refuses_and_a_revision_needs_a_fresh_review() {
+        for reissue in [false, true] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, reviewer, body_row, marker, _) = automatic_publish_fixture(&data, &repo).await;
+            storage.commit_delivery(reviewer, &[(body_row, None)]).await.unwrap();
+            storage.mark_auto_gate_reviewed("auto-publish", body_row).await.unwrap();
+            std::fs::write(repo.path().join("draft.md"), "replacement body").unwrap();
+            if reissue {
+                let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+                bridge.repost_revised_body(&storage, "s1", "hands", "auto-publish", row.command_text.as_deref().unwrap(), reviewer).await;
+                assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+                let revised = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+                assert!(revised.reviewed_at.is_none());
+                assert_ne!(revised.body_row_id, Some(body_row));
+                assert!(!storage.mark_auto_gate_reviewed("auto-publish", body_row).await.unwrap());
+                storage.commit_delivery(reviewer, &[(revised.body_row_id.unwrap(), None)]).await.unwrap();
+                bridge.settle_queued_outward("s1", reviewer).await;
+                assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+                assert_eq!(std::fs::read_to_string(marker).unwrap(), "replacement body");
+            } else {
+                assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+                assert!(!marker.exists());
+                let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+                assert_eq!(row.status, "auto_resolved");
+                assert!(row.run_refusal.unwrap().contains("body file changed"));
+                assert!(row.result_row_id.is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_claim_rechecks_late_findings_and_capability_revocation() {
+        for restriction in ["blocking", "advisory", "capability"] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, reviewer, body_row, marker, _) = automatic_publish_fixture(&data, &repo).await;
+            storage.commit_delivery(reviewer, &[(body_row, None)]).await.unwrap();
+            storage.mark_auto_gate_reviewed("auto-publish", body_row).await.unwrap();
+            if restriction == "capability" {
+                sqlx::query("UPDATE session_participants SET capabilities = '[]' WHERE session_id = 's1' AND slug = 'hands'")
+                    .execute(storage.pool()).await.unwrap();
+            } else {
+                let severity = if restriction == "blocking" { crate::storage::FindingSeverity::Blocking } else { crate::storage::FindingSeverity::Advisory };
+                storage.insert_finding_for_gate("s1", "late-finding", "eyes", severity, "fixture", None, Some("auto-publish")).await.unwrap();
+            }
+            // The claim itself must refuse even if a worker checked before
+            // the finding/capability change, not only the preceding scan.
+            assert!(!storage.claim_auto_gate_run("auto-publish", body_row).await.unwrap(), "{restriction}");
+            assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+            assert!(!marker.exists());
+            let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+            assert_eq!(row.status, match restriction { "blocking" => "withdrawn", "advisory" => "queued", _ => "pending" });
+            if restriction == "advisory" {
+                assert!(row.reviewed_at.is_none());
+                storage.disposition_finding("s1", "late-finding", crate::storage::FindingStatus::Rebutted, Some("fixture"), "hands").await.unwrap();
+                assert_eq!(bridge.run_reviewed_auto_publications().await, 0, "rebuttal still waits for a review turn");
+                bridge.settle_queued_outward("s1", reviewer).await;
+                assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+                assert!(marker.exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_work_respects_pause_before_starting() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _, body_row, marker, _) = automatic_publish_fixture(&data, &repo).await;
+        storage.mark_auto_gate_reviewed("auto-publish", body_row).await.unwrap();
+        let activity = crate::core::ActivityTracker::new("s1", Arc::new(std::sync::atomic::AtomicBool::new(false)), bridge.clone(), vec!["hands".into()]);
+        bridge.register_session_activity("s1".into(), Arc::downgrade(&activity)).await;
+        activity.set_paused(true);
+        assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+        assert!(!marker.exists());
+        activity.set_paused(false);
+        assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+        assert!(marker.exists());
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_work_is_run_by_the_background_tick() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, reviewer, body_row, marker, body) = automatic_publish_fixture(&data, &repo).await;
+        storage.commit_delivery(reviewer, &[(body_row, None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert!(!marker.exists());
+        // Real production assembler and interval, not a direct call to the
+        // worker: removing its scheduler wire must make this test fail.
+        bridge.spawn_scheduled_gate_runner();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                if storage.get_tray_entry("auto-publish").await.unwrap().unwrap().status == "auto_resolved" { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.expect("the actual background tick must execute reviewed work");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn reviewed_auto_script_pin_change_refuses_before_any_command_runs() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _, body_row, marker, _) = automatic_publish_fixture(&data, &repo).await;
+        std::fs::write(repo.path().join("check.sh"), "exit 0\n").unwrap();
+        let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+        let command = format!("sh check.sh; {}", row.command_text.unwrap());
+        sqlx::query("UPDATE session_tray SET command_text = ? WHERE choice_id = 'auto-publish'")
+            .bind(&command).execute(storage.pool()).await.unwrap();
+        bridge.record_body_digest("s1", "auto-publish", &command).await;
+        let pinned = storage.get_tray_entry("auto-publish").await.unwrap().unwrap().pinned_scripts.unwrap();
+        assert!(pinned.contains("check.sh"), "real script pin must be present");
+        storage.mark_auto_gate_reviewed("auto-publish", body_row).await.unwrap();
+        std::fs::write(repo.path().join("check.sh"), "exit 1\n").unwrap();
+        assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+        assert!(!marker.exists());
+        let row = storage.get_tray_entry("auto-publish").await.unwrap().unwrap();
+        assert_eq!(row.status, "auto_resolved");
+        assert!(row.run_refusal.unwrap().contains("script changed"));
     }
 
     /// The message row a queued gate points at.

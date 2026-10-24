@@ -57,6 +57,19 @@ describe("gateChipsOf", () => {
     expect(chips.has("12345678")).toBe(false);
   });
 
+  it("shows automatic runs without inventing a user approval or rejection", () => {
+    const chips = gateChipsOf([
+      row("aaaaaaaa-0000", "auto_running"),
+      { ...row("bbbbbbbb-0000", "auto_resolved"), exit_code: 0 },
+      { ...row("cccccccc-0000", "auto_resolved"), exit_code: 2 },
+      { ...row("dddddddd-0000", "auto_resolved"), run_refusal: "body changed" },
+    ]);
+    expect(chips.get("aaaaaaaa")).toMatchObject({ state: "automatic", label: "auto-allowed" });
+    expect(chips.get("bbbbbbbb")).toMatchObject({ state: "ran", label: "ran" });
+    expect(chips.get("cccccccc")).toMatchObject({ state: "failed", label: "exit 2" });
+    expect(chips.get("dddddddd")).toMatchObject({ state: "refused", label: "not run" });
+  });
+
   it("recognises the quoted shape only", () => {
     expect(looksLikeGateId("236473a7")).toBe(true);
     expect(looksLikeGateId("236473A7")).toBe(true);

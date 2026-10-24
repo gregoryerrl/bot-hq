@@ -1327,15 +1327,25 @@ runs in four places:
 - `action_gate`, before it parks or runs, under `gate_shell`;
 - `terminal_exec`, under the terminal's `$SHELL`.
 
-**Review authority storage (0104, automatic publication wiring in progress).**
+**Review authority (0104, hook/MCP activation in progress).**
 `session_tray.approval_required` defaults true for existing and new user gates.
 An automatic publish opts out at insertion, and `reviewed_at` is bound to its
 current body row; a revision clears it and a stronger request can require user
 approval, never remove that requirement. Automatic execution has a separate
 atomic claim checking that proof, body identity, session openness and explicit
 approval metadata. Its `auto_running` / `auto_resolved` states retain NULL user
-answer fields. The hook and MCP entry points still use their existing behavior
-until the automatic-run worker is connected.
+answer fields. Reviewer settlement records that proof and returns without
+executing commands. The background gate tick owns execution, through the same
+body/script-pin and read-back checks as a user gate, so a slow publication never
+blocks the reviewer pump's completion or the turn ring.
+The background gate tick recovers reviewed unclaimed work after restart; a
+claimed interrupted run is reported, never repeated. Current policy restrictions
+or revoked requester capabilities promote the exact reviewed body to user
+approval. The automatic claim atomically checks live requester capabilities and
+open veto/revision findings too. Pause/cancellation holds new automatic work.
+Results are system-origin rows; the gate ledger and chat chips distinguish
+automatic authorization from a user answer. The hook and MCP entry points still
+use their existing behavior until the remaining activation slice lands.
 
 **A run window lets the user approve any time while the command waits for its
 slot** (feedback #66a, the user's pick). `action_gate`'s `run_not_after`
