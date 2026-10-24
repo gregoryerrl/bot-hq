@@ -535,7 +535,7 @@ impl AppState {
             .unwrap_or(false)
     }
 
-    fn lifecycle_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
+    pub(crate) fn lifecycle_lock(&self, session_id: &str) -> Arc<Mutex<()>> {
         let mut locks = self.lifecycle_locks.lock().unwrap_or_else(|p| p.into_inner());
         locks.retain(|_, lock| lock.strong_count() > 0);
         if let Some(lock) = locks.get(session_id).and_then(std::sync::Weak::upgrade) { return lock; }

@@ -130,7 +130,9 @@ model side by side. Migration 0102 applies on first launch.
   The host worker now changes one runtime at a completed turn, waits for
   connector shutdown receipts, replaces its input and epoch, and restores the
   prior runtime on startup failure. Close/restart joins candidate cleanup before
-  removing session resources. Activity, watchdog and reviewer registration
+  removing session resources. A change's database writes and queued-review
+  refresh no longer hold the global lock used by other sessions' controls.
+  Activity, watchdog and reviewer registration
   follow the changed roster; outstanding review bodies are delivered again.
   Candidate prompts include bounded, attributed session excerpts. The controls
   and complete history-transfer flow are still being connected; these operations

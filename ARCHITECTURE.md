@@ -1691,6 +1691,10 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   not claim Windows process-tree parity or control of escaped daemon processes.
   Per-session lifecycle locks serialize close/restart/start; teardown cancels and
   joins the worker outside the global session map before deleting resources.
+  Publication/restoration hold that per-session barrier across database and
+  review work; the global map is held only for runtime access/installation.
+  The worker's barrier wait is cancellable, so a closer holding it can join the
+  worker without deadlock. Request validation likewise stays outside the map.
   Runtime publication and automatic-publication authority share a per-session
   lock. Queued decisions are re-presented to the resulting reviewer, or promoted
   to a user decision when no reviewer remains. Pending user gates survive removal

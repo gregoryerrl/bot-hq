@@ -185,9 +185,9 @@ impl AppState {
     }
 
     pub async fn cancel_participant_change(&self, session: &str, id: &str) -> Result<bool> {
-        let sessions = self.sessions.lock().await;
         let cancelled = self.storage.cancel_participant_change(session, id).await?;
         if cancelled {
+            let sessions = self.sessions.lock().await;
             if let Some(run) = sessions
                 .get(session)
                 .and_then(|h| h.change_run.as_ref())
@@ -207,28 +207,24 @@ impl AppState {
         request: ParticipantChangeRequest,
         services: SpawnServices,
     ) -> Result<ParticipantChange> {
-        let mut sessions = self.sessions.lock().await;
-        let handle = sessions
-            .get_mut(session)
-            .context("session has no live runtime")?;
-        if let Some(run) = handle.change_run.as_ref().filter(|r| !r.is_done()) {
-            anyhow::ensure!(
-                run.operation == id,
-                "another participant change is still running"
-            );
-            // Still validate duplicate input; a repeated ID is not permission
-            // to change what the existing worker is doing.
-            return self
-                .storage
-                .request_participant_change(
-                    session,
-                    id,
-                    revision,
-                    request,
-                    ParticipantChangeOrigin::User,
-                )
-                .await;
-        }
+        let _lifecycle = self.lifecycle_lock(session).lock_owned().await;
+        let duplicate = {
+            let sessions = self.sessions.lock().await;
+            let handle = sessions
+                .get(session)
+                .context("session has no live runtime")?;
+            if let Some(run) = handle.change_run.as_ref().filter(|r| !r.is_done()) {
+                anyhow::ensure!(
+                    run.operation == id,
+                    "another participant change is still running"
+                );
+                true
+            } else {
+                false
+            }
+        };
+        // A duplicate ID still validates the exact request; the DB call does
+        // not occupy the global map while it waits for a writer.
         let row = self
             .storage
             .request_participant_change(
@@ -239,7 +235,7 @@ impl AppState {
                 ParticipantChangeOrigin::User,
             )
             .await?;
-        if row.status != "pending" {
+        if duplicate || row.status != "pending" {
             return Ok(row);
         }
         let ring = self
@@ -247,6 +243,10 @@ impl AppState {
             .session_ring(session)
             .await
             .context("session has no turn ring")?;
+        let mut sessions = self.sessions.lock().await;
+        let handle = sessions
+            .get_mut(session)
+            .context("session disappeared before its worker started")?;
         let context = LiveContext::capture(handle, ring);
         let (run, completion) = ChangeRun::new(id.to_string());
         handle.change_run = Some(run.clone());
@@ -283,13 +283,15 @@ impl AppState {
         run: &ChangeRun,
         context: &LiveContext,
     ) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        anyhow::ensure!(
-            sessions
-                .get(session)
-                .is_some_and(|h| Self::owns_change(h, context, run)),
-            "participant change lost its parent runtime"
-        );
+        {
+            let sessions = self.sessions.lock().await;
+            anyhow::ensure!(
+                sessions
+                    .get(session)
+                    .is_some_and(|h| Self::owns_change(h, context, run)),
+                "participant change lost its parent runtime"
+            );
+        }
         let row = self
             .storage
             .get_session(session)
@@ -300,6 +302,21 @@ impl AppState {
             "session closed during participant change"
         );
         Ok(())
+    }
+
+    /// Close/restart owns this same per-session barrier while joining the
+    /// worker. Cancellation must therefore beat waiting for that barrier.
+    async fn publication_guard(
+        &self,
+        session: &str,
+        run: &ChangeRun,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        let lifecycle = self.lifecycle_lock(session);
+        tokio::select! {
+            biased;
+            _ = run.cancelled() => anyhow::bail!("participant change cancelled before publication"),
+            guard = lifecycle.lock_owned() => Ok(guard),
+        }
     }
 
     async fn previous_runtime(
@@ -313,6 +330,13 @@ impl AppState {
             ParticipantChangeRequest::Remove { participant_id }
             | ParticipantChangeRequest::SwitchModel { participant_id, .. } => participant_id,
         };
+        let participant = self
+            .storage
+            .participants_for_session(&row.session_id)
+            .await?
+            .into_iter()
+            .find(|p| p.id == id)
+            .context("target is no longer in the roster")?;
         let sessions = self.sessions.lock().await;
         let handle = sessions
             .get(&row.session_id)
@@ -323,13 +347,6 @@ impl AppState {
             .iter()
             .find(|p| p.participant_id == Some(id))
             .context("target has no runtime")?;
-        let participant = self
-            .storage
-            .participants_for_session(&row.session_id)
-            .await?
-            .into_iter()
-            .find(|p| p.id == id)
-            .context("target is no longer in the roster")?;
         Ok(Some(PreviousRuntime {
             participant,
             config: actor
@@ -432,22 +449,37 @@ impl AppState {
                 .or_else(|| previous.as_ref().map(|p| p.participant.id)).context("no target participant")?;
             boundary.bind(target, candidate.as_ref().map(|c| (c.agent.handle.input().clone(), c.agent.turn_epoch.as_ref().unwrap().clone())))
                 .await.map_err(anyhow::Error::msg)?;
-            let mut sessions = self.sessions.lock().await;
-            let handle = sessions.get_mut(&row.session_id).filter(|h| Self::owns_change(h, context, run)).context("parent runtime changed before publication")?;
+            let _publication = self.publication_guard(&row.session_id, run).await?;
+            self.check_change_owner(&row.session_id, run, context).await?;
+            let roster = self.storage.participants_for_session(&row.session_id).await?;
             let committed = if let Some(fresh) = &candidate {
                 self.storage.publish_participant_spawn(&row.session_id, &row.id, target, &fresh.metadata).await?
             } else { self.storage.finish_participant_change(&row.session_id, &row.id, None).await? };
             anyhow::ensure!(committed, "participant publication lost to session closure or recovery");
             published = true;
-            handle.participants.retain(|p| p.participant_id != Some(target));
-            if let Some(fresh) = candidate.take() { self.install_candidate(handle, fresh, context); }
-            let roster = self.storage.participants_for_session(&row.session_id).await?;
-            refresh_runtime_roster(handle, &self.storage, &self.bridge, &roster);
+            {
+                let mut sessions = self.sessions.lock().await;
+                let handle = sessions.get_mut(&row.session_id).filter(|h| Self::owns_change(h, context, run)).context("parent runtime changed before installation")?;
+                handle.participants.retain(|p| p.participant_id != Some(target));
+                if let Some(fresh) = candidate.take() { self.install_candidate(handle, fresh, context); }
+                refresh_runtime_roster(handle, &self.storage, &self.bridge, &roster);
+            }
             self.bridge.reconcile_roster_publications(&row.session_id).await?;
             Ok(())
         }.await;
         if let Err(error) = result {
             if published {
+                if let Some(fresh) = &mut candidate {
+                    if let Some((slug, token)) = &candidate_token {
+                        self.bridge.revoke_mcp_token(&row.session_id, slug, token);
+                    }
+                    fresh
+                        .agent
+                        .handle
+                        .retire_and_wait(Duration::from_secs(30))
+                        .await
+                        .map_err(anyhow::Error::msg)?;
+                }
                 self.change_recap(&row.session_id, "The agent change was applied, but refreshing the session's pending work failed. Restart its agents to resume safely.").await;
                 return Err(error);
             }
@@ -552,6 +584,7 @@ impl AppState {
         boundary: &RosterBoundary,
         previous: Option<&PreviousRuntime>,
     ) -> Result<()> {
+        let mut publication = None;
         if let Some(old) = previous {
             // A failed shutdown is not permission to start a second process.
             old.control
@@ -599,6 +632,7 @@ impl AppState {
             run.track(fresh.agent.handle.stop_control());
             let mut fresh = Some(fresh);
             let restored: Result<()> = async {
+                publication = Some(self.publication_guard(&row.session_id, run).await?);
                 self.check_change_owner(&row.session_id, run, context)
                     .await?;
                 let candidate = fresh.as_ref().unwrap();
@@ -612,11 +646,6 @@ impl AppState {
                     )
                     .await
                     .map_err(anyhow::Error::msg)?;
-                let mut sessions = self.sessions.lock().await;
-                let handle = sessions
-                    .get_mut(&row.session_id)
-                    .filter(|h| Self::owns_change(h, context, run))
-                    .context("parent runtime changed during recovery")?;
                 anyhow::ensure!(
                     self.storage
                         .publish_recovered_participant_spawn(
@@ -629,6 +658,11 @@ impl AppState {
                         .await?,
                     "runtime recovery lost publication ownership"
                 );
+                let mut sessions = self.sessions.lock().await;
+                let handle = sessions
+                    .get_mut(&row.session_id)
+                    .filter(|h| Self::owns_change(h, context, run))
+                    .context("parent runtime changed during recovery")?;
                 handle
                     .participants
                     .retain(|p| p.participant_id != Some(old.participant.id));
@@ -650,11 +684,11 @@ impl AppState {
                 return Err(error);
             }
         }
-        let mut sessions = self.sessions.lock().await;
-        let handle = sessions
-            .get_mut(&row.session_id)
-            .filter(|h| Self::owns_change(h, context, run))
-            .context("parent runtime changed after rollback")?;
+        if publication.is_none() {
+            publication = Some(self.publication_guard(&row.session_id, run).await?);
+        }
+        self.check_change_owner(&row.session_id, run, context)
+            .await?;
         let roster = self
             .storage
             .participants_for_session(&row.session_id)
@@ -666,10 +700,18 @@ impl AppState {
                 .await
                 .map_err(anyhow::Error::msg)?;
         }
-        refresh_runtime_roster(handle, &self.storage, &self.bridge, &roster);
+        {
+            let mut sessions = self.sessions.lock().await;
+            let handle = sessions
+                .get_mut(&row.session_id)
+                .filter(|h| Self::owns_change(h, context, run))
+                .context("parent runtime changed after rollback")?;
+            refresh_runtime_roster(handle, &self.storage, &self.bridge, &roster);
+        }
         self.bridge
             .reconcile_roster_publications(&row.session_id)
             .await?;
+        drop(publication);
         Ok(())
     }
 

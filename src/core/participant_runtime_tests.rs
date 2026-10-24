@@ -105,8 +105,24 @@ struct Fixture {
 
 impl Fixture {
     async fn new(codex: bool) -> Self {
-        let storage = Storage::memory().await.unwrap();
+        Self::with_database(codex, false).await
+    }
+
+    async fn with_database(codex: bool, disk: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
+        let storage = if disk {
+            let s = Storage::open(&temp.path().join("fixture.db"))
+                .await
+                .unwrap();
+            s.install_role_preset().await.unwrap();
+            sqlx::query("UPDATE roles SET archived = 1 WHERE slug = 'agent'")
+                .execute(s.pool())
+                .await
+                .unwrap();
+            s
+        } else {
+            Storage::memory().await.unwrap()
+        };
         for id in ["old", "new"] {
             storage
                 .upsert_model(&Model {
@@ -275,6 +291,93 @@ impl Fixture {
             .unwrap();
         self.seats.clear();
     }
+}
+
+#[tokio::test]
+async fn blocked_publication_does_not_hold_other_sessions_controls() {
+    let f = Fixture::with_database(false, true).await;
+    let (other, _input) =
+        crate::core::session::stub_session_for_tests("other", &f.state.bridge).await;
+    f.state.sessions.lock().await.insert("other".into(), other);
+    let (mut services, mut spawned) = services(false);
+    let normal = services.spawn.clone();
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (r, go) = (ready.clone(), release.clone());
+    services.spawn = Arc::new(move |config| {
+        let normal = normal.clone();
+        let r = r.clone();
+        let go = go.clone();
+        Box::pin(async move {
+            let result = normal(config).await;
+            r.notify_one();
+            go.notified().await;
+            result
+        })
+    });
+    f.start("switch", f.switch(), services).await;
+    tokio::time::timeout(Duration::from_secs(2), ready.notified())
+        .await
+        .unwrap();
+    // WAL allows the worker's ownership/roster reads but blocks its publication
+    // writer. This is real SQLite contention, not a sleep in a mocked setter.
+    let transaction = f
+        .state
+        .storage
+        .pool()
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .unwrap();
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let pool = f.state.storage.pool();
+            if pool.size() as usize - pool.num_idle() >= 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if pool.size() as usize - pool.num_idle() >= 2 {
+                    break;
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker must reach the blocked writer");
+    let response =
+        tokio::time::timeout(Duration::from_millis(200), f.state.current_phase("other")).await;
+    // Release before asserting so failure still permits owned cleanup.
+    transaction.rollback().await.unwrap();
+    assert!(
+        response.is_ok(),
+        "another session's control must not wait for this publication transaction"
+    );
+    assert_eq!(f.done("switch").await.status, "applied");
+    let _candidate = spawned.recv().await.unwrap();
+    f.end().await;
+}
+
+#[tokio::test]
+async fn a_closing_owner_can_cancel_a_worker_waiting_for_its_lifecycle_barrier() {
+    let f = Fixture::new(false).await;
+    let held = f.state.lifecycle_lock("s1").lock_owned().await;
+    let (run, _completion) = ChangeRun::new("closing".into());
+    let state = f.state.clone();
+    let waiting_run = run.clone();
+    let mut waiting =
+        tokio::spawn(async move { state.publication_guard("s1", &waiting_run).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut waiting)
+            .await
+            .is_err()
+    );
+    run.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("the closer must not deadlock while joining its worker")
+        .unwrap();
+    assert!(result.is_err());
+    drop(held);
+    f.end().await;
 }
 
 #[tokio::test]
@@ -506,10 +609,43 @@ async fn add_then_remove_updates_reviewers_without_stopping_peers() {
 #[tokio::test]
 async fn close_during_probe_waits_for_worker_and_never_publishes_its_late_candidate() {
     let f = Fixture::new(false).await;
-    let body = f.state.storage.post_to_channel("s1", "system", None, "system_notice", "pending publication", None).await.unwrap().message_id();
-    f.state.storage.insert_queued_gate_with_approval("s1", "auto", &f.rows[0].slug, "fixture", "publish fixture", false).await.unwrap();
-    f.state.storage.set_tray_body_row("auto", body).await.unwrap();
-    assert!(f.state.storage.mark_auto_gate_reviewed("auto", body).await.unwrap());
+    let body = f
+        .state
+        .storage
+        .post_to_channel(
+            "s1",
+            "system",
+            None,
+            "system_notice",
+            "pending publication",
+            None,
+        )
+        .await
+        .unwrap()
+        .message_id();
+    f.state
+        .storage
+        .insert_queued_gate_with_approval(
+            "s1",
+            "auto",
+            &f.rows[0].slug,
+            "fixture",
+            "publish fixture",
+            false,
+        )
+        .await
+        .unwrap();
+    f.state
+        .storage
+        .set_tray_body_row("auto", body)
+        .await
+        .unwrap();
+    assert!(f
+        .state
+        .storage
+        .mark_auto_gate_reviewed("auto", body)
+        .await
+        .unwrap());
     let (mut services, mut spawned) = services(false);
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -526,9 +662,27 @@ async fn close_during_probe_waits_for_worker_and_never_publishes_its_late_candid
     tokio::time::timeout(Duration::from_secs(3), entered.notified())
         .await
         .unwrap();
-    assert!(!f.state.storage.claim_auto_gate_run("auto", body).await.unwrap(), "a roster in preparation cannot authorize a run");
-    f.state.storage.invalidate_auto_gate_review("auto", body).await.unwrap();
-    assert!(!f.state.storage.mark_auto_gate_reviewed("auto", body).await.unwrap(), "a late review cannot authorize tentative membership");
+    assert!(
+        !f.state
+            .storage
+            .claim_auto_gate_run("auto", body)
+            .await
+            .unwrap(),
+        "a roster in preparation cannot authorize a run"
+    );
+    f.state
+        .storage
+        .invalidate_auto_gate_review("auto", body)
+        .await
+        .unwrap();
+    assert!(
+        !f.state
+            .storage
+            .mark_auto_gate_reviewed("auto", body)
+            .await
+            .unwrap(),
+        "a late review cannot authorize tentative membership"
+    );
     // Exercise the actual close path, including removal from the runtime map.
     let state = f.state.clone();
     let closing = tokio::spawn(async move {
