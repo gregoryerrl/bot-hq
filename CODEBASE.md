@@ -149,7 +149,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 | `src/core/mod.rs` | module list + `post_system_notice` re-export | S |
 | `src/core/sequencer.rs` | the ring: `run_sequencer`, `SequencerCommand`, `advance_turn`, `start_turn`/`hand_turn_to`, `deliver_backlog`, `continue_after_gate` (idle-ring wake after final approval), consensus/spin/cap/all-pass/Stage yields, `TurnEnding` — the long module doc is a design diary, not current behaviour | XL |
 | `src/core/roster_boundary.rs` | host-owned `RosterBoundary` guard/protocol: cancellation, token-checked input+epoch binding, explicit release; ring implementation in `sequencer.rs`, bridge entry `reserve_roster_boundary` | S |
-| `src/core/roster_boundary_tests.rs` | real ring/bridge reservation tests (included by `sequencer.rs`): live/atomic/boot waits, steering/Pause, cancellation, replacement epochs, closed-session refusal and retained rotation anchor | — |
+| `src/core/roster_boundary_tests.rs` | real ring/bridge reservation tests (included by `sequencer.rs`): live/atomic/boot waits, steering/Pause, cancellation, replacement epochs, incarnation envelopes through replay/cached summons, closed-session refusal and retained rotation anchor | — |
 | `src/core/pump.rs` | `pump_agent` + `PumpConfig`: rows, boot rows, provider-limit/error-streak halts, pass row, epoch bind + `TurnComplete` mint | XL |
 | `src/core/pump_incarnation_tests.rs` | actual handle-to-pump retirement tests: late Init/events, closed-stream teardown, atomic/busy/context/halt isolation and delayed retries | — |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |

@@ -1,5 +1,66 @@
 mod incarnation_fence {
     use super::*;
+    use crate::signaling::SignalingEvent;
+
+    #[tokio::test]
+    async fn pump_interrupts_and_completions_carry_the_actual_handle_identity() {
+        let (storage, state) = setup().await;
+        let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
+        let incarnation = cfg.incarnation.clone();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut signals = bridge.subscribe();
+        cfg.bridge = Some(bridge);
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(pump_agent(cfg, rx, storage, state));
+        tx.send(AgentEvent::ToolUse {
+            id: "halt-1".into(),
+            name: "halt".into(),
+            input: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
+        tx.send(AgentEvent::ToolResult {
+            tool_use_id: "halt-1".into(),
+            content: "halt declared".into(),
+            is_error: false,
+        })
+        .await
+        .unwrap();
+        loop {
+            if let SignalingEvent::HaltAcked {
+                incarnation: Some(actual),
+                ..
+            } = tokio::time::timeout(Duration::from_secs(2), signals.recv())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                assert!(Arc::ptr_eq(&incarnation, &actual));
+                break;
+            }
+        }
+        tx.send(turn_end()).await.unwrap();
+        match tokio::time::timeout(Duration::from_secs(2), ring_rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            crate::core::sequencer::SequencerCommand::FromIncarnation {
+                incarnation: actual,
+                command,
+            } => {
+                assert!(Arc::ptr_eq(&incarnation, &actual));
+                assert!(matches!(
+                    *command,
+                    crate::core::sequencer::SequencerCommand::TurnComplete { .. }
+                ));
+            }
+            other => panic!("unscoped completion: {other:?}"),
+        }
+        drop(tx);
+        task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn a_retired_handles_events_and_teardown_cannot_touch_its_replacement() {

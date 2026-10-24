@@ -2623,11 +2623,17 @@ impl AppState {
     /// this tool use…"). By the time the result is in the stream there is
     /// nothing left to race; a halt whose result is an error took no effect
     /// and does not interrupt. `main.rs` pins the routing.
-    pub async fn halt_declared(&self, session_id: &str, agent_slug: &str) {
+    pub async fn halt_declared(&self, session_id: &str, agent_slug: &str,
+        incarnation: Option<Arc<crate::agents::incarnation::Incarnation>>) {
+        let _lease = match incarnation.as_ref() {
+            Some(i) => match i.enter().await { Some(lease) => Some(lease), None => return },
+            None => None,
+        };
         let sessions = self.sessions.lock().await;
         if let Some(handle) = sessions.get(session_id) {
             for agent in handle.agents() {
-                if agent.slug == agent_slug {
+                if agent.slug == agent_slug && incarnation.as_ref()
+                    .is_none_or(|i| agent.handle.incarnation().id() == i.id()) {
                     agent.interrupt("halt-self-declared");
                 }
             }
@@ -2641,7 +2647,8 @@ impl AppState {
     /// running, it works beside the holder — two participants on turns at once
     /// (s-b175d9c0, 2026-09-25 07:19–07:20Z).
     ///
-    /// Three guards (EYES, plan items 1–2):
+    /// Guards (EYES, plan items 1–2, plus live replacement):
+    /// - a process-origin request must still name the installed incarnation;
     /// - an atomic operation is waited out first — a stray `git commit` or
     ///   push finishes, as a Pause defers — and one that outlasts the cap is
     ///   NOT interrupted at all (EYES a4821aeb);
@@ -2655,12 +2662,21 @@ impl AppState {
     /// its transcript; the agent acts on it at its next dealt turn. The window
     /// between the cell check and the interrupt landing is milliseconds; a deal
     /// inside it is reported as an errored turn, which says so and moves on.
-    pub async fn stray_turn(&self, session_id: &str, agent_slug: &str, epoch: u64) {
+    pub async fn stray_turn(&self, session_id: &str, agent_slug: &str, epoch: u64,
+        incarnation: Option<Arc<crate::agents::incarnation::Incarnation>>) {
+        let _lease = match incarnation.as_ref() {
+            Some(i) => match i.enter().await { Some(lease) => Some(lease), None => return },
+            None => None,
+        };
         let atomic = {
             let sessions = self.sessions.lock().await;
             let Some(handle) = sessions.get(session_id) else {
                 return;
             };
+            if incarnation.as_ref().is_some_and(|i|
+                !handle.agents().any(|agent| agent.slug == agent_slug && agent.handle.incarnation().id() == i.id())) {
+                return;
+            }
             Arc::clone(&handle.in_atomic_tool)
         };
         if atomic.load(Ordering::Acquire) {
@@ -2694,6 +2710,9 @@ impl AppState {
             let Some(agent) = handle.agents().find(|a| a.slug == agent_slug) else {
                 return;
             };
+            if incarnation.as_ref().is_some_and(|i| agent.handle.incarnation().id() != i.id()) {
+                return;
+            }
             let cell_now = agent.turn_epoch.as_ref().map(|c| c.load(Ordering::Acquire));
             if cell_now != Some(epoch) {
                 tracing::debug!(
@@ -3328,6 +3347,8 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(calls.len(), 1, "halt_declared has exactly one caller in main.rs");
+        assert!(main[calls[0]..].starts_with("halt_declared(&session_id, &agent, incarnation).await"),
+            "the control worker must preserve the queued incarnation, not pass None");
         let arm_start = main[..calls[0]]
             .rfind("SignalingEvent::")
             .expect("the call sits inside a match arm");
@@ -3365,6 +3386,8 @@ mod tests {
             .join("\n");
         let calls: Vec<usize> = main.match_indices(".stray_turn(").map(|(i, _)| i).collect();
         assert_eq!(calls.len(), 1, "stray_turn has exactly one caller in main.rs");
+        assert!(main[calls[0]..].starts_with(".stray_turn(&session_id, &agent, epoch, Some(incarnation)).await"),
+            "the spawned stop must retain the originating incarnation");
         let arm_start = main[..calls[0]]
             .rfind("SignalingEvent::")
             .expect("the call sits inside a match arm");
@@ -3415,13 +3438,59 @@ mod tests {
             .any(|m| m.content.contains("hands started a turn on its own while eyes held the turn"))
     }
 
+    #[tokio::test]
+    async fn queued_interrupts_reject_a_retired_or_different_incarnation() {
+        for retired in [false, true] {
+            let (state, storage, stamp, _tmp) = stray_setup(15, true).await;
+            let old = crate::agents::incarnation::Incarnation::new();
+            if retired { old.retire().await; }
+            // Even an active but different incarnation must not target the
+            // installed handle just because its slug and epoch match.
+            state.halt_declared("s1", "hands", Some(old.clone())).await;
+            state.sessions.lock().await.get("s1").unwrap().in_atomic_tool.store(true, Ordering::Release);
+            tokio::time::timeout(std::time::Duration::from_millis(100), state.stray_turn("s1", "hands", 15, Some(old)))
+                .await.expect("a stale callback must not wait on the replacement's atomic tool");
+            assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
+            assert!(!said_stopped(&storage).await);
+            let current = state.sessions.lock().await.get("s1").unwrap().participants[0].handle.incarnation();
+            state.halt_declared("s1", "hands", Some(current)).await;
+            assert_eq!(stamp.load(Ordering::Acquire), 15, "a matching live incarnation still interrupts");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_persisted_host_halt_survives_retirement_but_its_interrupt_does_not() {
+        let (state, storage, stamp, _tmp) = stray_setup(15, true).await;
+        let old = crate::agents::incarnation::Incarnation::new();
+        let mut events = state.bridge.subscribe();
+        let (ring_tx, mut ring_rx) = tokio::sync::mpsc::channel(8);
+        state.bridge.register_session_sequencer("s1".into(), ring_tx).await;
+        let lease = old.enter().await.unwrap();
+        state.bridge.mark_awaiting_user_for_incarnation("s1".into(), "hands".into(),
+            "A recorded limit halt".into(), &old).await;
+        drop(lease);
+        old.retire().await;
+        let scope = loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), events.recv()).await.unwrap().unwrap() {
+                SignalingEvent::HaltAcked { incarnation, .. } => break incarnation,
+                _ => {}
+            }
+        };
+        assert_eq!(scope.as_ref().map(|i| i.id()), Some(old.id()));
+        state.halt_declared("s1", "hands", scope).await;
+        assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
+        assert!(storage.session_halt("s1").await.unwrap().unwrap().1.contains("recorded limit halt"));
+        assert!(matches!(ring_rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::HaltDeclared { .. })),
+            "persisted session state remains a ring stop until a user release");
+    }
+
     /// D3: a stray turn while another participant holds the ring is stopped,
     /// stamped with its own epoch (so its completion reads as bot-hq's
     /// interrupt), and a row says so.
     #[tokio::test]
     async fn a_stray_turn_is_stopped_while_another_participant_holds_the_turn() {
         let (state, storage, stamp, _tmp) = stray_setup(15, true).await;
-        state.stray_turn("s1", "hands", 15).await;
+        state.stray_turn("s1", "hands", 15, None).await;
         assert_eq!(stamp.load(Ordering::Acquire), 15);
         assert!(said_stopped(&storage).await);
     }
@@ -3432,7 +3501,7 @@ mod tests {
     #[tokio::test]
     async fn a_stray_turn_the_ring_has_dealt_since_is_left_alone() {
         let (state, storage, stamp, _tmp) = stray_setup(20, true).await;
-        state.stray_turn("s1", "hands", 15).await;
+        state.stray_turn("s1", "hands", 15, None).await;
         assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
         assert!(!said_stopped(&storage).await);
     }
@@ -3442,7 +3511,7 @@ mod tests {
     #[tokio::test]
     async fn a_stray_turn_with_nobody_else_holding_the_ring_is_left_alone() {
         let (state, storage, stamp, _tmp) = stray_setup(15, false).await;
-        state.stray_turn("s1", "hands", 15).await;
+        state.stray_turn("s1", "hands", 15, None).await;
         assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
         assert!(!said_stopped(&storage).await);
     }
@@ -3460,7 +3529,7 @@ mod tests {
         atomic.store(true, Ordering::Release);
         let task = tokio::spawn({
             let state = Arc::clone(&state);
-            async move { state.stray_turn("s1", "hands", 15).await }
+            async move { state.stray_turn("s1", "hands", 15, None).await }
         });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(
@@ -3488,7 +3557,7 @@ mod tests {
         // Virtual time for the wait only — the storage reads below run on the
         // real clock again.
         tokio::time::pause();
-        state.stray_turn("s1", "hands", 15).await;
+        state.stray_turn("s1", "hands", 15, None).await;
         tokio::time::resume();
         assert!(atomic.load(Ordering::Acquire), "still mid-operation past the cap");
         assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);

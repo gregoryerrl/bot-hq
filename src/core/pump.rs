@@ -1445,7 +1445,7 @@ pub async fn pump_agent(
                         participant_id,
                         epoch: interrupted,
                         ending: crate::core::sequencer::TurnEnding::Spoke,
-                    }).await.is_err() {
+                    }.from_incarnation(&cfg.incarnation)).await.is_err() {
                         warn!(agent = %cfg.slug, "interrupted completion dropped: ring closed");
                     }
                 }
@@ -1521,7 +1521,7 @@ pub async fn pump_agent(
                             if let Some(holder) = activity.busy_other_than(&cfg.slug) {
                                 stray_stop_asked = true;
                                 if background_tasks == 0 {
-                                    bridge.notify_stray_turn(&cfg.session_id, &cfg.slug, live);
+                                    bridge.notify_stray_turn(&cfg.session_id, &cfg.slug, live, &cfg.incarnation);
                                 } else {
                                     // **Not stopped while background work runs.**
                                     // The stop is claude-code's interrupt, which
@@ -1798,7 +1798,7 @@ pub async fn pump_agent(
                     halt_tool_id = None;
                     if !is_error {
                         if let Some(bridge) = &cfg.bridge {
-                            bridge.notify_halt_acked(&cfg.session_id, &cfg.slug);
+                            bridge.notify_incarnation_halt_acked(&cfg.session_id, &cfg.slug, &cfg.incarnation);
                         }
                     }
                 }
@@ -1992,7 +1992,7 @@ pub async fn pump_agent(
                             // state; a provider-limit stall is the host parking
                             // the session and there is no agent turn to advise.
                             let _ = bridge
-                                .mark_awaiting_user_for(
+                                .mark_awaiting_user_for_incarnation(
                                     cfg.session_id.to_string(),
                                     cfg.slug.to_string(),
                                     format!(
@@ -2002,6 +2002,7 @@ pub async fn pump_agent(
                                         prefix =
                                             crate::core::close_learnings::PROVIDER_LIMIT_HALT_PREFIX,
                                     ),
+                                    &cfg.incarnation,
                                 )
                                 .await;
                         }
@@ -2163,7 +2164,7 @@ pub async fn pump_agent(
                                 if seq
                                     .send(crate::core::sequencer::SequencerCommand::Summon {
                                         participant_id: pid,
-                                    })
+                                    }.from_incarnation(&incarnation))
                                     .await
                                     .is_err()
                                 {
@@ -2241,7 +2242,7 @@ pub async fn pump_agent(
                         error_halts.push(std::time::Instant::now());
                         if let Some(bridge) = &cfg.bridge {
                             let _ = bridge
-                                .mark_awaiting_user_for(
+                                .mark_awaiting_user_for_incarnation(
                                     cfg.session_id.to_string(),
                                     cfg.slug.to_string(),
                                     format!(
@@ -2262,6 +2263,7 @@ pub async fn pump_agent(
                                         streak_marker =
                                             crate::core::close_learnings::ERROR_STREAK_HALT_MARKER
                                     ),
+                                    &cfg.incarnation,
                                 )
                                 .await;
                         }
@@ -2353,7 +2355,7 @@ pub async fn pump_agent(
                                     if seq
                                         .send(crate::core::sequencer::SequencerCommand::Oriented {
                                             participant_id,
-                                        })
+                                        }.from_incarnation(&cfg.incarnation))
                                         .await
                                         .is_err()
                                     {
@@ -2387,7 +2389,7 @@ pub async fn pump_agent(
                             participant_id,
                             epoch,
                             ending,
-                        })
+                        }.from_incarnation(&cfg.incarnation))
                         .await
                         .is_err()
                     {
@@ -2571,7 +2573,7 @@ pub async fn pump_agent(
                 .map(|m| format!(" ({m})"))
                 .unwrap_or_default();
             let _ = bridge
-                .mark_awaiting_user_for(
+                .mark_awaiting_user_for_incarnation(
                     cfg.session_id.to_string(),
                     cfg.slug.to_string(),
                     format!(
@@ -2579,6 +2581,7 @@ pub async fn pump_agent(
                          end. Send a message to respawn them and deal a fresh turn.",
                         cfg.slug
                     ),
+                    &cfg.incarnation,
                 )
                 .await;
         }
@@ -2599,11 +2602,24 @@ mod tests {
     /// minutes, and one hung `cargo test` outright when a session-id mismatch
     /// made a scope check refuse every wire. Both would have been a clean
     /// failure in seconds through this.
-    async fn next_wire<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+    fn runtime_command(command: crate::core::sequencer::SequencerCommand) -> crate::core::sequencer::SequencerCommand {
+        use crate::core::sequencer::SequencerCommand as C;
+        match command {
+            C::FromIncarnation { incarnation, command } => {
+                assert!(!incarnation.id().is_empty(), "the pump supplies its incarnation identity");
+                *command
+            }
+            C::TurnComplete { .. } | C::Oriented { .. } | C::Summon { .. } =>
+                panic!("pump emitted an unscoped runtime control: {command:?}"),
+            other => other, // independent host/user controls can share the wire
+        }
+    }
+
+    async fn next_wire(rx: &mut tokio::sync::mpsc::Receiver<crate::core::sequencer::SequencerCommand>) -> crate::core::sequencer::SequencerCommand {
+        runtime_command(tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .expect("expected a wire within 2s; none arrived")
-            .expect("the sender was dropped before a wire arrived")
+            .expect("the sender was dropped before a wire arrived"))
     }
 
     use crate::core::ipav::IpavPhase;
@@ -2706,7 +2722,7 @@ mod tests {
     fn next_turn_end(
         rx: &mut mpsc::Receiver<crate::core::sequencer::SequencerCommand>,
     ) -> Option<crate::core::sequencer::TurnEnding> {
-        match rx.try_recv() {
+        match rx.try_recv().map(runtime_command) {
             Ok(crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. }) => {
                 Some(ending)
             }
@@ -5180,7 +5196,7 @@ mod tests {
         drop(ev_tx);
         task.await.unwrap();
 
-        let endings: Vec<_> = std::iter::from_fn(|| match seq_rx.try_recv() {
+        let endings: Vec<_> = std::iter::from_fn(|| match seq_rx.try_recv().map(runtime_command) {
             Ok(crate::core::sequencer::SequencerCommand::TurnComplete { ending, .. }) => {
                 Some(ending)
             }
@@ -5592,7 +5608,7 @@ mod tests {
         assert_eq!(row.status, "pending", "the reviewer's completed turn promotes the queued row");
         // The latch opened BEFORE the ring learned the turn was over.
         let mut seen = Vec::new();
-        while let Ok(cmd) = ring_rx.try_recv() {
+        while let Ok(cmd) = ring_rx.try_recv().map(runtime_command) {
             seen.push(cmd);
         }
         let opened = seen.iter().position(|c| matches!(c, crate::core::sequencer::SequencerCommand::GateOpened { choice_id } if choice_id == "q-1"));

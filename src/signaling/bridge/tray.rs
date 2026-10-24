@@ -2726,6 +2726,22 @@ impl SignalingBridge {
         prior
     }
 
+    /// Pump-origin halt, called under the pump's incarnation write lease.
+    /// Once persisted the halt is SESSION state and must still latch the ring;
+    /// only the deferred process interrupt belongs to this incarnation.
+    pub(crate) async fn mark_awaiting_user_for_incarnation(
+        &self,
+        session_id: String,
+        agent: String,
+        reason: String,
+        incarnation: &Arc<crate::agents::incarnation::Incarnation>,
+    ) -> Option<String> {
+        if !incarnation.is_active() { return None; }
+        let prior = self.mark_awaiting_user(session_id.clone(), agent.clone(), reason).await;
+        self.notify_incarnation_halt_acked(&session_id, &agent, incarnation);
+        prior
+    }
+
     /// **The ring's own stop, declared without a round-trip.**
     ///
     /// The all-pass yield, the round cap, consensus and an unwound wedge are

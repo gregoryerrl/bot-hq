@@ -1006,6 +1006,12 @@ pub struct SequencerDeps {
 /// capability to write to a process, not a message, and it carries no text.
 #[derive(Debug)]
 pub enum SequencerCommand {
+    /// Process-origin control. Keep this envelope through deferred/paused/
+    /// reservation queues; a replacement must never inherit an old callback.
+    FromIncarnation {
+        incarnation: Arc<crate::agents::incarnation::Incarnation>,
+        command: Box<SequencerCommand>,
+    },
     /// Host-only live roster scheduling. Separate from user Pause and gates.
     RosterBoundary(BoundaryCommand),
     /// The turn identified by `epoch` finished — advance the ring.
@@ -1362,6 +1368,19 @@ pub enum SequencerCommand {
     /// matter and is wrong: rows written while paused are held by no queue, and
     /// that mutation is caught by the test above.
     Resume,
+}
+
+impl SequencerCommand {
+    pub fn from_incarnation(self, incarnation: &Arc<crate::agents::incarnation::Incarnation>) -> Self {
+        Self::FromIncarnation { incarnation: Arc::clone(incarnation), command: Box::new(self) }
+    }
+
+    fn retaining_incarnation(self, incarnation: Option<&Arc<crate::agents::incarnation::Incarnation>>) -> Self {
+        match incarnation {
+            Some(incarnation) => self.from_incarnation(incarnation),
+            None => self,
+        }
+    }
 }
 
 /// Everything one running ring holds between commands.
@@ -2100,6 +2119,14 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
         // followed by a DELIVERY, and splitting the two would reorder a join
         // against a completion that arrived behind it. Nothing reads `inputs`
         // while paused, so waiting costs nothing.
+        let (incarnation, cmd) = match cmd {
+            SequencerCommand::FromIncarnation { incarnation, command } => (Some(incarnation), *command),
+            command => (None, command),
+        };
+        // Ring dispatch completes before a reservation can acknowledge. The
+        // lifecycle owner retires only AFTER that acknowledgement; no recursive
+        // read lease here (advance may acquire a queued summons' lease).
+        if incarnation.as_ref().is_some_and(|i| !i.is_active()) { continue; }
         if let SequencerCommand::RosterBoundary(command) = cmd {
             handle_roster_boundary(&mut deps, &mut rx, &mut state, command).await;
             continue;
@@ -2137,7 +2164,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     continue;
                 }
                 command => {
-                    state.boundary.as_mut().unwrap().queued.push_back(command);
+                    state.boundary.as_mut().unwrap().queued.push_back(command.retaining_incarnation(incarnation.as_ref()));
                     continue;
                 }
             }
@@ -2149,13 +2176,14 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 held = state.held.len() + 1,
                 "sequencer: the cycle is paused; holding this command for the resume"
             );
-            state.held.push_back(cmd);
+            state.held.push_back(cmd.retaining_incarnation(incarnation.as_ref()));
             continue;
         }
         if matches!(cmd, SequencerCommand::PauseReleased { .. }) {
             state.pause_releases_pending = state.pause_releases_pending.saturating_sub(1);
         }
         match cmd {
+            SequencerCommand::FromIncarnation { .. } => unreachable!("nested incarnation envelope"),
             SequencerCommand::RosterBoundary(_) => unreachable!("handled above the pause gate"),
             SequencerCommand::TurnComplete {
                 participant_id,
@@ -2185,7 +2213,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 restarts_rotation,
             } => {
                 if state.pause_releases_pending != 0 {
-                    state.summons.queue.extend(mentions);
+                    state.summons.queue.extend(mentions.into_iter().map(QueuedSummon::user));
                     state.pause_release_restarts |= restarts_rotation;
                     continue;
                 }
@@ -2455,7 +2483,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // the entry queued for the release, so this is safe to call
                 // whenever no turn is in flight. A winding-down holder still
                 // owes a completion: queue only, the replay advances later.
-                state.summons.queue.push_back(participant_id);
+                state.summons.queue.push_back(QueuedSummon { participant_id, incarnation: incarnation.clone() });
                 let idle = state.holder.is_none() && state.winding_down.is_none();
                 debug!(
                     session = %deps.session_id,
@@ -2756,7 +2784,7 @@ async fn release_ring(
         return;
     }
     if state.pause_releases_pending != 0 {
-        state.summons.queue.extend(mentions);
+        state.summons.queue.extend(mentions.into_iter().map(QueuedSummon::user));
         state.pause_release_restarts |= restarts_rotation;
         return;
     }
@@ -2778,7 +2806,7 @@ async fn release_ring(
     // it pre-empts the ring step rather than replacing the rotation
     // — see `Summons` for why the anchor is what makes that an
     // insertion.
-    state.summons.queue.extend(mentions);
+    state.summons.queue.extend(mentions.into_iter().map(QueuedSummon::user));
     // The user spoke, so nobody is waiting on them any more (rc3
     // D22). Cleared BEFORE the ring is stepped, or the restart would
     // land on a participant this set still calls blocked and halt on
@@ -2948,6 +2976,9 @@ async fn advance_turn(
     if state.pause_releases_pending != 0 {
         return;
     }
+    // Discard retired process wakes BEFORE choosing reset-vs-summons routing.
+    // The user's mentions have no process owner and survive replacement.
+    state.summons.queue.retain(QueuedSummon::is_live);
     let has_live_generation = state.has_live_turn();
     if user_spoke {
         state.spoke_this_lap = false;
@@ -3057,7 +3088,7 @@ async fn advance_turn(
                         && p.participation_mode == crate::storage::MODE_ACTIVE
                         && Some(p.id) != front_id
                         && holder.as_ref().map(|h| h.id) != Some(p.id)
-                        && !summons.queue.contains(&p.id)
+                        && !summons.queue.iter().any(|s| s.participant_id == p.id)
                 })
                 .collect();
             for p in candidates {
@@ -3075,7 +3106,7 @@ async fn advance_turn(
                             "sequencer: anti-starvation summons — this participant is \
                              served before the rotation continues"
                         );
-                        summons.queue.push_back(p.id);
+                        summons.queue.push_back(QueuedSummon::user(p.id));
                     }
                     Ok(_) => {}
                     Err(e) => warn!(
@@ -3227,7 +3258,7 @@ async fn advance_turn(
                 && !orienting_now(deps).contains(&p.id)
             {
                 // One turn answers a summons of it too.
-                summons.queue.retain(|queued| *queued != p.id);
+                summons.queue.retain(|queued| queued.participant_id != p.id);
                 summons.anchor = Some(p.clone());
                 *holder = Some(p);
                 *epoch += 1;
@@ -3244,7 +3275,7 @@ async fn advance_turn(
     // The step it displaces is not owed to anyone afterwards: the ring resumes
     // from the anchor, which this turn does not move, so nobody's place is lost
     // — the rotation is simply paused for one turn.
-    if let Some(to) = hand_to_summoned(deps, &mut summons.queue).await {
+    if let Some((to, _incarnation_lease)) = hand_to_summoned(deps, &mut summons.queue).await {
         // No lap counting: a summoned turn is not a step through the ring, so
         // it cannot wrap one. No anchor update either — that IS the mechanism.
         *holder = Some(to);
@@ -4049,9 +4080,19 @@ enum Handover {
 struct Summons {
     /// Participant ids the user named, in the order written. One turn each,
     /// popped as the ring hands them out.
-    queue: VecDeque<i64>,
+    queue: VecDeque<QueuedSummon>,
     /// The last ring turn's holder. `None` is the front of the rotation.
     anchor: Option<Participant>,
+}
+
+struct QueuedSummon {
+    participant_id: i64,
+    incarnation: Option<Arc<crate::agents::incarnation::Incarnation>>,
+}
+
+impl QueuedSummon {
+    fn user(participant_id: i64) -> Self { Self { participant_id, incarnation: None } }
+    fn is_live(&self) -> bool { self.incarnation.as_ref().is_none_or(|i| i.is_active()) }
 }
 
 /// Hand the turn to the next participant the user summoned, if there is one.
@@ -4070,15 +4111,24 @@ struct Summons {
 /// summons that cannot be read would strand the session on a transient error.
 /// The ring still moves; the user's message still lands, one turn later, on
 /// whoever the rotation reaches.
-async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Option<Participant> {
+async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<QueuedSummon>)
+    -> Option<(Participant, Option<tokio::sync::OwnedRwLockReadGuard<()>>)> {
     // D4: a summoned participant that is still orienting keeps its place in the
     // queue — the user asked for it by name — and is served once it is ready.
     let orienting = orienting_now(deps);
-    let mut still_reading: VecDeque<i64> = VecDeque::new();
+    let mut still_reading = VecDeque::new();
     let mut found = None;
-    while let Some(id) = queue.pop_front() {
+    while let Some(summon) = queue.pop_front() {
+        let lease = match summon.incarnation.as_ref() {
+            Some(incarnation) => match incarnation.enter_owned().await {
+                Some(lease) => Some(lease),
+                None => continue,
+            },
+            None => None,
+        };
+        let id = summon.participant_id;
         if orienting.contains(&id) {
-            still_reading.push_back(id);
+            still_reading.push_back(summon);
             continue;
         }
         match deps.storage.participant_by_id(id).await {
@@ -4095,7 +4145,7 @@ async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<i64>) -> Op
                 // on the participant returned here. This used to deal as well,
                 // so a summoned turn wrote the column twice and marked busy
                 // twice (the eager placement `hand_over` also shed, s-f6a441ff).
-                found = Some(p);
+                found = Some((p, lease));
                 break;
             }
             // Every remaining case is "the summons cannot be honoured": no such

@@ -3,6 +3,162 @@ mod roster_boundary {
     use crate::core::roster_boundary::RosterBoundary;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    #[tokio::test]
+    async fn scoped_join_survives_the_hold_and_cannot_replace_new_input_after_retirement() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (bridge, tx, task) = start(deps).await;
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        let waiter = reserve(&bridge);
+        tokio::time::sleep(QUIET).await;
+        finish(&tx, seats[0].id, 1).await;
+        let boundary = acquired(waiter).await;
+        let old = crate::agents::incarnation::Incarnation::new();
+        let (obsolete, mut obsolete_seat) = late_stdin(seats[0].id);
+        send(
+            &tx,
+            SequencerCommand::ParticipantJoined {
+                participant_id: seats[0].id,
+                input: obsolete,
+            }
+            .from_incarnation(&old),
+        )
+        .await;
+        let (replacement, mut new_seat) = late_stdin(seats[0].id);
+        boundary
+            .bind(
+                seats[0].id,
+                Some((replacement, Arc::new(AtomicU64::new(0)))),
+            )
+            .await
+            .unwrap();
+        old.retire().await;
+        post(&storage, "user", None, "replacement work").await;
+        send(&tx, user_message()).await;
+        boundary.release().await.unwrap();
+        new_seat.expect(1).await;
+        obsolete_seat.quiet().await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn scoped_wake_keeps_its_identity_through_pause_and_reservation_replay() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "on_mention")]).await;
+        let (bridge, tx, task) = start(deps).await;
+        let old = crate::agents::incarnation::Incarnation::new();
+        post(&storage, "system", None, "old retry").await;
+        send(&tx, SequencerCommand::Pause).await;
+        send(
+            &tx,
+            SequencerCommand::Summon {
+                participant_id: seats[1].id,
+            }
+            .from_incarnation(&old),
+        )
+        .await;
+        // The acknowledgement proves commands ahead of Reserve were consumed;
+        // it also moves Pause's held envelope through the reservation queue.
+        let boundary = acquired(reserve(&bridge)).await;
+        old.retire().await;
+        boundary.release().await.unwrap();
+        send(&tx, SequencerCommand::Resume).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn cached_process_summons_retire_but_user_mentions_keep_their_authority() {
+        for user_mentions_replacement in [false, true] {
+            let (deps, storage, mut seats) =
+                ring(&[("a", "active"), ("b", "active"), ("c", "on_mention")]).await;
+            let (bridge, tx, task) = start(deps).await;
+            post(&storage, "user", None, "go").await;
+            send(&tx, user_message()).await;
+            seats[0].expect(1).await;
+            let old = crate::agents::incarnation::Incarnation::new();
+            send(
+                &tx,
+                SequencerCommand::Summon {
+                    participant_id: seats[2].id,
+                }
+                .from_incarnation(&old),
+            )
+            .await;
+            let waiter = reserve(&bridge);
+            tokio::time::sleep(QUIET).await;
+            finish(&tx, seats[0].id, 1).await;
+            let boundary = acquired(waiter).await;
+            let (input, mut replacement) = late_stdin(seats[2].id);
+            boundary
+                .bind(seats[2].id, Some((input, Arc::new(AtomicU64::new(0)))))
+                .await
+                .unwrap();
+            old.retire().await;
+            post(&storage, "user", None, "new direction").await;
+            send(
+                &tx,
+                SequencerCommand::UserMessage {
+                    mentions: if user_mentions_replacement {
+                        vec![seats[2].id]
+                    } else {
+                        vec![]
+                    },
+                    restarts_rotation: true,
+                },
+            )
+            .await;
+            boundary.release().await.unwrap();
+            if user_mentions_replacement {
+                replacement.expect(2).await;
+                seats[0].quiet().await;
+            } else {
+                seats[0].expect(1).await;
+                replacement.quiet().await;
+            }
+            seats[1].quiet().await;
+            seats[2].quiet().await;
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_paused_retired_completion_cannot_end_the_replacements_matching_epoch() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (_bridge, tx, task) = start(deps).await;
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        let old = crate::agents::incarnation::Incarnation::new();
+        send(&tx, SequencerCommand::Pause).await;
+        send(
+            &tx,
+            SequencerCommand::TurnComplete {
+                participant_id: seats[0].id,
+                epoch: 1,
+                ending: DONE,
+            }
+            .from_incarnation(&old),
+        )
+        .await;
+        seats[1].quiet().await;
+        old.retire().await;
+        send(&tx, SequencerCommand::Resume).await;
+        seats[1].quiet().await;
+        assert!(
+            !storage
+                .participant_by_id(seats[0].id)
+                .await
+                .unwrap()
+                .unwrap()
+                .done_vote
+        );
+        finish(&tx, seats[0].id, 1).await;
+        seats[1].expect(1).await;
+        task.abort();
+    }
+
     async fn start(
         mut deps: SequencerDeps,
     ) -> (
@@ -101,7 +257,9 @@ mod roster_boundary {
             finish(&tx, seats[0].id, 1).await;
             let boundary = acquired(waiter).await;
             send(&tx, SequencerCommand::MessageStaged).await;
-            if pause { send(&tx, SequencerCommand::Pause).await; }
+            if pause {
+                send(&tx, SequencerCommand::Pause).await;
+            }
             boundary.release().await.unwrap();
             if pause {
                 assert!(next_due_quick(&mut events).await.is_none());
@@ -378,7 +536,13 @@ mod roster_boundary {
         let boundary = acquired(reserve(&bridge)).await;
         post(&storage, "system", None, "review this").await;
         send(&tx, gate_opened("gate-1")).await;
-        send(&tx, SequencerCommand::Summon { participant_id: seats[1].id }).await;
+        send(
+            &tx,
+            SequencerCommand::Summon {
+                participant_id: seats[1].id,
+            },
+        )
+        .await;
         boundary.release().await.unwrap();
         seats[1].quiet().await;
         send(&tx, gate_resolved("gate-1")).await;
@@ -394,7 +558,13 @@ mod roster_boundary {
         let boundary = acquired(reserve(&bridge)).await;
         send(&tx, halt_by(seats[0].id)).await;
         post(&storage, "system", None, "queued work").await;
-        send(&tx, SequencerCommand::Summon { participant_id: seats[0].id }).await;
+        send(
+            &tx,
+            SequencerCommand::Summon {
+                participant_id: seats[0].id,
+            },
+        )
+        .await;
         boundary.release().await.unwrap();
         seats[0].quiet().await;
         post(&storage, "user", None, "answer").await;

@@ -859,6 +859,8 @@ impl AgentHandle {
     /// Revoke/drain host writers before requesting process termination. This
     /// is not an OS exit acknowledgement; publication must also settle the
     /// process lifecycle. Ordinary kill/Drop retain their normal pump cleanup.
+    /// Do not hold a registry lock (such as AppState.sessions) that admitted
+    /// callbacks need while awaiting this drain.
     pub async fn retire(&mut self) {
         self.incarnation.retire().await;
         self.kill();

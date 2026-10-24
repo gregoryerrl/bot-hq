@@ -120,7 +120,9 @@ model side by side. Migration 0102 applies on first launch.
   input and turn identity together. Loss of that reservation's worker leaves a
   recovery recap. Retired runtimes now have a fence for pending host writes,
   late events, teardown and delayed retries; token revocation preserves a
-  replacement's newer credential. Runtime execution and controls are still being connected;
+  replacement's newer credential. Process callbacks keep their identity through
+  queued turns and Pause, so old wakeups, joins and interrupts can be discarded
+  without dropping user mentions or recorded halts. Runtime execution and controls are still being connected;
   these operations are not yet exposed as live session controls.
 - **Auto-allowed publications still receive review.** Both connectors and
   `action_gate` queue unread publication content for the reviewer, then the

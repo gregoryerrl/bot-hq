@@ -13,7 +13,7 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 pub struct Incarnation {
     id: String,
     active: AtomicBool,
-    writers: RwLock<()>,
+    writers: Arc<RwLock<()>>,
 }
 
 impl Incarnation {
@@ -21,7 +21,7 @@ impl Incarnation {
         Arc::new(Self {
             id: uuid::Uuid::new_v4().to_string(),
             active: AtomicBool::new(true),
-            writers: RwLock::new(()),
+            writers: Arc::new(RwLock::new(())),
         })
     }
 
@@ -40,6 +40,16 @@ impl Incarnation {
             return None;
         }
         let lease = self.writers.read().await;
+        self.is_active().then_some(lease)
+    }
+
+    /// A queued control keeps its lease through the eventual delivery, even
+    /// when selection and execution live in different functions.
+    pub async fn enter_owned(&self) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
+        if !self.is_active() {
+            return None;
+        }
+        let lease = Arc::clone(&self.writers).read_owned().await;
         self.is_active().then_some(lease)
     }
 
