@@ -4391,6 +4391,11 @@ async fn deliver_backlog(
                         stop = Some(Stop::Unreachable);
                         break;
                     }
+                    if batch == 0 {
+                        if let Some(bridge) = deps.bridge.as_ref() {
+                            bridge.clear_host_halt_after_delivery(&deps.session_id).await;
+                        }
+                    }
                     if let (Some(digest), Some(bridge)) = (digest.clone(), deps.bridge.as_ref()) {
                         bridge.commit_turn_digest(&deps.session_id, &to.slug, digest);
                     }
@@ -10009,6 +10014,185 @@ mod tests {
         );
         drop(tx);
         assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_gate_result_wakes_its_issuer_once_without_a_user_message() {
+        assert_scheduled_result_delivery("idle").await;
+    }
+
+    #[tokio::test]
+    async fn scheduled_gate_results_respect_holds_and_choose_a_live_reader() {
+        for state in ["live", "pause", "halt", "gate", "removed", "closed", "refused", "unrecorded"] {
+            assert_scheduled_result_delivery(state).await;
+        }
+    }
+
+    async fn assert_scheduled_result_delivery(state: &str) {
+        let roster = if state == "removed" { vec![("a", "active"), ("b", "active")] } else { vec![("a", "active")] };
+        let (mut deps, storage, mut seats) = ring(&roster).await;
+        let repo = tempdir().unwrap();
+        sqlx::query("UPDATE sessions SET working_repo_path = ? WHERE id = 's1'")
+            .bind(repo.path().to_str().unwrap()).execute(storage.pool()).await.unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(bridge.clone());
+        storage.insert_tray_entry(
+            "s1", "scheduled", "a", crate::storage::QuestionKind::Approval,
+            "Run in this window", Some(&["Approve".into(), "Reject".into()]), None,
+            Some("printf 'ran\\n' >> ran.txt"),
+        ).await.unwrap();
+        let stamp = |mins| (chrono::Utc::now() + chrono::Duration::minutes(mins))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        storage.set_tray_run_window("scheduled", &stamp(-2), &stamp(if state == "refused" { -1 } else { 5 })).await.unwrap();
+        storage.answer_tray_entry("scheduled", "Approve").await.unwrap();
+        if state == "removed" {
+            sqlx::query("UPDATE session_participants SET enabled = 0 WHERE id = ?")
+                .bind(seats[0].id).execute(storage.pool()).await.unwrap();
+        }
+        let (tx, rx) = mpsc::channel(8);
+        bridge.register_session_sequencer("s1".into(), tx.clone()).await;
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        match state {
+            "live" => {
+                post(&storage, "user", None, "ongoing task").await;
+                send(&tx, user_message()).await;
+                seats[0].expect(1).await;
+            }
+            "pause" => send(&tx, SequencerCommand::Pause).await,
+            "halt" => { bridge.mark_awaiting_user("s1".into(), "a".into(), "Need direction".into()).await; }
+            "gate" => send(&tx, gate_opened("blocker")).await,
+            "closed" => {
+                sqlx::query("UPDATE sessions SET closed_at = ? WHERE id = 's1'")
+                    .bind(crate::storage::now_utc()).execute(storage.pool()).await.unwrap();
+            }
+            "unrecorded" => {
+                sqlx::query("CREATE TRIGGER reject_scheduled_result BEFORE INSERT ON messages WHEN NEW.content LIKE '⏱ Scheduled gate%' BEGIN SELECT RAISE(ABORT, 'fixture refuses result'); END")
+                    .execute(storage.pool()).await.unwrap();
+            }
+            _ => {}
+        }
+        assert_eq!(bridge.run_due_scheduled_gates().await, 1);
+        let row = storage.get_tray_entry("scheduled").await.unwrap().unwrap();
+        assert_eq!(row.result_row_id.is_some(), state != "unrecorded", "{state}");
+        if state == "refused" {
+            assert!(row.run_refusal.is_some());
+            assert!(!repo.path().join("ran.txt").exists());
+        } else {
+            assert_eq!(row.exit_code, Some(0));
+            assert_eq!(std::fs::read_to_string(repo.path().join("ran.txt")).unwrap(), "ran\n");
+        }
+        if matches!(state, "live" | "pause" | "halt" | "gate" | "closed" | "unrecorded") {
+            seats[0].quiet().await;
+            match state {
+                "live" => send(&tx, SequencerCommand::TurnComplete { participant_id: seats[0].id, epoch: 1, ending: SPOKE }).await,
+                "pause" => send(&tx, SequencerCommand::Resume).await,
+                "halt" => {
+                    assert_eq!(storage.session_halt("s1").await.unwrap().unwrap().0, "a");
+                    storage.clear_session_halt("s1").await.unwrap();
+                    bridge.clear_session_awaiting("s1").await;
+                    send(&tx, user_message()).await;
+                }
+                "gate" => send(&tx, gate_resolved("blocker")).await,
+                _ => {}
+            }
+        }
+        let reader = usize::from(state == "removed");
+        if !matches!(state, "closed" | "unrecorded") {
+            assert!(seats[reader].expect_raw(1).await[0].contains("Scheduled gate"), "{state}");
+        }
+        assert_eq!(bridge.run_due_scheduled_gates().await, 0);
+        for seat in &mut seats { seat.quiet().await; }
+        bridge.unregister_session("s1").await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn an_internal_retry_clears_a_host_recap_only_when_work_reaches_the_agent() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let activity = crate::core::ActivityTracker::new(
+            "s1", awaiting.clone(), bridge.clone(), vec!["a".into()],
+        );
+        bridge.register_session_awaiting("s1".into(), awaiting.clone()).await;
+        bridge.register_session_activity("s1".into(), Arc::downgrade(&activity)).await;
+        deps.bridge = Some(bridge.clone());
+        deps.activity = Some(activity.clone());
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        bridge.declare_host_halt("s1", "No next turn was queued".into()).await;
+        assert!(awaiting.load(Ordering::Acquire));
+        post(&storage, "system", None, "retry is ready").await;
+        send(&tx, SequencerCommand::Summon { participant_id: seats[0].id }).await;
+        assert!(seats[0].expect_raw(1).await[0].contains("retry is ready"));
+        seats[0].quiet().await;
+        assert!(storage.session_halt("s1").await.unwrap().is_none(), "a live retry retires the host recap");
+        assert!(!awaiting.load(Ordering::Acquire));
+        assert_eq!(activity.current(), crate::core::SessionActivity::Busy);
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn an_unfed_deal_keeps_the_host_recap() {
+        // Live also names an interrupted drain or a missing stdin. Neither
+        // proves delivery, so clearing merely on Dealt::Live is too early.
+        for stopped in ["empty", "pause", "no_stdin", "dead_stdin"] {
+            let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+            let bridge = SignalingBridge::new();
+            bridge.set_storage(storage.clone()).await;
+            deps.bridge = Some(bridge.clone());
+            bridge.declare_host_halt("s1", "Keep this recap until work is delivered".into()).await;
+            post(&storage, "system", None, "work waiting for delivery").await;
+            let a = seats[0].id;
+            let holder = storage.participant_by_id(a).await.unwrap();
+            let (tx, mut rx) = mpsc::channel(8);
+            match stopped {
+                "empty" => {
+                    let page = storage.unread_for_participant(a).await.unwrap();
+                    let ids: Vec<_> = page.rows.iter().map(|row| (row.id, None)).collect();
+                    storage.commit_delivery(a, &ids).await.unwrap();
+                }
+                "pause" => send(&tx, SequencerCommand::Pause).await,
+                "no_stdin" => { deps.inputs.remove(&a); }
+                "dead_stdin" => seats[0].rx.close(),
+                _ => unreachable!(),
+            }
+            let result = start_turn(&deps, &holder, &1, &mut rx, &mut VecDeque::new()).await;
+            assert_eq!(result == Dealt::NothingUnread, stopped == "empty", "{stopped}");
+            assert!(storage.session_halt("s1").await.unwrap().is_some(), "{stopped}");
+            seats[0].quiet().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn an_internal_retry_does_not_release_pause_or_an_agent_halt() {
+        for stop in ["pause", "agent_halt"] {
+            let (mut deps, storage, mut seats) = ring(&[("a", "active")]).await;
+            let bridge = SignalingBridge::new();
+            bridge.set_storage(storage.clone()).await;
+            deps.bridge = Some(bridge.clone());
+            let (tx, rx) = mpsc::channel(8);
+            bridge.register_session_sequencer("s1".into(), tx.clone()).await;
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            if stop == "pause" {
+                bridge.declare_host_halt("s1", "Keep the user's Pause".into()).await;
+                send(&tx, SequencerCommand::Pause).await;
+            } else {
+                bridge.mark_awaiting_user("s1".into(), "a".into(), "Need the user's direction".into()).await;
+            }
+            post(&storage, "system", None, "retry is ready").await;
+            send(&tx, SequencerCommand::Summon { participant_id: seats[0].id }).await;
+            seats[0].quiet().await;
+            assert!(storage.session_halt("s1").await.unwrap().is_some(), "{stop}");
+            bridge.unregister_session("s1").await;
+            drop(tx);
+            assert!(exited(task).await);
+        }
     }
 
     #[tokio::test]

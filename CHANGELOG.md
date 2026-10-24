@@ -13,6 +13,15 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Scheduled command results wake the agent that requested them.** The
+  result is recorded before queuing a turn, which waits behind live work,
+  Pause, declared halts and other approvals. A removed requester passes
+  delivery to an active participant; closed sessions receive no wake.
+  Duplicate run claims produce no extra result or wake.
+- **An internal retry clears the old host halt banner when work arrives.**
+  A resumed turn no longer appears halted under an earlier automatic recap.
+  Empty or interrupted deliveries keep the recap; agent-declared halts,
+  Pause and pending approvals keep their hold.
 - **Queued reviews resume when the blocking gate resolves.** A reviewer
   waiting behind a push approval no longer needs an extra user message to
   get its turn. Gate answers are recorded before scheduling resumes;

@@ -120,6 +120,23 @@ struct GateRan {
     _running: super::RunningGateGuard,
 }
 
+/// A terminal refusal needs delivery just as a run does; a scheduled promise,
+/// failed claim or duplicate is not a new result and must not wake the ring.
+enum GateRunOutcome {
+    Ran(GateRan),
+    Refused,
+    Unchanged,
+}
+
+impl GateRunOutcome {
+    fn into_ran(self) -> Option<GateRan> {
+        match self {
+            Self::Ran(run) => Some(run),
+            _ => None,
+        }
+    }
+}
+
 impl SignalingBridge {
     /// Flag the session as awaiting the user, and — for a park that YIELDS the
     /// session — tell the ring who is now blocked.
@@ -1199,6 +1216,27 @@ impl SignalingBridge {
         delivered
     }
 
+    /// An internal retry may deliver work after a mechanical host stop. Clear
+    /// that recap only after a page actually landed, never on an empty deal or
+    /// a drain stopped by Pause. Agent halts and pending gates still own the
+    /// awaiting flag; reuse the same conditional cleanup as a gate release.
+    pub(crate) async fn clear_host_halt_after_delivery(&self, session_id: &str) {
+        let tracker = self.session_activity.lock().await.get(session_id).and_then(std::sync::Weak::upgrade);
+        if tracker.is_some_and(|activity| activity.holds_wakes()) {
+            return;
+        }
+        let Some(storage) = self.storage.lock().await.clone() else { return };
+        match storage.session_halt(session_id).await {
+            Ok(Some((by, _, _))) if by == "system" => {
+                // prepare_gate_release's UPDATE is author-predicated, so an
+                // agent halt arriving after this read cannot be erased.
+                self.prepare_gate_release(session_id).await;
+            }
+            Err(error) => tracing::warn!(session_id, %error, "work delivered but host halt state could not be read"),
+            _ => {}
+        }
+    }
+
     /// Complete the old approval's cleanup BEFORE handing scheduling to the
     /// ring. AppState must not subsequently clear a recap the ring just wrote.
     async fn prepare_gate_release(&self, session_id: &str) -> bool {
@@ -1320,7 +1358,7 @@ impl SignalingBridge {
             let mut run = String::new();
             gate_run = self
                 .maybe_run_gated(&session_id, choice_id, command_text, &picked, &mut run, false)
-                .await;
+                .await.into_ran();
             body.push_str(&redact(&run));
         }
         // The phase is read HERE, not in `CoreAppState::resolve_choice` where it
@@ -1511,9 +1549,8 @@ impl SignalingBridge {
     /// item; a no-op unless the pick is Approved. Callers gate this on the
     /// atomic status flip so it runs exactly once.
     ///
-    /// Returns what ran — `None` when nothing did (no command, not approved, or
-    /// refused at run time) — with the running mark still held, so the caller
-    /// can link the delivery row before the gate stops reading "running".
+    /// Distinguishes a new run/refusal from an unchanged request. A run holds
+    /// its running mark until the caller has linked the delivery row.
     async fn maybe_run_gated(
         &self,
         session_id: &str,
@@ -1522,12 +1559,12 @@ impl SignalingBridge {
         picked: &str,
         body: &mut String,
         deferred: bool,
-    ) -> Option<GateRan> {
-        let command = command?;
+    ) -> GateRunOutcome {
+        let Some(command) = command else { return GateRunOutcome::Unchanged };
         // Only the LISTED Approve runs a parked command (`gate_verdict`): the
         // user's own words are carried to the agent, never executed as a yes.
         if !matches!(gate_verdict(picked), crate::policy::ViolationOutcome::Approved) {
-            return None;
+            return GateRunOutcome::Unchanged;
         }
         // The gate's row: the body hash its review covered (0084), for an
         // edit the live body its reviewer's diff was made against (0088), and
@@ -1541,28 +1578,6 @@ impl SignalingBridge {
         // with `deferred`), and this approval delivers only the promise.
         if let Some(r) = row.as_ref() {
             let now = crate::storage::now_utc();
-            if let Some(not_after) = r.run_not_after.as_deref() {
-                if now.as_str() > not_after {
-                    let refusal = format!(
-                        "NOT RUN: the run window closed at {} UTC (now {}), so bot-hq refused to run \
-                         it. Re-issue the command with a new window if it is still wanted.",
-                        super::action_gate::window_time(not_after),
-                        super::action_gate::window_time(&now)
-                    );
-                    self.refuse_approved_run(
-                        session_id,
-                        choice_id,
-                        command,
-                        row.as_ref(),
-                        body,
-                        &refusal,
-                        &format!("the run window closed at {not_after}"),
-                        "approved but NOT RUN: the run window had closed",
-                    )
-                    .await;
-                    return None;
-                }
-            }
             if let (false, Some(not_before)) = (deferred, r.run_not_before.as_deref()) {
                 if now.as_str() < not_before {
                     body.push_str(&format!(
@@ -1587,7 +1602,7 @@ impl SignalingBridge {
                         )
                         .await;
                     }
-                    return None;
+                    return GateRunOutcome::Unchanged;
                 }
             }
         }
@@ -1620,12 +1635,37 @@ impl SignalingBridge {
                         "NOT RUN AGAIN: this command's run already started at {started} UTC (it is \
                          running or finished); gate_status has its outcome."
                     ));
-                    return None;
+                    return GateRunOutcome::Unchanged;
                 }
                 Err(e) => {
                     tracing::warn!(?e, choice_id, "the gate run could not be claimed; not running");
                     body.push_str("NOT RUN: bot-hq could not record that the run started, so it did not start it.");
-                    return None;
+                    return GateRunOutcome::Unchanged;
+                }
+            }
+        }
+        if let Some(r) = row.as_ref() {
+            let now = crate::storage::now_utc();
+            if let Some(not_after) = r.run_not_after.as_deref() {
+                if now.as_str() > not_after {
+                    let refusal = format!(
+                        "NOT RUN: the run window closed at {} UTC (now {}), so bot-hq refused to run \
+                         it. Re-issue the command with a new window if it is still wanted.",
+                        super::action_gate::window_time(not_after),
+                        super::action_gate::window_time(&now)
+                    );
+                    self.refuse_approved_run(
+                        session_id,
+                        choice_id,
+                        command,
+                        row.as_ref(),
+                        body,
+                        &refusal,
+                        &format!("the run window closed at {not_after}"),
+                        "approved but NOT RUN: the run window had closed",
+                    )
+                    .await;
+                    return GateRunOutcome::Refused;
                 }
             }
         }
@@ -1662,7 +1702,7 @@ impl SignalingBridge {
             // Redeemed by the hook, or never presented (no hook, or the run died
             // first): either way nothing may redeem it later.
             self.discard_push_nonce(&nonce);
-            return Some(match out {
+            return GateRunOutcome::Ran(match out {
                 Ok(run) => {
                     body.push_str(&run.text);
                     ran(Some(run.exit_code))
@@ -1711,7 +1751,7 @@ impl SignalingBridge {
                     "approved but NOT RUN: body file changed or missing after review",
                 )
                 .await;
-                return None;
+                return GateRunOutcome::Refused;
             }
             if recorded.is_none() {
                 body.push_str(
@@ -1745,7 +1785,7 @@ impl SignalingBridge {
                         "approved but NOT RUN: the live body changed after review",
                     )
                     .await;
-                    return None;
+                    return GateRunOutcome::Refused;
                 }
                 Ok(_) => {}
                 Err(why) => body.push_str(&format!(
@@ -1780,7 +1820,7 @@ impl SignalingBridge {
                     "approved but NOT RUN: a pinned script changed or went missing",
                 )
                 .await;
-                return None;
+                return GateRunOutcome::Refused;
             }
         }
         // The verdict line above already says "approved" and names the command;
@@ -1799,11 +1839,11 @@ impl SignalingBridge {
                 Some(Err(why)) => {
                     let refusal = format!("NOT RUN: the prod_read password could not be read ({why}).");
                     self.refuse_approved_run(session_id, choice_id, command, row.as_ref(), body, &refusal, "the prod_read password could not be read", "approved but NOT RUN: prod_read password unreadable").await;
-                    return None;
+                    return GateRunOutcome::Refused;
                 }
                 None => {
                     self.refuse_approved_run(session_id, choice_id, command, row.as_ref(), body, "NOT RUN: the project no longer configures prod_read.", "prod_read is no longer configured", "approved but NOT RUN: prod_read not configured").await;
-                    return None;
+                    return GateRunOutcome::Refused;
                 }
             }
         }
@@ -1812,7 +1852,7 @@ impl SignalingBridge {
         // `limit` is the bound the running mark announced: the agent's
         // `timeout_secs` when the row carries one, else the default.
         let executed = self.execute_gated_with(session_id, command, limit, &env_refs).await;
-        Some(match executed {
+        GateRunOutcome::Ran(match executed {
             Ok(run) => {
                 // Group K (EYES): a data read's answer can be megabytes — a
                 // query, a log read. Its row keeps the head and the tail.
@@ -1871,7 +1911,7 @@ impl SignalingBridge {
             let Some(command) = row.command_text.clone() else { continue };
             let id8: String = row.choice_id.chars().take(8).collect();
             let mut body = format!(
-                "⏱ Scheduled gate {id8} ran at {} UTC — approved by the user at {} for the window {} – {}: \
+                "⏱ Scheduled gate {id8} result at {} UTC — approved by the user at {} for the window {} – {}: \
                  `{}`\n",
                 super::action_gate::window_time(&now),
                 row.answered_at.as_deref().map(super::action_gate::window_time).unwrap_or_default(),
@@ -1883,6 +1923,9 @@ impl SignalingBridge {
             let outcome = self
                 .maybe_run_gated(&row.session_id, &row.choice_id, Some(&command), "Approve", &mut run, true)
                 .await;
+            if matches!(outcome, GateRunOutcome::Unchanged) {
+                continue;
+            }
             body.push_str(&crate::policy::secret_scan::redact(&run));
             let receipt = crate::core::post_system_notice(
                 &storage,
@@ -1893,18 +1936,23 @@ impl SignalingBridge {
                 None,
             )
             .await;
-            if let Some(gate_ran) = outcome {
-                if let Err(e) = storage
-                    .set_tray_run_result(
-                        &row.choice_id,
-                        receipt.as_ref().map(|r| r.message_id()),
-                        gate_ran.exit_code,
-                        gate_ran.ran_ms,
-                    )
-                    .await
-                {
-                    tracing::warn!(?e, choice_id = %row.choice_id, "could not record the scheduled gate's run result");
-                }
+            let (exit_code, ran_ms) = match &outcome {
+                GateRunOutcome::Ran(run) => (run.exit_code, run.ran_ms),
+                GateRunOutcome::Refused => (None, 0),
+                GateRunOutcome::Unchanged => unreachable!(),
+            };
+            let linked = storage.set_tray_run_result(
+                &row.choice_id, receipt.as_ref().map(|r| r.message_id()), exit_code, ran_ms,
+            ).await;
+            if let Err(error) = &linked {
+                tracing::warn!(%error, choice_id = %row.choice_id, "could not record the scheduled gate's run result");
+            }
+            // Publish the result before waking its reader; keep the running
+            // mark until that durable link exists. An unrecorded result is
+            // never advertised as available to the participant.
+            drop(outcome);
+            if receipt.is_some() && linked.is_ok() {
+                self.wake_scheduled_result_reader(&storage, &row).await;
             }
             // The tray tab and the scheduled strip refetch on this.
             let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
@@ -1914,6 +1962,40 @@ impl SignalingBridge {
             ran += 1;
         }
         ran
+    }
+
+    async fn wake_scheduled_result_reader(&self, storage: &Storage, row: &crate::storage::SessionTrayEntry) {
+        if !matches!(storage.get_session(&row.session_id).await, Ok(Some(session)) if session.closed_at.is_none()) {
+            return;
+        }
+        let issuer = match storage.participant_by_slug(&row.session_id, &row.agent).await {
+            Ok(issuer) => issuer,
+            Err(error) => {
+                tracing::warn!(%error, choice_id = %row.choice_id, "could not find the scheduled result's reader");
+                return;
+            }
+        };
+        let reader = if issuer.as_ref().is_some_and(|p| p.enabled) {
+            issuer
+        } else {
+            match storage.next_active_participant(&row.session_id, issuer.as_ref()).await {
+                Ok(reader) => reader,
+                Err(error) => {
+                    tracing::warn!(%error, choice_id = %row.choice_id, "could not find a successor to read the scheduled result");
+                    return;
+                }
+            }
+        };
+        let Some(reader) = reader else { return };
+        let tx = self.session_sequencer.lock().await.get(&row.session_id).cloned();
+        if let Some(tx) = tx {
+            // The scheduler is outside the ring and holds no bridge lock, so
+            // it can wait for queue space. A Summon queues behind live work,
+            // gates, Pause and declared halts; a UserMessage would release them.
+            if tx.send(crate::core::sequencer::SequencerCommand::Summon { participant_id: reader.id }).await.is_err() {
+                tracing::warn!(choice_id = %row.choice_id, "scheduled result persisted but its ring closed before the wake");
+            }
+        }
     }
 
     /// At boot (0100): the runs the previous process was cut off in — claimed,
@@ -2705,6 +2787,27 @@ mod tests {
 
     use super::*;
     use crate::policy::ViolationOutcome;
+
+    #[tokio::test]
+    async fn an_expired_duplicate_cannot_refuse_an_already_claimed_run() {
+        let bridge = SignalingBridge::new();
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        storage.insert_tray_entry(
+            "s1", "expired", "a", crate::storage::QuestionKind::Approval,
+            "fixture", Some(&["Approve".into(), "Reject".into()]), None, Some("never-run"),
+        ).await.unwrap();
+        storage.set_tray_run_window("expired", "2000-01-01T00:00:00.000Z", "2000-01-02T00:00:00.000Z").await.unwrap();
+        storage.answer_tray_entry("expired", "Approve").await.unwrap();
+        assert!(storage.claim_gate_run("expired").await.unwrap());
+        let before = storage.messages_for_session("s1", None).await.unwrap().len();
+        let mut body = String::new();
+        assert!(matches!(bridge.maybe_run_gated("s1", "expired", Some("never-run"), "Approve", &mut body, true).await, GateRunOutcome::Unchanged));
+        assert!(body.contains("NOT RUN AGAIN"));
+        assert!(storage.get_tray_entry("expired").await.unwrap().unwrap().run_refusal.is_none());
+        assert_eq!(storage.messages_for_session("s1", None).await.unwrap().len(), before);
+    }
 
     /// **A phase request is recorded as the AGENT that asked, not as the user**
     /// (round-3 F13).

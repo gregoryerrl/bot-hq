@@ -491,6 +491,10 @@ the round cap ends it.
    With no next turn, the host leaves a recap; approval alone is never called
    proof that a command finished. A non-preempting answer observed during
    backlog delivery is deferred without cutting that delivery short.
+   An internal retry retires a prior mechanical host recap only after its
+   first page actually reaches the participant. An empty deal, missing input
+   or stopped drain does not clear it. The author-predicated halt update and
+   gate/Pause checks preserve agent halts and active approval waits.
 
 2b. **The all-pass lap** — a full lap in which every dealt participant PASSED
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
@@ -1340,8 +1344,14 @@ calls `run_due_scheduled_gates` every `SCHEDULED_GATE_TICK` (10 s):
 `due_scheduled_gates` reads the approved windowed rows whose start has come,
 each runs through the same `maybe_run_gated` (`deferred`, so the start is not
 re-checked while the end is), its output lands as a `[system]` row linked by
-`set_tray_run_result`, and `ChoiceResolved` refreshes the UI. No in-memory
-timer, so a relaunch re-arms nothing. **Every run is claimed first** (EYES
+`set_tray_run_result`, and `ChoiceResolved` refreshes the UI. A persisted,
+linked result or refusal then queues a non-preempting `Summon` for the
+enabled issuer (or its next active successor). Live work, Pause, declared
+halts and gates retain control of when that turn runs. Closed sessions,
+unrecorded results and duplicate claims produce no wake. `GateRunOutcome`
+distinguishes terminal results from unchanged requests; even an expired
+window's refusal takes the run claim before posting. No in-memory timer,
+so a relaunch re-arms nothing. **Every run is claimed first** (EYES
 2577e626; `session_tray.run_started_at`, 0100): `claim_gate_run` is one
 atomic `UPDATE … WHERE run_started_at IS NULL` that both paths take before
 executing — a gate approved inside its window runs at once, and while it runs
