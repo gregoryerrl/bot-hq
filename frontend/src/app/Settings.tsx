@@ -677,14 +677,14 @@ function ToolGateSection() {
             Gated Bash Keywords
           </h3>
           <p className="mt-1 max-w-prose font-body-md text-body-md text-muted">
-            The global list. Each session copies it when it spawns, so an edit
-            here reaches a session the next time it spawns (every session after
-            an app restart); until then a running session keeps its own copy,
-            which you edit in that session's gear tab. When an agent's Bash
+            The global list. Each new session copies it at creation. Existing
+            sessions keep their own copy across app restarts; edit it in that
+            session's gear tab. When an agent's Bash
             command contains a keyword, <span className="text-primary">Gate</span> blocks
             it and asks you to Approve/Reject (bot-hq runs it on approve);{" "}
             <span className="text-success">Auto-allow</span> lets it run with
-            no prompt. Case-insensitive substring match against the command or
+            no approval prompt; publications still receive the session's review
+            before running automatically. Case-insensitive keyword matching against the command or
             tool name; commands with no matching keyword run normally.
           </p>
         </div>

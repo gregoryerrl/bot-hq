@@ -1224,9 +1224,14 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
 - **Tripwire:** the PreToolUse Bash hook (`policy-check tool-gate`, injected
   at spawn via `--settings` into every participant whose role holds
   `edit_files` — `src/policy/hooks.rs`
-  `run_tool_gate`) blocks a `gate`-matched command with **exit 2** and routes
-  the agent to the `action_gate` MCP tool; `auto_allow`/no-match exits 0 (runs
-  normally). Exit 2 is the only block form honored under
+  `run_tool_gate`) blocks a `gate`-matched command with **exit 2** and parks it
+  through the authenticated `/hooks/tool-gate` route (with an `action_gate`
+  fallback). The Codex hook uses the same route after checking caller posture.
+  An outward `auto_allow` command also asks the host: unread content queues
+  for review and automatic execution, while already-covered content or a
+  roster without a reviewer may proceed. The route rechecks policy and the
+  enabled caller's edit capability and never executes a command itself.
+  Other `auto_allow`/no-match commands exit 0. Exit 2 is the only block form honored under
   `--dangerously-skip-permissions`.
 - **Execute-on-approve:** `action_gate(command)`
   (`src/signaling/bridge/action_gate.rs`) re-classifies, surfaces
@@ -1238,6 +1243,18 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   — an action request, not a permission request. (There are no session push grants: a gate-run `git push` meets the
   pre-push hook like any other push, and under `push_gate=ask` that hook is the
   gate.)
+- **Automatic publication after review** (feedback #105, migration 0104):
+  `approval_required` defaults true; only a validated outward `auto_allow`
+  request inserts false. `reviewed_at` authorizes exactly `body_row_id`.
+  Settlement records that proof; the background gate tick claims and runs it,
+  rechecking current policy, findings and requester posture. Results use
+  `auto_running` / `auto_resolved`, with no manufactured user answer. Body
+  revisions revoke proof before changing pins. Concurrent preparations share
+  a command lock; a stronger duplicate raises approval and promotes an already
+  reviewed queue to a user card. Explicit approval, listed reads, urgent and
+  windowed requests cannot acquire automatic authority. A configured down
+  reviewer holds the request; the existing user-approved override promotes
+  it to a user card. No reviewer in the roster permits direct execution.
 - **An approved publish is read back** (`src/signaling/bridge/readback.rs`,
   feedback #57 #60 #97). After an approved single `gh issue|pr
   create|edit|comment` runs:

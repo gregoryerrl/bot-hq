@@ -324,7 +324,8 @@ function SessionToolGateSection({
             <span className="text-primary">Gate</span> blocks a matching Bash
             command and asks you to Approve/Reject;{" "}
             <span className="text-success">Auto-allow</span> runs it with no
-            prompt. Case-insensitive substring match.
+            approval prompt. Publications still receive the session's review
+            before running automatically. Case-insensitive keyword matching.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">

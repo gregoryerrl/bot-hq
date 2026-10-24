@@ -38,7 +38,7 @@ pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
     GATE_HISTORY_DEFAULT,
 };
-pub(crate) use action_gate::ParkOutcome;
+pub(crate) use action_gate::{AutoPublishPreparation, ParkOutcome};
 mod cl_facade;
 mod cl_push;
 pub use cl_push::{scan_then_push, PushOutcome};
@@ -49,7 +49,7 @@ mod cl_write;
 mod feedback;
 mod findings;
 mod outward_body;
-pub(crate) use outward_body::{commands_run, gate_surface, is_gh_api_read, GateSurface, RunCommand};
+pub(crate) use outward_body::{commands_run, gate_surface, is_gh_api_read, is_outward, GateSurface, RunCommand};
 mod prod_read;
 mod readback;
 mod session_docs;
@@ -427,6 +427,9 @@ struct CloseGateState {
 
 /// Shared signaling state.
 pub struct SignalingBridge {
+    /// Serialize identical gate preparations, including hook/MCP retries.
+    /// Weak entries keep an in-flight lock stable without retaining commands.
+    gate_preparations: Mutex<HashMap<(String, String), Weak<Mutex<()>>>>,
     event_tx: broadcast::Sender<SignalingEvent>,
     pending: Mutex<HashMap<String, Parked>>,
     violations: Option<ViolationsLog>,
@@ -725,6 +728,7 @@ impl SignalingBridge {
             digest_cursor: std::sync::Mutex::new(HashMap::new()),
             session_awaiting: Mutex::new(HashMap::new()),
             session_sequencer: Mutex::new(HashMap::new()),
+            gate_preparations: Mutex::new(HashMap::new()),
             session_activity: Mutex::new(HashMap::new()),
             session_phase: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
@@ -1342,6 +1346,9 @@ impl SignalingBridge {
     /// lifetime. Idempotent — absent entries are fine. Called from
     /// `core::close_session`.
     pub async fn unregister_session(&self, session_id: &str) {
+        // Keep an active preparation's lock through teardown/reopen; dead
+        // entries are also pruned whenever another preparation starts.
+        self.gate_preparations.lock().await.retain(|(sid, _), lock| sid != session_id || lock.strong_count() > 0);
         self.session_projects.lock().await.remove(session_id);
         self.session_awaiting.lock().await.remove(session_id);
         self.session_activity.lock().await.remove(session_id);

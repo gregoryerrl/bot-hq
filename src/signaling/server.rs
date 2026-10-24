@@ -477,7 +477,13 @@ async fn handle_posture(body: Incoming, bridge: Arc<SignalingBridge>) -> Respons
 /// anything (`/hooks/pre-push` only parks an approval). The hook already
 /// matched; this route's only job is to park.
 ///
-/// The hook treats any non-2xx / malformed reply as "not parked" and falls back
+/// With `review_auto_allow: true`, an enabled edit-capable caller asks the
+/// host to recheck live policy and review. It returns `allow: true` when the
+/// original shell may proceed, or a queued/pending/claimed id with
+/// `approval_required`. This route never executes the command. A lost or
+/// malformed automatic response blocks; it never licenses a local retry.
+///
+/// The legacy hook treats any non-2xx / malformed reply as "not parked" and falls back
 /// to telling the agent to call `action_gate` itself, so an error here costs
 /// convenience, never safety — the command stays blocked either way.
 async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Response<Full<Bytes>> {
@@ -510,6 +516,24 @@ async fn handle_tool_gate(body: Incoming, bridge: Arc<SignalingBridge>) -> Respo
         .and_then(|s| s.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("an agent");
+
+    if v.get("review_auto_allow").and_then(|v| v.as_bool()) == Some(true) {
+        use crate::signaling::bridge::{AutoPublishPreparation, ParkOutcome};
+        return match bridge.prepare_auto_publication(session_id, agent, command, None, None).await {
+            Ok(AutoPublishPreparation::Direct { .. }) => text_response(StatusCode::OK, &json!({"allow": true}).to_string()),
+            Ok(AutoPublishPreparation::AlreadyClaimed { gate_id }) => text_response(StatusCode::OK,
+                &json!({"gate_id": gate_id, "existing": true, "claimed": true, "approval_required": false}).to_string()),
+            Ok(AutoPublishPreparation::Deferred { outcome, approval_required }) => {
+                let queued = matches!(outcome, ParkOutcome::Queued { .. });
+                let (gate_id, existing) = match outcome {
+                    ParkOutcome::Queued { gate_id, existing } | ParkOutcome::Parked { gate_id, existing, .. } => (gate_id, existing),
+                };
+                text_response(StatusCode::OK, &json!({"gate_id": gate_id, "existing": existing,
+                    "queued": queued, "approval_required": approval_required}).to_string())
+            }
+            Err(error) => text_response(StatusCode::BAD_REQUEST, &format!("automatic publication held: {error}")),
+        };
+    }
 
     match bridge.park_gated_command(session_id, agent, command).await {
         Ok(crate::signaling::bridge::ParkOutcome::Parked { gate_id, existing, note }) => {

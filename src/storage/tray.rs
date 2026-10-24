@@ -771,6 +771,14 @@ impl Storage {
         Ok(row.map(|(id,)| id))
     }
 
+    pub async fn active_gate_for_command(&self, session_id: &str, command: &str) -> Result<Option<SessionTrayEntry>> {
+        sqlx::query_as::<_, SessionTrayEntry>(&format!(
+            "SELECT {TRAY_COLUMNS} FROM session_tray WHERE session_id = ? AND command_text = ? \
+             AND status IN ('pending', 'queued', 'auto_running') ORDER BY id DESC LIMIT 1"
+        )).bind(session_id).bind(command).fetch_optional(&self.pool).await
+            .context("reading an existing command's active gate")
+    }
+
     /// The most recent REJECTED answer to this exact command in this session:
     /// `(answered_at, picked_option)`, or `None`. Backs the re-park card's
     /// "you rejected this before" line (E6, week 35): a rejected outward

@@ -4,8 +4,9 @@
 //! agent to call `action_gate(command)`. This module classifies the command
 //! against the session's resolved keyword list (`tool_gate::resolve_keywords`:
 //! the session snapshot first, the global list as fallback) and:
-//!   - `auto_allow` / no-match → runs it immediately in the session's repo,
-//!   - `gate`                  → surfaces Approve/Reject; on approve, runs it.
+//!   - outward `auto_allow` → queues unread content, then runs after review,
+//!   - other `auto_allow` / no-match → runs immediately in the session's repo,
+//!   - `gate` → review if needed, then Approve/Reject; on approve, runs it.
 //!
 //! Either way bot-hq EXECUTES the command server-side (in the session's
 //! `working_repo_path`, resolved from storage) and returns combined output to
@@ -228,6 +229,196 @@ enum Bound {
 }
 
 impl SignalingBridge {
+    async fn gate_preparation_lock(
+        &self,
+        session_id: &str,
+        command: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        use sha2::{Digest, Sha256};
+        let key = (
+            session_id.to_string(),
+            format!("{:x}", Sha256::digest(command.as_bytes())),
+        );
+        let mut locks = self.gate_preparations.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+
+    /// Enqueue-only preparation shared by native hooks and action_gate.
+    /// A caller-provided flag never grants automatic authority: policy,
+    /// roster and existing stronger gates are checked here on the host.
+    pub(crate) async fn prepare_auto_publication(
+        &self,
+        session_id: &str,
+        agent: &str,
+        command: &str,
+        approve_after: Option<&str>,
+        run_timeout_secs: Option<u64>,
+    ) -> Result<AutoPublishPreparation> {
+        let lock = self.gate_preparation_lock(session_id, command).await;
+        let _guard = lock.lock().await;
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
+        let session = storage
+            .get_session(session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unknown session"))?;
+        anyhow::ensure!(
+            session.closed_at.is_none(),
+            "a closed session cannot publish automatically"
+        );
+        let roster = storage.participants_for_session(session_id).await?;
+        let caller = roster
+            .iter()
+            .find(|p| p.slug == agent && p.enabled)
+            .ok_or_else(|| anyhow::anyhow!("requester is not an enabled participant"))?;
+        anyhow::ensure!(
+            crate::agents::CapabilitySet::from_json(&caller.capabilities)
+                .is_some_and(|c| c.contains(crate::agents::Capability::EditFiles)),
+            "automatic publication requires an edit-capable participant"
+        );
+        if let Some(refusal) =
+            crate::policy::shell_lint::zsh_trap(&tool_gate::gate_shell(), command)
+        {
+            anyhow::bail!("{refusal}");
+        }
+        if let Some(reason) = self.secret_in_published_bodies(session_id, command).await {
+            anyhow::bail!(
+                "outward publish held: the body contains {reason}; remove it before publishing"
+            );
+        }
+        let policy = self.resolve_policy_for(session_id).await?;
+        let keywords = self
+            .data_dir
+            .as_ref()
+            .map(|d| tool_gate::resolve_keywords(d, Some(session_id)))
+            .unwrap_or_default();
+        if !outward_command(command)
+            || tool_gate::match_keyword("Bash", command, &keywords) != Some(GateMode::AutoAllow)
+            || crate::policy::data_reads::match_command(&policy, command).is_some()
+        {
+            let outcome = self
+                .park_gated_command_locked(
+                    session_id,
+                    agent,
+                    command,
+                    approve_after,
+                    false,
+                    None,
+                    None,
+                )
+                .await?;
+            return Ok(AutoPublishPreparation::Deferred {
+                outcome,
+                approval_required: true,
+            });
+        }
+        // Missing registration is not evidence of a solo roster. Never skip
+        // a configured reviewer merely because its process has not registered.
+        let mut configured = Vec::new();
+        for p in roster.iter().filter(|p| p.enabled && p.slug != agent) {
+            let caps = crate::agents::CapabilitySet::from_json(&p.capabilities)
+                .ok_or_else(|| anyhow::anyhow!("reviewer capabilities could not be read"))?;
+            if caps.contains(crate::agents::Capability::FileFinding) {
+                configured.push(p.slug.clone());
+            }
+        }
+        let registered: Vec<_> = self
+            .session_reviewers(session_id)
+            .into_iter()
+            .filter(|s| s != agent)
+            .collect();
+        anyhow::ensure!(configured.len() == registered.len() && configured.iter().all(|s| registered.contains(s)),
+            "outward publish held: reviewer registration does not match the enabled roster; restore the reviewer before automatic publication");
+        if self.reviewer_override_reason(session_id).is_none() {
+            if let Some((reviewer, health)) = self.session_reviewer_down(session_id, agent) {
+                anyhow::bail!("outward publish held: reviewer {reviewer} is {health}; restore it or request the existing reviewer override");
+            }
+        }
+        // Validate revised content before dedupe can update its digest/body
+        // pointer. Otherwise an empty or unreadable revision could be blessed
+        // by a later review of the queue's diagnostic text.
+        let review = self
+            .outward_review_check(session_id, agent, command)
+            .await?;
+        if let OutwardReview::Refuse(reason) = &review {
+            anyhow::bail!("{reason}");
+        }
+        if let Some(row) = storage.active_gate_for_command(session_id, command).await? {
+            match row.status.as_str() {
+                "auto_running" => {
+                    return Ok(AutoPublishPreparation::AlreadyClaimed {
+                        gate_id: row.choice_id,
+                    })
+                }
+                "pending" => {
+                    return Ok(AutoPublishPreparation::Deferred {
+                        outcome: ParkOutcome::Parked {
+                            gate_id: row.choice_id,
+                            existing: true,
+                            note: None,
+                        },
+                        approval_required: true,
+                    })
+                }
+                "queued" => {
+                    if let Some(reviewer) = self.queued_reviewer(session_id, &row.agent).await {
+                        self.repost_revised_body(
+                            &storage,
+                            session_id,
+                            agent,
+                            &row.choice_id,
+                            command,
+                            reviewer.id,
+                        )
+                        .await;
+                    }
+                    return Ok(AutoPublishPreparation::Deferred {
+                        outcome: ParkOutcome::Queued {
+                            gate_id: row.choice_id,
+                            existing: true,
+                        },
+                        approval_required: row.approval_required,
+                    });
+                }
+                _ => unreachable!(),
+            }
+        }
+        match review {
+            OutwardReview::Refuse(reason) => anyhow::bail!("{reason}"),
+            OutwardReview::Queued { reviewer_id } => {
+                let extra = card_extra(command, self.script_pins(session_id, command).await, None, approve_after, None, None);
+                let (gate_id, existing) = self.queue_outward_park(session_id, agent, command, reviewer_id, None, &extra, false, run_timeout_secs).await?;
+                Ok(AutoPublishPreparation::Deferred { outcome: ParkOutcome::Queued { gate_id, existing }, approval_required: false })
+            }
+            OutwardReview::Covered { reviewer, .. } => Ok(AutoPublishPreparation::Direct {
+                note: Some(format!("The reviewer ({reviewer}) already received this exact body; auto_allow permits the run.")),
+            }),
+            OutwardReview::Proceed(note) if configured.is_empty() || note.is_none() => {
+                // Even a solo roster cannot silently bypass a recorded veto
+                // on this exact command by disabling its former reviewer.
+                anyhow::ensure!(storage.open_targeted_veto_for_command(session_id, command).await?.is_none(),
+                    "an open targeted finding vetoed this command; disposition it before publishing without a reviewer");
+                Ok(AutoPublishPreparation::Direct { note })
+            }
+            OutwardReview::Proceed(_) => {
+                // An explicit reviewer-down override is a user-gate escape,
+                // not a claim that the missing review actually happened.
+                let outcome = self.park_gated_command_locked(session_id, agent, command, approve_after, false, None, None).await?;
+                Ok(AutoPublishPreparation::Deferred { outcome, approval_required: true })
+            }
+        }
+    }
+
     /// Entry point for the `action_gate` MCP tool. `command` is the exact Bash
     /// string the gate blocked. Returns combined output text (executed) or a
     /// "not run" message (rejected). Errs only when the session has no
@@ -311,9 +502,20 @@ impl SignalingBridge {
             None => Vec::new(),
         };
         match tool_gate::match_keyword("Bash", &command, &keywords) {
-            // No keyword, or an explicit auto_allow → run with no prompt. (In
-            // normal flow the hook only routes `gate` commands here; auto_allow
-            // / no-match are handled defensively so a direct call still works.)
+            Some(GateMode::AutoAllow) if outward_command(&command) => {
+                match self.prepare_auto_publication(&session_id, &agent, &command, approve_after.as_deref(), req.run_timeout_secs).await? {
+                    AutoPublishPreparation::Direct { note } => self.execute_gated_with(&session_id, &command, bound, &[]).await
+                        .map(|run| run.text + &note.map(|n| format!("\n{n}")).unwrap_or_default() + &request_extras(&req, requested)),
+                    AutoPublishPreparation::Deferred { outcome, approval_required } => {
+                        let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
+                        Ok(auto_preparation_text(&outcome, &command, approval_required) + &request_extras(&req, bound))
+                    }
+                    AutoPublishPreparation::AlreadyClaimed { gate_id } => Ok(format!(
+                        "action_gate: the identical automatic run was already claimed (gate_id: {gate_id}). Nothing was re-issued. Read gate_status(\"{gate_id}\"); do not re-run it."
+                    )),
+                }
+            }
+            // No keyword, or a non-outward auto_allow → run with no prompt.
             None | Some(GateMode::AutoAllow) => self
                 .execute_gated_with(&session_id, &command, bound, &[])
                 .await
@@ -640,6 +842,29 @@ impl SignalingBridge {
         prod_read_card: Option<&str>,
         window: Option<&RunWindow>,
     ) -> Result<ParkOutcome> {
+        let lock = self.gate_preparation_lock(session_id, command).await;
+        let _guard = lock.lock().await;
+        self.park_gated_command_locked(session_id, agent, command, approve_after, reviewer_read, prod_read_card, window).await
+    }
+
+    async fn park_gated_command_locked(
+        &self, session_id: &str, agent: &str, command: &str, approve_after: Option<&str>,
+        reviewer_read: bool, prod_read_card: Option<&str>, window: Option<&RunWindow>,
+    ) -> Result<ParkOutcome> {
+        let mut upgraded = None;
+        if let Some(storage) = self.storage.lock().await.clone() {
+            if let Some(row) = storage.active_gate_for_command(session_id, command).await? {
+                if row.status == "auto_running" {
+                    anyhow::bail!("the identical automatic run was already claimed (gate_id: {}); approval cannot be added retroactively. Read gate_status; nothing new was parked or run", row.choice_id);
+                }
+                if row.status == "queued" && !row.approval_required {
+                    if storage.require_queued_gate_approval(&row.choice_id).await? != 1 {
+                        anyhow::bail!("gate {} changed while user approval was being required; inspect gate_status before retrying", row.choice_id);
+                    }
+                    upgraded = Some(row);
+                }
+            }
+        }
         let listed = self.data_read_in(session_id, command).await;
         let reader = reviewer_read.then_some(agent);
         let scripts = self.script_pins(session_id, command).await;
@@ -694,7 +919,29 @@ impl SignalingBridge {
                     // (re-posted for the reviewer, the advisory settled); with
                     // the body unchanged this is the plain dedupe.
                     if let Some(reviewer) = self.queued_reviewer(session_id, agent).await {
+                        if upgraded.is_some() {
+                            if let OutwardReview::Refuse(reason) = self.outward_review_check(session_id, agent, command).await? {
+                                anyhow::bail!("{reason}");
+                            }
+                        }
                         self.repost_revised_body(&storage, session_id, agent, &existing, command, reviewer.id).await;
+                        if let Some(prior) = upgraded.as_ref() {
+                            if let Some(current) = storage.get_tray_entry(&existing).await? {
+                                if prior.reviewed_at.is_some() && prior.body_row_id == current.body_row_id {
+                                    if self.promote_queued_row(&storage, session_id, &current,
+                                        format!("User approval is now required for reviewed publication {existing}. Nothing ran.")).await {
+                                        return Ok(ParkOutcome::Parked { gate_id: existing, existing: true, note: None });
+                                    }
+                                } else if prior.body_row_id == current.body_row_id {
+                                    // If review completion raced the stronger request,
+                                    // another delivered row/turn makes promotion live.
+                                    let _ = crate::core::post_system_notice(&storage, Some(self), session_id,
+                                        crate::storage::MessageKind::SystemNotice,
+                                        format!("Publication {existing} now requires user approval after review; automatic execution was revoked."), None).await;
+                                    self.summon_participant(session_id, reviewer.id).await;
+                                }
+                            }
+                        }
                     }
                     return Ok(ParkOutcome::Queued { gate_id: existing, existing: true });
                 }
@@ -718,7 +965,7 @@ impl SignalingBridge {
                     })
                 });
                 let (gate_id, existing) = self
-                    .queue_outward_park(session_id, agent, command, reviewer_id, subject.as_ref(), &card_extra)
+                    .queue_outward_park(session_id, agent, command, reviewer_id, subject.as_ref(), &card_extra, true, None)
                     .await?;
                 return Ok(ParkOutcome::Queued { gate_id, existing });
             }
@@ -1477,6 +1724,34 @@ pub(crate) enum ParkOutcome {
     Queued { gate_id: String, existing: bool },
 }
 
+/// A hook may act only on this host-validated preparation. Direct means the
+/// original CLI command may continue; this preparation never executes it.
+pub(crate) enum AutoPublishPreparation {
+    Direct {
+        note: Option<String>,
+    },
+    Deferred {
+        outcome: ParkOutcome,
+        approval_required: bool,
+    },
+    AlreadyClaimed {
+        gate_id: String,
+    },
+}
+
+fn auto_preparation_text(outcome: &ParkOutcome, command: &str, approval_required: bool) -> String {
+    if approval_required {
+        return park_outcome_text(outcome, command);
+    }
+    let id = outcome.gate_id();
+    format!(
+        "action_gate: QUEUED for review under auto_allow (gate_id: {id}). The body is posted and the reviewer is summoned. \
+         After review the background worker runs `{command}`; no user approval card is required. \
+         A blocking finding withdraws it and a revision request holds it. Finish your turn so review can proceed. \
+         Do not re-issue the command or post its body again. gate_status(\"{id}\") reports review, execution and results."
+    )
+}
+
 impl ParkOutcome {
     pub(crate) fn gate_id(&self) -> &str {
         match self {
@@ -1744,6 +2019,17 @@ impl SignalingBridge {
                     .into(),
             ));
         }
+        // Check EVERY extracted body before an uncovered title/earlier body
+        // can return Queued. An empty body-file alongside a valid title must
+        // never become publishable by reviewing the queue's diagnostic text.
+        if bodies.iter().any(|body| body.trim().is_empty()) {
+            return Ok(OutwardReview::Refuse(
+                "outward publish held: the body resolves to EMPTY — a \
+                 --body-file reading an empty file or unpiped stdin \
+                 produces this. Write the real body to a file first."
+                    .into(),
+            ));
+        }
         let cursor = storage.cursor_for(reviewer.id).await?;
         // A TARGETED veto holds its content until the finding is answered: a
         // re-issue of the exact command it withdrew is refused while that
@@ -1809,18 +2095,6 @@ impl SignalingBridge {
         let mut covering: Vec<i64> = Vec::new();
         for body in &bodies {
             let trimmed = body.trim();
-            if trimmed.is_empty() {
-                // Fail CLOSED (review round 2): an empty body is this
-                // afternoon's actual escape — PR #559 went out empty-bodied
-                // from `--body-file /dev/stdin` with nothing piped, and the
-                // old `continue` here would have parked it as if reviewed.
-                return Ok(OutwardReview::Refuse(
-                    "outward publish held: the body resolves to EMPTY — a \
-                     --body-file reading an empty file or unpiped stdin \
-                     produces this. Write the real body to a file first."
-                        .into(),
-                ));
-            }
             let escaped = serde_json::to_string(trimmed).unwrap_or_default();
             let escaped = escaped.trim_matches('"');
             // Newest first, so the id recorded is the latest delivery.
@@ -1890,6 +2164,8 @@ impl SignalingBridge {
         reviewer_id: i64,
         listed: Option<&crate::policy::data_reads::DataRead>,
         card_extra: &str,
+        approval_required: bool,
+        run_timeout_secs: Option<u64>,
     ) -> Result<(String, bool)> {
         let storage = self
             .storage
@@ -1911,8 +2187,9 @@ impl SignalingBridge {
         // also says why it was gated and whether it was rejected before.
         let prompt = self.gate_card_prompt(session_id, command, card_extra).await;
         storage
-            .insert_queued_gate(session_id, &gate_id, agent, &prompt, command)
+            .insert_queued_gate_with_approval(session_id, &gate_id, agent, &prompt, command, approval_required)
             .await?;
+        if let Some(secs) = run_timeout_secs { storage.set_tray_run_timeout_secs(&gate_id, secs).await?; }
         self.record_body_digest(session_id, &gate_id, command).await;
         let mut body = self.queued_body_text(session_id, command).await;
         // Feedback #60: an EDIT shows the reviewer what it changes — the diff
@@ -1928,6 +2205,7 @@ impl SignalingBridge {
                 }
             }
         }
+        let after_review = if approval_required { "park for the user" } else { "run automatically under auto_allow, with no user approval card" };
         let notice = match listed {
             // Group K (EYES: the list both gates and limits, so the card says
             // what matched, not "a read").
@@ -1950,7 +2228,7 @@ impl SignalingBridge {
              turn. To stop THIS publish, file a `blocking` finding with \
              gate_id \"{gate_id}\". A `blocking` finding with NO gate_id withdraws EVERY \
              queued publish, so a blocking finding about something else should pass \
-             gate_id \"none\". Anything else lets it park for the user after your turn.]"
+             gate_id \"none\". Anything else lets it {after_review} after your turn.]"
         ),
         };
         let Some(row) = crate::core::post_system_notice(
@@ -2094,10 +2372,10 @@ impl SignalingBridge {
     /// finished a turn (0080): for each queued row whose reviewer is that
     /// participant and whose body row is at or below the reviewer's CURSOR —
     /// the row was read, not merely delivered (E1) — either withdraw it (a
-    /// `blocking` finding was filed after it was queued) or promote it to the
-    /// user's `pending` card with every side effect a fresh park has: the
-    /// awaiting flag, the D35 latch, the UI event. Idempotent: the promote is
-    /// an atomic `queued → pending` flip, so a second call finds nothing.
+    /// `blocking` finding was filed after it was queued), record automatic
+    /// review authority for the background worker, or promote it to the
+    /// user's `pending` card with the awaiting flag, D35 latch and UI event.
+    /// Idempotent atomic updates; this completion path never runs commands.
     pub async fn settle_queued_outward(&self, session_id: &str, participant_id: i64) {
         let Some(storage) = self.storage.lock().await.clone() else { return };
         let Ok(queued) = storage.queued_gates_for_session(session_id).await else { return };
@@ -4193,6 +4471,177 @@ mod tests {
         let receipt = storage.post_to_channel("s1", "system", None, "system_notice", &body, None).await.unwrap();
         storage.set_tray_body_row("auto-publish", receipt.message_id()).await.unwrap();
         (bridge, storage, reviewer, receipt.message_id(), marker, body)
+    }
+
+    #[tokio::test]
+    async fn auto_allow_action_gate_queues_unread_content_then_runs_without_a_card() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, reviewer, path, body) = outward_fixture(&data, &repo).await;
+        tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+        let marker = repo.path().join("direct-published.txt");
+        let command = format!("gh() {{ cat {path} >> {}; printf 'local fixture\\n'; }}; gh issue create --title fixture --body-file {path}", posix_path(&marker));
+        let reply = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+        assert!(!marker.exists(), "auto_allow must not skip unread publication review");
+        assert!(reply.contains("auto_allow") && reply.contains("no user approval"), "{reply}");
+        let id = storage.queued_gate_for_command("s1", &command).await.unwrap().unwrap();
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert!(!row.approval_required);
+        assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
+        storage.commit_delivery(reviewer, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert_eq!(bridge.run_reviewed_auto_publications().await, 1);
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), body);
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(row.status, "auto_resolved");
+        assert!(row.picked_option.is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_publication_retries_share_one_queue_and_keep_its_original_timeout() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _, path, _) = outward_fixture(&data, &repo).await;
+        tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+        let command = format!("gh issue create --title fixture --body-file {path}");
+        let request = |timeout| GateRequest { command: command.clone(), run_timeout_secs: Some(timeout), ..GateRequest::default() };
+        let (a, b) = tokio::join!(
+            bridge.action_gate_request("s1".into(), "hands".into(), request(45)),
+            bridge.action_gate_request("s1".into(), "hands".into(), request(90)),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        let rows = storage.queued_gates_for_session("s1").await.unwrap();
+        assert_eq!(rows.len(), 1, "concurrent hook/MCP retries must not stack queues");
+        let row = &rows[0];
+        assert!(a.contains(&row.choice_id) && b.contains(&row.choice_id));
+        assert!(!row.approval_required);
+        let timeout = row.run_timeout_secs;
+        assert!(matches!(timeout, Some(45 | 90)));
+        bridge.action_gate_request("s1".into(), "hands".into(), request(10)).await.unwrap();
+        assert_eq!(storage.get_tray_entry(&row.choice_id).await.unwrap().unwrap().run_timeout_secs, timeout);
+    }
+
+    #[tokio::test]
+    async fn a_stronger_request_upgrades_auto_review_once_and_cannot_be_downgraded() {
+        for reviewed in [false, true] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, reviewer, path, _) = outward_fixture(&data, &repo).await;
+            let _ring = ring_for(&bridge).await;
+            tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+            let command = format!("gh issue create --title fixture --body-file {path}");
+            bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+            let id = storage.queued_gate_for_command("s1", &command).await.unwrap().unwrap();
+            let body = storage.get_tray_entry(&id).await.unwrap().unwrap().body_row_id.unwrap();
+            if reviewed {
+                storage.commit_delivery(reviewer, &[(body, None)]).await.unwrap();
+                bridge.settle_queued_outward("s1", reviewer).await;
+            }
+            bridge.action_gate("s1".into(), "hands".into(), command.clone(), true).await.unwrap();
+            let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+            assert!(row.approval_required);
+            assert!(row.reviewed_at.is_none());
+            assert_eq!(row.status, if reviewed { "pending" } else { "queued" });
+            // The later weaker request neither creates a new queue nor revokes approval.
+            let reply = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+            assert!(reply.contains(&id));
+            assert!(storage.get_tray_entry(&id).await.unwrap().unwrap().approval_required);
+            if !reviewed {
+                storage.commit_delivery(reviewer, &[(body, None)]).await.unwrap();
+                bridge.settle_queued_outward("s1", reviewer).await;
+            }
+            assert_eq!(status_of(&storage, &id).await, "pending");
+            assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+            assert_eq!(storage.pending_gate_ids("s1").await.unwrap(), vec![id]);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_approval_metadata_is_required_from_the_initial_queue_insert() {
+        for mode in ["forced", "urgent", "window", "listed"] {
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, _, path, _) = outward_fixture(&data, &repo).await;
+            tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+            let command = format!("gh issue create --title fixture --body-file {path}");
+            let mut request = GateRequest { command: command.clone(), ..GateRequest::default() };
+            match mode {
+                "forced" => request.require_approval = true,
+                "urgent" => request.urgent_reason = Some("fixture incident".into()),
+                "window" => request.run_window = Some(validate_run_window(chrono::Utc::now(), None,
+                    &(chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()).unwrap()),
+                "listed" => std::fs::write(data.path().join("config/general-policy.yaml"), "production_reads:\n  - gh issue create\n").unwrap(),
+                _ => unreachable!(),
+            }
+            bridge.action_gate_request("s1".into(), "hands".into(), request).await.unwrap();
+            let row = storage.active_gate_for_command("s1", &command).await.unwrap().unwrap();
+            assert!(row.approval_required, "{mode} must never insert automatic authority");
+            assert!(row.reviewed_at.is_none());
+            assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_entry_distinguishes_solo_down_and_unregistered_reviewers() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, reviewer, path, _) = outward_fixture(&data, &repo).await;
+        tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+        let command = format!("gh issue create --title fixture --body-file {path}");
+        bridge.register_session_reviewers("s1".into(), vec![]);
+        let err = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap_err();
+        assert!(err.to_string().contains("registration"), "{err}");
+        bridge.register_session_reviewers("s1".into(), vec!["eyes".into()]);
+        bridge.notify_agent_health("s1".into(), "eyes", "dead");
+        let err = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap_err();
+        assert!(err.to_string().contains("restore"), "{err}");
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty());
+        bridge.reviewer_override.lock().unwrap().insert("s1".into(), "user-approved fixture".into());
+        bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+        let row = storage.active_gate_for_command("s1", &command).await.unwrap().unwrap();
+        assert!(row.approval_required, "a down reviewer override is still a user gate");
+        assert_eq!(row.status, "pending");
+        // A genuinely solo roster permits the shell to run, but preparation
+        // (the HTTP hook entry) itself never executes even in this case.
+        sqlx::query("UPDATE session_participants SET enabled = 0 WHERE id = ?").bind(reviewer).execute(storage.pool()).await.unwrap();
+        bridge.register_session_reviewers("s1".into(), vec![]);
+        let marker = repo.path().join("solo-marker");
+        let solo_command = format!("touch {}; gh issue create --title solo --body-file {path}", posix_path(&marker));
+        assert!(matches!(bridge.prepare_auto_publication("s1", "hands", &solo_command, None, None).await.unwrap(), AutoPublishPreparation::Direct { .. }));
+        assert!(!marker.exists(), "preparation is enqueue-only, even with no reviewer");
+    }
+
+    #[tokio::test]
+    async fn automatic_reissue_rejects_bad_revisions_and_never_requeues_a_claimed_run() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, reviewer, path, body) = outward_fixture(&data, &repo).await;
+        tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+        let command = format!("gh issue create --title fixture --body-file {path}");
+        bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+        let id = storage.queued_gate_for_command("s1", &command).await.unwrap().unwrap();
+        let old = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        for (kind, revision) in [("empty", String::new()), ("secret", format!("token: {}{}", "ghp_", "1234567890abcdefghijABCDEF"))] {
+            std::fs::write(repo.path().join("draft.md"), revision).unwrap();
+            let result = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await;
+            assert!(result.is_err(), "{kind} revision must be refused: {result:?}");
+            let current = storage.get_tray_entry(&id).await.unwrap().unwrap();
+            assert_eq!(current.body_row_id, old.body_row_id);
+            assert_eq!(current.body_sha256, old.body_sha256);
+        }
+        std::fs::write(repo.path().join("draft.md"), format!("{body}\nA new line.")).unwrap();
+        bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_ne!(row.body_row_id, old.body_row_id);
+        assert!(row.reviewed_at.is_none());
+        storage.commit_delivery(reviewer, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", reviewer).await;
+        assert!(storage.claim_auto_gate_run(&id, row.body_row_id.unwrap()).await.unwrap());
+        let reply = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+        assert!(reply.contains("already claimed"), "{reply}");
+        let err = bridge.action_gate("s1".into(), "hands".into(), command, true).await.unwrap_err();
+        assert!(err.to_string().contains("already claimed"), "{err}");
+        assert_eq!(status_of(&storage, &id).await, "auto_running");
     }
 
     #[tokio::test]

@@ -1281,7 +1281,8 @@ fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecisi
 /// config (`<data_dir>/config/tool-gate.json`, NOT per-project `policy.yaml`). A
 /// `gate` keyword BLOCKS the direct call (exit 2) and routes the agent to the
 /// `action_gate` MCP tool (which surfaces Approve/Reject and executes on
-/// approve); an `auto_allow`/unmatched command runs normally (exit 0). The
+/// approve); outward `auto_allow` asks the host for review before continuing.
+/// Other auto-allowed/unmatched commands run normally (exit 0). The
 /// config is global + bot-hq-side, so nothing is written into a working repo.
 /// This replaces the per-project
 /// `tool_blocklist` role (post-2026-05-29 fabricated-comment incident) with a
@@ -1327,6 +1328,15 @@ fn run_tool_gate(data_dir: &Path, project: Option<&str>, session_id: Option<&str
     let listed = Policy::resolve(data_dir, project, session_id)
         .ok()
         .and_then(|policy| crate::policy::data_reads::match_command(&policy, &command));
+    if listed.is_none() && needs_auto_publication_review(&command, &keywords) {
+        let prepared = match (sid.as_deref(), hook_runtime().ok()) {
+            (Some(session), Some(rt)) => rt.block_on(review_auto_gate(data_dir, session, &hook_agent(), &command)),
+            _ => None,
+        };
+        let (code, message) = auto_review_exit(&command, prepared.as_ref());
+        if let Some(message) = message { eprintln!("{message}"); }
+        return Ok(code);
+    }
     // Auto-park (issues.md #29): when the command is gated AND we know the
     // session, park the approval here so the refusal IS the approval request —
     // the agent doesn't have to convert it into an `action_gate` call (which
@@ -1457,6 +1467,8 @@ fn run_codex_gate(
     };
     // What the edit posture needs, resolved the way `run_tool_gate` does it.
     let sid = Some(session_id);
+    let mut automatic_review = None;
+    let mut needs_automatic_review = false;
     let (keywords, listed, parked) = match (posture, payload.command.as_deref()) {
         (CodexPosture::EditFiles, Some(command)) => {
             let keywords = crate::policy::tool_gate::resolve_keywords(data_dir, sid);
@@ -1466,7 +1478,11 @@ fn run_codex_gate(
             let gated = listed.is_some()
                 || crate::policy::tool_gate::match_keyword("Bash", command, &keywords)
                     == Some(crate::policy::tool_gate::GateMode::Gate);
-            let parked = if gated {
+            let parked = if listed.is_none() && needs_auto_publication_review(command, &keywords) {
+                needs_automatic_review = true;
+                automatic_review = rt.block_on(review_auto_gate(data_dir, session_id, agent, command));
+                None
+            } else if gated {
                 rt.block_on(park_gate(data_dir, session_id, agent, command))
             } else {
                 None
@@ -1481,7 +1497,11 @@ fn run_codex_gate(
         }
         _ => (Vec::new(), None, None),
     };
-    let (code, message) = codex_gate_decision(posture, &payload, &keywords, listed, parked.as_ref());
+    let (code, message) = if needs_automatic_review {
+        auto_review_exit(payload.command.as_deref().unwrap_or(""), automatic_review.as_ref())
+    } else {
+        codex_gate_decision(posture, &payload, &keywords, listed, parked.as_ref())
+    };
     if let Some(m) = message {
         eprintln!("{m}");
     }
@@ -1663,7 +1683,8 @@ fn shell_trap_refusal(command: &str) -> Option<String> {
 }
 
 /// Pure decision for a parsed Bash `command` against the global keyword list.
-/// `gate` → `(2, Some(routing message))`; `auto_allow`/no-match → `(0, None)`.
+/// `gate` blocks; outward `auto_allow` needs a host-confirmed disposition.
+/// Other auto-allowed/unmatched commands pass silently.
 /// Split from stdin handling so the gate decision is unit-testable.
 fn tool_gate_exit(
     command: &str,
@@ -1672,13 +1693,51 @@ fn tool_gate_exit(
 ) -> (i32, Option<String>) {
     use crate::policy::tool_gate::GateMode;
     match crate::policy::tool_gate::match_keyword("Bash", command, keywords) {
+        Some(GateMode::AutoAllow) if crate::signaling::is_outward(command) => auto_review_exit(command, None),
         Some(GateMode::Gate) => {
             let why = crate::policy::tool_gate::gate_match_detail("Bash", command, keywords);
             (2, Some(gate_refusal_text(command, parked, why.as_ref())))
         }
-        // auto_allow or no match → allow the agent's direct Bash call.
+        // Non-outward auto_allow or no match → allow the direct Bash call.
         _ => (0, None),
     }
+}
+
+fn needs_auto_publication_review(
+    command: &str,
+    keywords: &[crate::policy::tool_gate::GatedKeyword],
+) -> bool {
+    crate::policy::tool_gate::match_keyword("Bash", command, keywords)
+        == Some(crate::policy::tool_gate::GateMode::AutoAllow)
+        && crate::signaling::is_outward(command)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AutoHookDecision {
+    Allow,
+    Deferred {
+        gate: ParkedGate,
+        approval_required: bool,
+        claimed: bool,
+    },
+    Held(String),
+}
+
+fn auto_review_exit(command: &str, decision: Option<&AutoHookDecision>) -> (i32, Option<String>) {
+    let message = match decision {
+        Some(AutoHookDecision::Allow) => return (0, None),
+        Some(AutoHookDecision::Deferred { gate, approval_required: true, .. }) => gate_refusal_text(command, Some(gate), None),
+        Some(AutoHookDecision::Deferred { gate, claimed, .. }) => format!(
+            "{} under auto_allow (gate_id: {}). No user approval card is required. The host owns execution and returns its result. \
+             Finish your turn so review can proceed. Do NOT re-issue the command, call action_gate, or post its body again. \
+             gate_status(\"{}\") reports the current state.",
+            if *claimed { "The identical automatic run was already claimed" } else { "QUEUED for the reviewer's read, then automatic execution" },
+            gate.gate_id, gate.gate_id,
+        ),
+        Some(AutoHookDecision::Held(reason)) => format!("Automatic publication held: {reason}. Check gate_history before retrying; do not bypass review."),
+        None => "Automatic publication BLOCKED: bot-hq could not confirm the review request. Check gate_history for an existing request before retrying; do not assume nothing was queued or re-issue blindly.".into(),
+    };
+    (2, Some(message))
 }
 
 /// The refusal for a command that runs one of the project's listed data reads
@@ -1845,20 +1904,68 @@ pub(crate) async fn park_gate(
     agent: &str,
     command: &str,
 ) -> Option<ParkedGate> {
+    let (status, text) = request_gate(data_dir, session_id, agent, command, false).await?;
+    classify_park_response(status, &text)
+}
+
+async fn review_auto_gate(
+    data_dir: &Path,
+    session_id: &str,
+    agent: &str,
+    command: &str,
+) -> Option<AutoHookDecision> {
+    let (status, body) = request_gate(data_dir, session_id, agent, command, true).await?;
+    if !status.is_success() {
+        return Some(AutoHookDecision::Held(
+            crate::policy::secret_scan::redact(&body)
+                .chars()
+                .take(1500)
+                .collect(),
+        ));
+    }
+    classify_auto_review_response(status, &body)
+}
+
+fn classify_auto_review_response(
+    status: reqwest::StatusCode,
+    body: &str,
+) -> Option<AutoHookDecision> {
+    if !status.is_success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v.get("allow").and_then(|v| v.as_bool()) == Some(true) {
+        return v
+            .get("gate_id")
+            .is_none()
+            .then_some(AutoHookDecision::Allow);
+    }
+    let gate = classify_park_response(status, body)?;
+    Some(AutoHookDecision::Deferred {
+        gate,
+        approval_required: v
+            .get("approval_required")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        claimed: v.get("claimed").and_then(|v| v.as_bool()).unwrap_or(false),
+    })
+}
+
+async fn request_gate(data_dir: &Path, session_id: &str, agent: &str, command: &str, auto_review: bool) -> Option<(reqwest::StatusCode, String)> {
     let addr = crate::paths::read_signaling_addr(data_dir)?;
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "session_id": session_id,
         "agent": agent,
         "command": command,
-    })
-    .to_string();
+    });
+    if auto_review { body["review_auto_allow"] = true.into(); }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .ok()?;
     let resp = match with_hook_token(client.post(format!("http://{addr}/hooks/tool-gate")), data_dir)
         .header("content-type", "application/json")
-        .body(body)
+        .body(body.to_string())
         .send()
         .await
     {
@@ -1875,7 +1982,7 @@ pub(crate) async fn park_gate(
         // the log since the agent only ever sees the call-`action_gate` fallback.
         tracing::warn!(status = status.as_u16(), body = %txt.trim(), "tool-gate auto-park refused");
     }
-    classify_park_response(status, &txt)
+    Some((status, txt))
 }
 
 /// Attach this launch's hook secret (`<data_dir>/.local/hook-token`) to a
@@ -4051,6 +4158,25 @@ mod tests {
             classify_park_response(StatusCode::INTERNAL_SERVER_ERROR, r#"{"gate_id":"abc"}"#),
             None
         );
+    }
+
+    #[test]
+    fn automatic_hook_response_needs_explicit_host_authority() {
+        use reqwest::StatusCode;
+        assert_eq!(classify_auto_review_response(StatusCode::OK, r#"{"allow":true}"#), Some(AutoHookDecision::Allow));
+        for body in [r#"{"allow":true,"gate_id":"g"}"#, r#"{"allow":"true"}"#, r#"{"gate_id":" "}"#, "broken"] {
+            assert_eq!(classify_auto_review_response(StatusCode::OK, body), None, "{body}");
+        }
+        assert_eq!(classify_auto_review_response(StatusCode::FORBIDDEN, r#"{"allow":true}"#), None);
+        let legacy = classify_auto_review_response(StatusCode::OK, r#"{"gate_id":"g","queued":true}"#).unwrap();
+        assert!(matches!(legacy, AutoHookDecision::Deferred { approval_required: true, .. }), "an older host must not appear to grant automatic authority");
+        let auto = classify_auto_review_response(StatusCode::OK, r#"{"gate_id":"g","queued":true,"approval_required":false}"#).unwrap();
+        let (code, text) = auto_review_exit("gh issue create", Some(&auto));
+        assert_eq!(code, 2);
+        let text = text.unwrap();
+        assert!(text.contains("No user approval card") && text.contains("Finish your turn"));
+        assert_eq!(auto_review_exit("gh issue create", Some(&AutoHookDecision::Allow)), (0, None));
+        assert_eq!(auto_review_exit("gh issue create", None).0, 2, "a lost response cannot authorize a run");
     }
 
     #[tokio::test]

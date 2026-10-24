@@ -72,10 +72,15 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Added
 
-- **Review for auto-allowed publications (in progress).** The queue now stores
-  review authority separately from user approval and preserves it across a
-  restart. Reviewed runs share the body/script checks and report their results
-  as automatic execution. Hook and direct-tool activation are still pending.
+- **Auto-allowed publications still receive review.** Both connectors and
+  `action_gate` queue unread publication content for the reviewer, then the
+  background worker runs it without a user approval card. The queue survives
+  restarts, checks the body, scripts and current policy, and reports automatic
+  execution without inventing a user answer. Forced approvals, listed data
+  reads, urgent requests and run windows still require approval. Retries share
+  one gate; a stronger request revokes automatic execution. A session without
+  a reviewer can run directly; a configured reviewer that is down cannot be
+  silently skipped. Review completion never waits for the command to finish.
 - **A saved model names the CLI it runs through.** The Model dialog has a
   **Runtime** field — Claude Code (the claude CLI, as before) or Codex
   (OpenAI's Codex CLI). For a Codex row the account field is its **Codex
