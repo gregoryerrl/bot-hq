@@ -20,6 +20,10 @@ model side by side. Migration 0102 applies on first launch.
   explicitly retired name still report; historical records and retirement
   explanations are preserved. The separate repository-reference scan remains
   available through `cl_stale_refs`.
+- **Codex participants know project startup hooks need manual recovery.**
+  Their startup guidance states that project `.claude` hooks are not loaded
+  automatically and tells them to check required handoff markers and follow
+  the project's recovery instructions without claiming a hook ran.
 - **Gate results stay visible when a handoff is newer than their completion.**
   The issuer receives a once-per-result notice on a subsequent MCP reply,
   and both connectors restore bounded result excerpts after compaction
