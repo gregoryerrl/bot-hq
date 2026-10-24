@@ -869,14 +869,13 @@ impl Driver {
     /// the text, whether a real doc was in it, and how many user messages.
     fn compaction_text(&self) -> Option<(String, bool, Option<usize>)> {
         let sid = Some(self.session_id.as_str());
-        let handoff = crate::policy::hooks::compact_handoff_text(&self.data_dir, sid, &self.agent_name, chrono::Utc::now())?;
-        let has_doc = !handoff.contains(crate::agents::handoff::NO_DOC_MARKER);
+        let handoff = crate::policy::hooks::compact_handoff_text(&self.data_dir, sid, &self.agent_name, chrono::Utc::now());
+        let has_doc = handoff.as_ref().is_some_and(|text| !text.contains(crate::agents::handoff::NO_DOC_MARKER));
         let words = crate::policy::hooks::compact_user_words_text(&self.data_dir, sid, &self.agent_name);
-        let count = words.as_ref().map(|w| w.matches("\n[").count());
-        let text = match words {
-            Some(w) => format!("{handoff}\n\n{w}"),
-            None => handoff,
-        };
+        let count = words.as_ref().and_then(|w| crate::agents::handoff::injected_user_words(w));
+        let gates = crate::policy::hooks::compact_gate_results_text(&self.data_dir, sid, &self.agent_name);
+        let text = [handoff, words, gates].into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+        if text.is_empty() { return None; }
         Some((text, has_doc, count))
     }
 
@@ -1355,7 +1354,13 @@ mod tests {
         let dir = crate::agents::handoff::dir_under(&local);
         let path = crate::agents::handoff::file_path(&dir, "s-test", "eyes").unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "[bot-hq] Your context was just compacted.\nHANDOFF BODY HERE\n").unwrap();
+        std::fs::write(&path, crate::agents::handoff::render("s-test", "eyes", Some(("HANDOFF BODY HERE", "2020-01-01T00:00:00.000Z")))).unwrap();
+        let words = ["first instruction", "second instruction"].map(|text| crate::agents::handoff::UserWordsEntry {
+            at: "2020-01-02T00:00:00.000Z".into(), text: text.into(),
+        });
+        std::fs::write(crate::agents::handoff::user_words_path(&dir, "s-test").unwrap(), crate::agents::handoff::render_user_words_file(&words)).unwrap();
+        let gates = crate::agents::handoff::gate_results_path(&dir, "s-test", "eyes").unwrap();
+        std::fs::write(&gates, "UNREAD_GATE_RESULT_SURVIVES_COMPACTION").unwrap();
         DATA_DIR.with(|d| *d.borrow_mut() = Some(data.path().to_path_buf()));
         let mut h = harness();
         DATA_DIR.with(|d| *d.borrow_mut() = None);
@@ -1365,10 +1370,12 @@ mod tests {
         assert_eq!(req["params"]["threadId"], "thr");
         let text = req["params"]["items"][0]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("HANDOFF BODY HERE"), "{text}");
+        assert!(text.contains("UNREAD_GATE_RESULT_SURVIVES_COMPACTION"), "{text}");
         assert_eq!(req["params"]["items"][0]["role"], "user");
         h.fake.answer(&req, json!({})).await;
         assert!(matches!(next_event(&mut h).await, AgentEvent::Compacted { .. }));
         assert!(matches!(next_event(&mut h).await, AgentEvent::HandoffInjected { has_doc: true }));
+        assert!(matches!(next_event(&mut h).await, AgentEvent::UserWordsInjected { count: 2 }));
         // Refused: the text goes in front of the next page.
         h.fake.write(json!({"method": "thread/compacted", "params": {"threadId": "thr", "turnId": "t1"}})).await;
         let req = h.fake.read().await;
@@ -1380,6 +1387,7 @@ mod tests {
         let start = h.fake.read().await;
         let text = start["params"]["input"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("[bot-hq] Your context was just compacted.") && text.ends_with("next page"), "{text}");
+        assert!(text.contains("UNREAD_GATE_RESULT_SURVIVES_COMPACTION"));
     }
 
     async fn next_event(h: &mut Harness) -> AgentEvent {

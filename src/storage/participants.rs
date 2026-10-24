@@ -2417,7 +2417,23 @@ impl Storage {
                 deliveries.len()
             );
         }
+        let delivered: Vec<_> = deliveries.iter().filter(|(_, reason)| reason.is_none()).map(|(id, _)| *id).collect();
+        if !delivered.is_empty() {
+            let mut proof = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "INSERT INTO gate_result_notices (participant_id, message_id, delivered_at) SELECT "
+            );
+            proof.push_bind(participant_id).push(", t.resolution_row_id, ").push_bind(&delivered_at)
+                .push(" FROM session_tray t JOIN messages m ON m.id = t.resolution_row_id AND m.session_id = t.session_id \
+                       JOIN session_participants p ON p.session_id = t.session_id WHERE p.id = ")
+                .push_bind(participant_id).push(" AND t.resolution_row_id IN (");
+            let mut ids = proof.separated(", ");
+            for id in delivered { ids.push_bind(id); }
+            proof.push(") ON CONFLICT(participant_id, message_id) DO UPDATE SET delivered_at = \
+                        COALESCE(gate_result_notices.delivered_at, excluded.delivered_at)");
+            proof.build().execute(&mut *tx).await.context("retaining gate delivery proof")?;
+        }
         tx.commit().await.context("committing the delivery")?;
+        self.sync_gate_results_after_delivery(participant_id).await;
         Ok(())
     }
 

@@ -67,7 +67,7 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
     let Some(sub) = args.first() else {
         return Err(anyhow!(
             "usage: bot-hq policy-check \
-             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|codex-gate|handoff-due|compact-handoff|compact-user-words|pre-compact}} \
+             {{commit-msg|pre-commit|post-commit|pre-push|tool-gate|shell-lint|codex-gate|handoff-due|compact-handoff|compact-user-words|compact-gate-results|pre-compact}} \
              --data-dir <P> [--project <Q>] [--session <S>] [--msg-file <F>]"
         ));
     };
@@ -184,6 +184,10 @@ pub fn run_cli(args: &[String]) -> Result<i32> {
             if let Some(text) = compact_user_words_text(&data_dir, sid, &hook_agent()) {
                 print!("{text}");
             }
+            Ok(0)
+        }
+        "compact-gate-results" => {
+            if let Some(text) = compact_gate_results_text(&data_dir, sid, &hook_agent()) { print!("{text}"); }
             Ok(0)
         }
         // ALWAYS exit 0, and print plain text or nothing: claude-code BLOCKS a
@@ -663,6 +667,15 @@ pub(crate) fn compact_user_words_text(data_dir: &Path, session_id: Option<&str>,
     let rendered = std::fs::read_to_string(handoff::file_path(&dir, session_id, agent)?).ok()?;
     let since = handoff::written_at(&rendered);
     handoff::render_user_words(&handoff::parse_user_words_file(&words), since, handoff::USER_WORDS_BUDGET_BYTES)
+}
+
+/// A separate compact hook keeps its output below the CLI's per-hook cap and
+/// never filters an unread result by the handoff document's write time.
+pub(crate) fn compact_gate_results_text(data_dir: &Path, session_id: Option<&str>, agent: &str) -> Option<String> {
+    use crate::agents::handoff;
+    let dir = handoff::dir_under(&crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir);
+    let text = std::fs::read_to_string(handoff::gate_results_path(&dir, session_id?, agent)?).ok()?;
+    (!text.is_empty() && text.len() <= handoff::GATE_RESULTS_BUDGET_BYTES).then_some(text)
 }
 
 /// What the `PreCompact` hook prints: the summary instructions

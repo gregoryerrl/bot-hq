@@ -1485,6 +1485,13 @@ impl SignalingBridge {
             }
             drop(ran);
         }
+        if flipped && is_gate {
+            if let (Some(receipt), Some(storage)) = (&receipt, self.storage.lock().await.clone()) {
+                if let Err(error) = storage.link_gate_resolution(choice_id, receipt.message_id()).await {
+                    tracing::warn!(%error, choice_id, "could not link the gate answer receipt");
+                }
+            }
+        }
         // Without this the row flips to `answered` in the DB but the cached
         // pending counts (bell + tray) never invalidate.
         let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {

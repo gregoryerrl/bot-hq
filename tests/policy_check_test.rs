@@ -179,6 +179,31 @@ fn the_codex_gate_fails_closed_without_a_session_or_the_app() {
     assert_eq!(payload_trap.0, 2);
 }
 
+#[tokio::test]
+async fn the_compaction_gate_hook_reads_the_live_mirror_and_clears_after_delivery() {
+    use bot_hq::{agents::handoff, storage::{Storage, QuestionKind}};
+    let data = tempfile::tempdir().unwrap();
+    let storage = Storage::memory().await.unwrap().with_handoff_dir(handoff::dir_under(&data.path().join(".local")));
+    storage.create_session("s-hook-results", "hook", None).await.unwrap();
+    storage.ensure_session_roster("s-hook-results", 2).await.unwrap();
+    let hands = storage.participant_by_slug("s-hook-results", "hands").await.unwrap().unwrap().id;
+    storage.insert_tray_entry("s-hook-results", "fixture-gate", "hands", QuestionKind::Approval,
+        "fixture", None, None, Some("printf fixture")).await.unwrap();
+    let result = storage.post_to_channel("s-hook-results", "system", None, "system_notice", "NEW_RESULT_OLDER_THAN_HANDOFF", None).await.unwrap();
+    storage.set_tray_run_result("fixture-gate", Some(result.message_id()), Some(0), 1).await.unwrap();
+    storage.upsert_session_document("s-hook-results", "handoff-hands", "The gate is still pending.", None).await.unwrap();
+    let run = || Command::new(env!("CARGO_BIN_EXE_bot-hq"))
+        .args(["policy-check", "compact-gate-results", "--data-dir", data.path().to_str().unwrap(), "--session", "s-hook-results"])
+        .env("BOT_HQ_AGENT", "hands").env_remove("BOT_HQ_SESSION_ID").output().unwrap();
+    let out = run();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("NEW_RESULT_OLDER_THAN_HANDOFF"));
+    assert!(out.stdout.len() <= handoff::GATE_RESULTS_BUDGET_BYTES);
+    storage.commit_delivery(hands, &[(result.message_id(), None)]).await.unwrap();
+    let out = run();
+    assert!(out.status.success() && out.stdout.is_empty());
+}
+
 /// Both built connectors traverse the authenticated HTTP route. The native
 /// command is blocked while review is owed; only the host runs the local
 /// publisher after settlement. No remote service or model inference is used.

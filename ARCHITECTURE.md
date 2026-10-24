@@ -598,6 +598,23 @@ mechanical (feedback #54 / #63 / #67 / #74 / #81):
   replaced by a preview, hence the budget. The stream's `hook_response` for
   that hook is recognised by the file's opening marker, so the compaction row
   says "put back" only when it was.
+- **Unread gate results survive a newer handoff** (feedback #112, migration
+  0106). A gate's `resolution_row_id` links its latest recorded answer/output;
+  a later scheduled run replaces the earlier approval receipt. After a successful
+  MCP call, the issuer receives a second text block for up to eight unannounced
+  results. `gate_result_notices.noticed_at` records that notice separately from
+  actual channel delivery; it never advances the channel cursor.
+  `gate_result_notices.delivered_at` preserves gate-specific delivery proof
+  beyond telemetry retention, including delivery before a result was linked.
+  Per-reader mirrors at `.local/handoffs/<sid>/<slug>.gates` retain results
+  without delivery proof, independent of handoff timestamps. They refresh on
+  result linking, delivery and handoff write/spawn; empty mirrors are removed.
+  Claude's separate `compact-gate-results` hook and Codex's compaction injection
+  consume the same mirror (up to eight records, JSON-quoted output tails, a
+  6,000-byte cap). The notice and excerpts direct the agent to `gate_status`
+  before reporting an outcome; an exit code alone is not a success claim.
+  Legacy results whose delivery telemetry was already purged may be replayed
+  conservatively. Direct `gate_status` reads do not count as channel delivery.
 - **The user's own words put back verbatim.** A summarizer paraphrases, so what
   the user said since the doc was last written comes back as written: a second
   command in the same `SessionStart:compact` group, `bot-hq policy-check

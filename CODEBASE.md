@@ -468,6 +468,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, `active_close_card` / `insert_close_card` (archive intent persisted before review), purge, closed/orphan withdraw | M |
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
+| `src/storage/gate_results.rs` | gate resolution receipts (0106), one-time MCP notices, per-participant compaction mirrors; actual delivery proof persists separately from telemetry retention | S |
 | `src/storage/user_words.rs` | `session_user_words` (0092): the user's own words, recorded by the caller that knows whose they are (`core::Authored`, the tray answer), mirrored to the words file the compaction hook prints | S |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
 | `src/storage/gc.rs` | boot-time retention purges for the five append-only telemetry tables (`participant_deliveries`, `context_readings`, `retrieval_events`, `cancel_events`, `cl_reads`), run by `main.rs` beside the tray/activity sweeps; `messages` is deliberately not swept | S |

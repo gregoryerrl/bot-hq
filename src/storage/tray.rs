@@ -664,9 +664,9 @@ impl Storage {
         ran_ms: u64,
     ) -> Result<()> {
         sqlx::query(
-            "UPDATE session_tray SET result_row_id = ?, exit_code = ?, ran_ms = ?, \
+            "UPDATE session_tray SET result_row_id = ?1, resolution_row_id = ?1, exit_code = ?2, ran_ms = ?3, \
              status = CASE WHEN status = 'auto_running' THEN 'auto_resolved' ELSE status END \
-             WHERE choice_id = ?",
+             WHERE choice_id = ?4",
         )
         .bind(result_row_id)
         .bind(exit_code)
@@ -675,6 +675,7 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording the run result of gate {choice_id}"))?;
+        self.sync_gate_result_readers(choice_id).await;
         Ok(())
     }
 

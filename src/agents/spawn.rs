@@ -1570,6 +1570,8 @@ pub const SILENT_TURN_REMINDER_ENV: &str = "CLAUDE_CODE_SILENT_TURN_REMINDER";
 /// 18 KB output became a preview — CLI 2.1.291, s-42bf34b3), and second because
 /// the commands landed in settings order in every probe run, so the newer
 /// words follow the older doc.
+/// A third, separately capped command restores gate result receipts using
+/// delivery identity rather than the handoff's timestamp.
 fn compact_handoff_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json::Value {
     let command = |subcommand: &str| {
         format!(
@@ -1584,6 +1586,7 @@ fn compact_handoff_hook(exe: &std::path::Path, cfg: &SpawnConfig) -> serde_json:
         "hooks": [
             { "type": "command", "command": command("compact-handoff") },
             { "type": "command", "command": command("compact-user-words") },
+            { "type": "command", "command": command("compact-gate-results") },
         ],
     }])
 }
@@ -3631,11 +3634,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("{who} has a SessionStart hook: {s}"));
             assert_eq!(entries.len(), 1, "{who}: {s}");
             assert_eq!(entries[0]["matcher"], serde_json::json!("compact"), "{who}: only after a compaction");
-            // Two commands, the doc first and the user's words second (the
+            // Separate commands: doc, user words, then unread gate results (the
             // order the outputs land in), each its own hook output.
             let hooks = entries[0]["hooks"].as_array().unwrap();
-            assert_eq!(hooks.len(), 2, "{who}: {s}");
-            for (hook, subcommand) in hooks.iter().zip(["compact-handoff", "compact-user-words"]) {
+            assert_eq!(hooks.len(), 3, "{who}: {s}");
+            for (hook, subcommand) in hooks.iter().zip(["compact-handoff", "compact-user-words", "compact-gate-results"]) {
                 let command = hook["command"].as_str().unwrap();
                 assert!(command.contains(&format!("policy-check {subcommand} ")), "{who}: {command}");
                 assert!(

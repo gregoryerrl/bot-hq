@@ -34,6 +34,8 @@ mod cl_index;
 mod context_readings;
 mod feedback;
 mod findings;
+mod gate_results;
+pub use gate_results::UnreadGateResult;
 mod gc;
 mod messages;
 mod models;
@@ -300,6 +302,7 @@ pub struct Storage {
     /// `None` for an in-memory database, where nothing is mirrored unless a
     /// test asks with [`Self::with_handoff_dir`].
     handoff_dir: Option<std::sync::Arc<std::path::PathBuf>>,
+    gate_result_sync: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Storage {
@@ -353,6 +356,7 @@ impl Storage {
             .context("running sqlite migrations")?;
         let storage = Self {
             pool,
+            gate_result_sync: Default::default(),
             handoff_dir: db_path
                 .parent()
                 .map(|local| std::sync::Arc::new(crate::agents::handoff::dir_under(local))),
@@ -425,7 +429,7 @@ impl Storage {
             .run(&pool)
             .await
             .context("running sqlite migrations")?;
-        Ok(Self { pool, handoff_dir: None })
+        Ok(Self { pool, handoff_dir: None, gate_result_sync: Default::default() })
     }
 
     /// Mirror handoff docs to rendered files under `dir` — what [`Self::open`]

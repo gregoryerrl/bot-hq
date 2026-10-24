@@ -140,7 +140,20 @@ pub async fn dispatch(
                 .cloned()
                 .unwrap_or_else(|| json!({}));
 
-            let result = call_tool(&name, args, caller, bridge).await?;
+            let mut result = call_tool(&name, args, caller, bridge).await?;
+            if let Some(storage) = bridge.storage_handle().await {
+                match storage.take_gate_result_notices(&caller.session_id, &caller.agent).await {
+                    Ok(rows) if !rows.is_empty() => {
+                        let ids = rows.iter().map(|row| format!("gate_status({:?}) [result row {}]", row.choice_id, row.message_id))
+                            .collect::<Vec<_>>().join(", ");
+                        result.content.push(crate::signaling::protocol::ToolContentBlock::Text {
+                            text: format!("[bot-hq] Gate answers/results have no retained channel-delivery receipt: {ids}. Check their recorded outcome before writing a handoff or reporting them as pending. This notice does not advance your channel cursor."),
+                        });
+                    }
+                    Ok(_) => {},
+                    Err(error) => tracing::warn!(%error, "could not add the unread gate-result notice"),
+                }
+            }
             Ok(Some(JsonRpcResponse::ok(
                 id,
                 serde_json::to_value(result).unwrap_or(json!(null)),
@@ -2588,6 +2601,49 @@ mod tests {
 
     async fn close_result(bridge: &std::sync::Arc<SignalingBridge>, id: i64) -> Value {
         close_result_with_archive(bridge, id, false).await
+    }
+
+    #[tokio::test]
+    async fn a_tool_reply_warns_once_when_a_gate_result_predates_its_new_handoff() {
+        let data = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::for_data_dir(data.path().to_path_buf());
+        let storage = crate::storage::Storage::memory().await.unwrap()
+            .with_handoff_dir(crate::agents::handoff::dir_under(&paths.local_dir));
+        storage.create_session("s1", "gate notice", data.path().to_str()).await.unwrap();
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        let hands = storage.participant_by_slug("s1", "hands").await.unwrap().unwrap().id;
+        let bridge = SignalingBridge::with_policy(crate::policy::ViolationsLog::new(data.path()), data.path().to_path_buf());
+        bridge.set_storage(storage.clone()).await;
+        let command = "printf 'FRESH_RESULT_FOR_HANDOFF\\n'";
+        bridge.action_gate("s1".into(), "hands".into(), command.into(), true).await.unwrap();
+        let id = storage.active_gate_for_command("s1", command).await.unwrap().unwrap().choice_id;
+        bridge.resolve_choice(&id, "Approve".into()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let response = dispatch(req("tools/call", json!({"name":"session_doc_write", "arguments":{
+            "slug":"handoff-hands", "body":"The gate is pending (stale)."
+        }}), 1), &caller(), &bridge).await.unwrap().unwrap();
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["result"]["content"].as_array().unwrap().len(), 2);
+        let notice = value["result"]["content"][1]["text"].as_str().unwrap();
+        assert!(notice.contains(&id) && notice.contains("before writing a handoff"), "{notice}");
+        assert_eq!(storage.cursor_for(hands).await.unwrap(), 0);
+        assert!(crate::policy::hooks::compact_user_words_text(data.path(), Some("s1"), "hands").is_none(), "the answer predates the handoff");
+        let replay = crate::policy::hooks::compact_gate_results_text(data.path(), Some("s1"), "hands").unwrap();
+        assert!(replay.contains("FRESH_RESULT_FOR_HANDOFF"), "{replay}");
+        let next = dispatch(req("tools/call", json!({"name":"session_doc_read", "arguments":{"slug":"handoff-hands"}}), 2), &caller(), &bridge).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(next).unwrap()["result"]["content"].as_array().unwrap().len(), 1, "the next tool must not repeat the notice");
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap().result_row_id.unwrap();
+        storage.commit_delivery(hands, &[(row, None)]).await.unwrap();
+        assert!(crate::policy::hooks::compact_gate_results_text(data.path(), Some("s1"), "hands").is_none());
+
+        let rejected = "printf 'this command must not execute'";
+        bridge.action_gate("s1".into(), "hands".into(), rejected.into(), true).await.unwrap();
+        let rejected_id = storage.active_gate_for_command("s1", rejected).await.unwrap().unwrap().choice_id;
+        bridge.resolve_choice(&rejected_id, "Reject — finish the draft first".into()).await.unwrap();
+        let notice = storage.take_gate_result_notices("s1", "hands").await.unwrap();
+        assert_eq!(notice.len(), 1);
+        assert_eq!(notice[0].choice_id, rejected_id);
+        assert!(notice[0].excerpt.contains("finish the draft first"));
     }
 
     async fn close_result_with_archive(bridge: &std::sync::Arc<SignalingBridge>, id: i64, archive: bool) -> Value {

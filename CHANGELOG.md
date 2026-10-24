@@ -13,6 +13,13 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Gate results stay visible when a handoff is newer than their completion.**
+  The issuer receives a once-per-result notice on a subsequent MCP reply,
+  and both connectors restore bounded result excerpts after compaction
+  until the turn ring delivers them. A notice does not mark the result read.
+  Delivery proof survives telemetry cleanup; rejected/refused gates and
+  later scheduled results use the same receipt path. Full output remains
+  available through `gate_status`.
 - **A close approval belongs to its card.** An old Approve can no longer
   authorize a later close request after new work or a rejection. Concurrent
   requests share one current card. “Close and archive” is now stored on that

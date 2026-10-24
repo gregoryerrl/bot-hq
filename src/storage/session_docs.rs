@@ -242,6 +242,7 @@ impl Storage {
         if let Err(e) = crate::agents::handoff::write_file(&path, &text) {
             tracing::warn!(?e, path = %path.display(), "writing a handoff file");
         }
+        self.sync_gate_results_file(session_id, participant).await;
     }
 
     /// Write the mid-turn handoff reminder's due file for `participant`
