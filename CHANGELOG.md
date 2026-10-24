@@ -13,6 +13,11 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Codex account folders work through filesystem aliases.** Hook identity
+  checks accept the same file through paths such as `/tmp` and `/private/tmp`
+  or a directory symlink. The configured account path stays unchanged, and
+  cached trust preserves the exact key and hash Codex reported. Different
+  files, hook positions, commands, events and matchers remain rejected.
 - **A fresh daily report no longer retires yesterday's code vocabulary.**
   The close-out sweep now requires an explicit retirement declaration or a
   library file actually removed or renamed. Dropping names, filenames or

@@ -7,9 +7,10 @@
 //! measured, s-de77e2f0 M8/M9) AND trusted: Codex keeps a trust hash per hook
 //! and skips an untrusted one silently. bot-hq grants that trust per spawn
 //! through `-c hooks.state={…}` with the hash `hooks/list` reports for the
-//! entry — and only after the listed entry's event, matcher, command and path
-//! equal what bot-hq rendered, exactly (plan-eyes P5): a hash is never
-//! trusted for a hook bot-hq did not write.
+//! entry — and only after its event/matcher/command match exactly and its
+//! key/path identify the same physical hooks file (plan-eyes P5, #120).
+//! Filesystem aliases affect only comparison, never Codex's reported key/hash
+//! or the selected credential slot: no trust for a hook bot-hq did not write.
 //!
 //! The home is bot-hq's: a `hooks.json` that is not bot-hq's own is refused,
 //! never merged or overwritten (P5), and the hook fails CLOSED without a
@@ -28,6 +29,18 @@ const MATCHER: &str = ".*";
 /// Seconds before Codex gives up on the hook (its default is 600). The gate
 /// does one local HTTP round trip; 30 s is generous and bounds a wedged app.
 const TIMEOUT_SECS: u64 = 30;
+
+/// Compare filesystem identity without changing the selected account home or
+/// the key/hash supplied by Codex. Two failed resolutions never count as equal.
+fn same_hook_path(expected: &str, listed: &str) -> bool {
+    if expected == listed {
+        return true;
+    }
+    match (std::fs::canonicalize(expected), std::fs::canonicalize(listed)) {
+        (Ok(expected), Ok(listed)) => expected == listed,
+        _ => false,
+    }
+}
 
 /// `"<exe>" policy-check codex-gate --data-dir "<dd>"` — the POSIX form Codex
 /// runs through `/bin/zsh -lc` (measured), both paths quoted.
@@ -243,14 +256,21 @@ impl RenderedHook {
         }
     }
 
-    /// Whether a listed entry IS this hook: key, event, matcher, command and
-    /// file all equal.
+    /// A key must name this physical file AND exactly this event/position.
+    /// The key itself is never rewritten: trust belongs to Codex's spelling.
+    pub(crate) fn matches_key(&self, key: &str) -> bool {
+        key.strip_suffix(HOOK_KEY_SUFFIX)
+            .is_some_and(|path| same_hook_path(&self.source_path, path))
+    }
+
+    /// Whether a listed entry IS this hook: event, matcher and command are
+    /// exact, and both the key and source path name the same physical file.
     fn is_this_hook(&self, listed: &ListedHook) -> bool {
-        listed.key == self.key
+        self.matches_key(&listed.key)
             && listed.event_name == "preToolUse"
             && listed.matcher.as_deref() == Some(MATCHER)
             && listed.command == self.command
-            && listed.source_path == self.source_path
+            && same_hook_path(&self.source_path, &listed.source_path)
     }
 
     /// The trust to grant for a listed entry — only when it is this hook,
@@ -456,6 +476,60 @@ mod tests {
         let mut other = ok.clone();
         other.key = format!("{file}:pre_tool_use:1:0");
         assert!(rendered.trust_for(&other).is_none(), "another position");
+    }
+
+    /// #120: Codex resolves /tmp and directory symlinks in its source path.
+    /// The reported key/hash must survive both directions of that comparison.
+    #[cfg(unix)]
+    #[test]
+    fn hook_file_aliases_preserve_the_reported_trust_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("home");
+        let alias = tmp.path().join("home-link");
+        let exe = std::env::current_exe().unwrap();
+        write_hooks_json(&real, &exe, tmp.path()).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canonical = real.canonicalize().unwrap();
+        for (selected, reported) in [(&alias, &canonical), (&canonical, &alias)] {
+            let rendered = RenderedHook::new(selected, &exe, tmp.path());
+            let listed = ListedHook {
+                key: hook_key(reported), event_name: "preToolUse".into(),
+                matcher: Some(MATCHER.into()), command: rendered.command.clone(),
+                source_path: reported.join("hooks.json").display().to_string(),
+                current_hash: "sha256:exact-reported-hash".into(),
+                trust_status: "trusted".into(), enabled: true,
+            };
+            assert_eq!(rendered.trust_for(&listed), Some(HookTrust {
+                key: listed.key.clone(), hash: listed.current_hash.clone(),
+            }), "same file through another spelling");
+            assert!(rendered.armed(&[listed.clone()]).is_ok());
+            assert_eq!(rendered.source_path, selected.join("hooks.json").display().to_string());
+            for field in ["key", "key_file", "event", "matcher", "command", "path", "missing"] {
+                let mut wrong = listed.clone();
+                match field {
+                    "key" => wrong.key = format!("{}:pre_tool_use:1:0", listed.source_path),
+                    "key_file" => wrong.key = hook_key(&tmp.path().join("another-home")),
+                    "event" => wrong.event_name = "postToolUse".into(),
+                    "matcher" => wrong.matcher = Some("Bash".into()),
+                    "command" => wrong.command.push_str(" --different"),
+                    "path" => {
+                        let other = tmp.path().join("other.json");
+                        std::fs::copy(real.join("hooks.json"), &other).unwrap();
+                        wrong.source_path = other.display().to_string();
+                    }
+                    _ => wrong.source_path = tmp.path().join("missing.json").display().to_string(),
+                }
+                assert!(rendered.trust_for(&wrong).is_none(), "{field} must still match");
+            }
+            let mut modified = listed;
+            modified.current_hash = "sha256:changed".into();
+            modified.trust_status = "modified".into();
+            assert!(rendered.armed(&[modified]).unwrap_err().contains("modified"));
+        }
+        assert!(!same_hook_path(
+            tmp.path().join("missing-a").to_str().unwrap(),
+            tmp.path().join("missing-b").to_str().unwrap(),
+        ), "two failed canonicalizations are not an identity match");
     }
 
     /// What the spawn checks before the first turn and before every turn

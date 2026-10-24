@@ -1903,16 +1903,20 @@ pub(crate) async fn resolve_codex_account(
             warn!(participant = %p.slug, %why, "could not probe the Codex home; spawning anyway");
         }
     }
-    // Trust: the listed entry that IS bot-hq's hook, exactly, else the cache.
-    let key = crate::agents::codex::home::hook_key(std::path::Path::new(&home));
+    // Trust: keep the EXACT reported key/hash, even when Codex names the hook
+    // through a canonical path. The selected home remains the credential slot.
     let mut hook_trust = Vec::new();
     if let Some(trust) = probed.hooks.iter().find_map(|h| rendered.trust_for(h)) {
-        if let Err(e) = storage.set_codex_hook_trust(&home, &key, &trust.hash, &probed.version).await {
+        if let Err(e) = storage.set_codex_hook_trust(&home, &trust.key, &trust.hash, &probed.version).await {
             warn!(participant = %p.slug, ?e, "caching the Codex hook trust failed");
         }
         hook_trust.push(trust);
-    } else if let Ok(Some(cached)) = storage.codex_hook_trust(&home, &key).await {
-        hook_trust.push(crate::agents::codex::home::HookTrust { key: key.clone(), hash: cached.trusted_hash });
+    } else if let Ok(candidates) = storage.codex_hook_trust_candidates(&home).await {
+        if let Some(cached) = candidates.into_iter().find(|c| rendered.matches_key(&c.key)) {
+            // Startup and every turn still verify the actual hooks/list entry
+            // and its trusted/modified status; a stale hash cannot arm the gate.
+            hook_trust.push(crate::agents::codex::home::HookTrust { key: cached.key, hash: cached.trusted_hash });
+        }
     }
     // Record, as the Claude path does: the home at the first spawn, the
     // identity whenever the row has none yet, the runtime pin with the
@@ -5063,6 +5067,59 @@ mod tests {
         assert_eq!((p.runtime.as_str(), p.runtime_version_at_spawn.as_str()), ("codex", "0.163.0"));
         let cached = s.codex_hook_trust(&home_str, &crate::agents::codex::home::hook_key(&home)).await.unwrap().expect("the hash is cached");
         assert_eq!(cached.trusted_hash, "sha256:first");
+    }
+
+    /// #120: resolve the real spawn configuration and its cache fallback, not
+    /// just the path comparator. The account slot never becomes the realpath.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_codex_home_alias_keeps_the_account_slot_and_reported_cached_key() {
+        let s = Storage::memory().await.unwrap();
+        let dirs = TempDir::new().unwrap();
+        let physical = dirs.path().join("physical-home");
+        std::fs::create_dir(&physical).unwrap();
+        let physical = physical.canonicalize().unwrap();
+        let selected = dirs.path().join("selected-home");
+        std::os::unix::fs::symlink(&physical, &selected).unwrap();
+        let selected_str = selected.to_str().unwrap();
+        let reported_key = crate::agents::codex::home::hook_key(&physical);
+        s.upsert_model(&astra_row("m-alias", selected_str)).await.unwrap();
+        let p = seed_hands_on(&s, "m-alias").await;
+        let cfg = resolve_participant_config(&s, &p).await;
+        let data = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(data.path().to_path_buf());
+        let prompts = TempDir::new().unwrap();
+        let (probe, asked) = fixed_codex_probe(chatgpt_account("me@example.com", "acct-1"),
+            Some((physical.to_str().unwrap(), data.path(), "sha256:listed")));
+        let spawn = participant_spawn_config(
+            &s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:4242".parse().unwrap(),
+            prompts.path(), None, &SignalingBridge::new(), &*never_claude_probe(), &*probe,
+        ).await.unwrap();
+        let expected = vec![crate::agents::codex::home::HookTrust { key: reported_key.clone(), hash: "sha256:listed".into() }];
+        assert_eq!(spawn.codex.unwrap().hook_trust, expected);
+        assert_eq!(spawn.account_dir.as_deref(), Some(selected_str));
+        assert_eq!(asked.lock().unwrap()[0].home, selected_str);
+        let p = reread(&s).await;
+        assert_eq!(p.account_dir_at_spawn.as_deref(), Some(selected_str));
+        assert_eq!(s.codex_hook_trust(selected_str, &reported_key).await.unwrap().unwrap().trusted_hash, "sha256:listed");
+        assert!(s.codex_hook_trust(physical.to_str().unwrap(), &reported_key).await.unwrap().is_none(), "the cache belongs to the selected slot");
+        // Newer rows for another slot or another physical file cannot win
+        // fallback selection, even when the other file holds identical bytes.
+        sqlx::query("UPDATE codex_hook_trust SET updated_at = '2000-01-01T00:00:00Z'")
+            .execute(s.pool()).await.unwrap();
+        s.set_codex_hook_trust(physical.to_str().unwrap(), &reported_key, "sha256:other-slot", "0.163.0").await.unwrap();
+        let other = dirs.path().join("other-home");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::copy(physical.join("hooks.json"), other.join("hooks.json")).unwrap();
+        s.set_codex_hook_trust(selected_str, &crate::agents::codex::home::hook_key(&other), "sha256:other-file", "0.163.0").await.unwrap();
+        let cfg = resolve_participant_config(&s, &p).await;
+        assert_eq!(cfg.claude_config_dir.as_deref(), Some(selected_str));
+        let spawn = participant_spawn_config(
+            &s, &p, cfg, &paths, &None, "prompt".into(), "127.0.0.1:4242".parse().unwrap(),
+            prompts.path(), None, &SignalingBridge::new(), &*never_claude_probe(), &*no_codex_probe(),
+        ).await.unwrap();
+        assert_eq!(spawn.codex.unwrap().hook_trust, expected, "an unreadable probe reuses the exact reported key/hash");
+        assert_eq!(spawn.account_dir.as_deref(), Some(selected_str));
     }
 
     /// A Codex row with no home, a logged-out home at the first spawn, and

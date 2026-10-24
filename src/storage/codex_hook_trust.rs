@@ -14,6 +14,20 @@ pub struct CodexHookTrustRow {
 }
 
 impl Storage {
+    /// Candidate keys as Codex reported them, restricted to the exact selected
+    /// credential slot. The caller verifies physical hook identity before use;
+    /// SQL must not canonicalize the home or manufacture a new trust key.
+    pub async fn codex_hook_trust_candidates(&self, home: &str) -> Result<Vec<CodexHookTrustRow>> {
+        sqlx::query_as::<_, CodexHookTrustRow>(
+            "SELECT home, key, trusted_hash, codex_version, updated_at FROM codex_hook_trust \
+             WHERE home = ? ORDER BY updated_at DESC, key",
+        )
+        .bind(home)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the Codex hook trust candidates")
+    }
+
     pub async fn codex_hook_trust(&self, home: &str, key: &str) -> Result<Option<CodexHookTrustRow>> {
         let row = sqlx::query_as::<_, CodexHookTrustRow>(
             "SELECT home, key, trusted_hash, codex_version, updated_at FROM codex_hook_trust \
