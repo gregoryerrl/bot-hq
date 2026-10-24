@@ -476,6 +476,13 @@ the round cap ends it.
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
    nobody had anything to add, and the only party who can change that is the
    user. A staged message is delivered at that boundary like any other.
+
+   **A user message releasing Pause owns the next deal.** The ring replays
+   held state changes before that message, preserving gates, vote retractions
+   and mentions, but does not deal or declare consensus from a held completion.
+   An internal `PauseReleased` marker ends this replay and issues the one
+   release. Otherwise the held completion and the message both deal, and an
+   empty second deal can falsely announce all-pass while the first one runs.
 3. **Spin detection** — token-set Jaccard at `SPIN_SIMILARITY_THRESHOLD` (0.85)
    over ONE participant's output across rounds, for `SPIN_BREAK_STREAK` (2)
    running. Cross-agent echo is impossible in a ring; self-repetition is not.

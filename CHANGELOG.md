@@ -13,6 +13,11 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Resuming after Pause hands out one turn.** An interrupted completion
+  held by Pause used to hand out the new message before the resume itself
+  handed it out again. That could show an all-pass halt while an agent was
+  working, or start two agents at once. Held outcomes are now recorded
+  before the resume makes its one deal; pending gates and mentions survive.
 - **The first message after a relaunch lands.** Opening a session that
   was dormant (after a relaunch, or one nobody had looked at) starts its
   agents in the background, and a message sent in those seconds failed

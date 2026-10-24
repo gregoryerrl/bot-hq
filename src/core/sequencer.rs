@@ -1131,6 +1131,12 @@ pub enum SequencerCommand {
         mentions: Vec<i64>,
         restarts_rotation: bool,
     },
+    /// Internal replay boundary: the fresh user message that released a Pause.
+    /// Held commands before it update state without issuing another deal.
+    PauseReleased {
+        mentions: Vec<i64>,
+        restarts_rotation: bool,
+    },
     /// The user STAGED a response while the ring runs (the Stage toggle,
     /// 2026-08-15): the content sits in `AppState`; this is only the flag.
     /// At the next turn boundary the ring parks instead of dealing and emits
@@ -1480,6 +1486,13 @@ struct RingState {
     /// release in the stash was dealt to a pump still orienting, the #10
     /// wedge. Only `BootEnded` releases this one.
     boot_release: Option<(Vec<i64>, bool)>,
+    /// Pause-release markers still in the replay queue. Replayed completions
+    /// record their endings, but the final release alone deals the new work.
+    /// A second Pause can hold an earlier marker, so this is a count, not a flag.
+    pause_releases_pending: usize,
+    /// A typed steer among coalesced releases must not become a continuation
+    /// just because the last release was a tray answer.
+    pause_release_restarts: bool,
     /// Participants that have parked a question and cannot proceed until the user
     /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     /// it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1655,6 +1668,20 @@ impl RingState {
                 // tally exists to reach.
                 if !matches!(ending, TurnEnding::Passed) {
                     self.spoke_this_lap = true;
+                }
+                if self.pause_releases_pending != 0 {
+                    record_turn_ending(deps, participant_id, ending).await;
+                    // The old turn finished; duplicate completions and joins
+                    // must not act on it while the release is still replaying.
+                    self.holder = None;
+                    deps.storage.set_current_turn(&deps.session_id, None).await;
+                    debug!(
+                        session = %deps.session_id,
+                        participant_id,
+                        completed,
+                        "sequencer: recorded held completion; the pause release owns the next deal"
+                    );
+                    return;
                 }
                 // The vote is recorded and consensus asked BEFORE the ring
                 // is stepped: arriving means waking nobody, so a step taken
@@ -1973,7 +2000,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // loop off the DEFERRED queue was read earlier and must not
                 // release a pause that arrived after it: it falls through to the
                 // gate below and is held like anything else.
-                Some(cmd @ SequencerCommand::UserMessage { .. }) if state.paused => {
+                Some(SequencerCommand::UserMessage { mentions, restarts_rotation }) if state.paused => {
                     state.paused = false;
                     // The steer takes its place at the END of the held queue, so
                     // everything the pause caught ahead of it — a park, a
@@ -1982,11 +2009,14 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     // would never take effect), and applying the message first
                     // would restart a cycle the park is about to stop.
                     //
-                    // **The command itself is re-queued, not a fresh one.** It
-                    // carries the user's mentions (D17), and minting a
-                    // replacement here would release the pause while silently
-                    // dropping who they summoned.
-                    state.held.push_back(cmd);
+                    // Preserve the message's routing in an explicit boundary.
+                    // Without it the held completion deals these same rows
+                    // before the message does, creating two concurrent turns.
+                    state.pause_releases_pending += 1;
+                    state.held.push_back(SequencerCommand::PauseReleased {
+                        mentions,
+                        restarts_rotation,
+                    });
                     let replayed = release_held(&mut state.held, &mut state.deferred);
                     debug!(
                         session = %deps.session_id,
@@ -2024,6 +2054,9 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             state.held.push_back(cmd);
             continue;
         }
+        if matches!(cmd, SequencerCommand::PauseReleased { .. }) {
+            state.pause_releases_pending = state.pause_releases_pending.saturating_sub(1);
+        }
         match cmd {
             SequencerCommand::TurnComplete {
                 participant_id,
@@ -2047,7 +2080,18 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             SequencerCommand::UserMessage {
                 mentions,
                 restarts_rotation,
+            }
+            | SequencerCommand::PauseReleased {
+                mentions,
+                restarts_rotation,
             } => {
+                if state.pause_releases_pending != 0 {
+                    state.summons.queue.extend(mentions);
+                    state.pause_release_restarts |= restarts_rotation;
+                    continue;
+                }
+                let restarts_rotation =
+                    restarts_rotation | std::mem::take(&mut state.pause_release_restarts);
                 // **A release during boot waits for boot to end** (feedback
                 // #10). Every pump is still orienting, so a turn dealt now
                 // reports to the readiness channel and never completes. The
@@ -2122,7 +2166,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 }
             }
             SequencerCommand::MessageStaged => {
-                if state.holder.is_none() {
+                if state.holder.is_none() && state.pause_releases_pending == 0 {
                     // No turn in flight — the ring is parked, yielded, or
                     // between deals. There is no boundary to wait for:
                     // deliver now, exactly as the Send an open box offers.
@@ -2159,7 +2203,9 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // be delivered — that is the frozen cycle the module doc
                 // describes. It is deliverable now. The ring does not move and
                 // the epoch does not change: no turn ended, one finally started.
-                let dealt = match state.holder.as_ref().filter(|h| h.id == participant_id) {
+                let dealt = match state.holder.as_ref().filter(|h| {
+                    h.id == participant_id && state.pause_releases_pending == 0
+                }) {
                     Some(to) => {
                         deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut state.deferred).await
                     }
@@ -2358,7 +2404,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // what goes out is everything unread AS OF THE RESUME, and each
                 // row exactly once: `commit_delivery` moved the cursor past the
                 // prefix that landed and it never rewinds.
-                let dealt = match state.holder.as_ref() {
+                let dealt = match state.holder.as_ref().filter(|_| state.pause_releases_pending == 0) {
                     Some(to) => {
                         deliver_backlog(&deps, to, &mut rx, MAX_TURN_BATCHES, &mut state.deferred).await
                     }
@@ -2448,6 +2494,11 @@ async fn release_ring(
     mentions: Vec<i64>,
     restarts_rotation: bool,
 ) {
+    if state.pause_releases_pending != 0 {
+        state.summons.queue.extend(mentions);
+        state.pause_release_restarts |= restarts_rotation;
+        return;
+    }
     // **Whoever the user named takes the next turn, in the order
     // they were named** (rc3 D17). Appended rather than assigned:
     // two messages in quick succession queue behind each other, the
@@ -2532,6 +2583,12 @@ async fn advance_turn(
     user_spoke: bool,
     restarts_rotation: bool,
 ) {
+    // State changes held by Pause replay in order, but only their releasing
+    // message may deal. This also covers a late orientation or a retry summons
+    // in that replay, not just the interrupted holder's completion.
+    if state.pause_releases_pending != 0 {
+        return;
+    }
     // Destructured rather than reached through `state.` at each of the sixty-odd
     // uses below, and that is deliberate: binding through a `&mut RingState`
     // gives every name back at EXACTLY the type it had as a parameter, so the
@@ -3410,31 +3467,11 @@ async fn announce_round_cap(deps: &SequencerDeps, laps: u32) {
     }
 }
 
-/// Record how a turn ended, then answer: has the cycle arrived?
-///
-/// `true` means every active participant has declared done and the caller must
-/// NOT step the ring — the turn is already cleared here. See "the halt is a
-/// yield, not a stop" in the module doc for what that leaves observable.
-///
-/// **A [`TurnEnding::Passed`] can only ever answer `false` while the passing
-/// participant is still in the active rotation**, because the write above
-/// leaves that participant's vote at 0 and the query below wants every active
-/// vote set. The one state where a pass returns `true` is a passer that is no
-/// longer active — disabled mid-turn — with every remaining active voted done,
-/// and that is a genuine arrival among the participants who are left. The query
-/// is asked for all three endings rather than skipped for the pass so that case
-/// has an answer at all.
-///
-/// **A storage failure answers `false`.** Neither error is a vote, and of the
-/// two ways to be wrong the cycle continuing is the recoverable one: a spurious
-/// extra lap costs a turn and the participant votes again, whereas a halt
-/// nobody voted for parks the session waiting on a user who was never told they
-/// are being waited on. Same instinct as [`Handover::Held`] — do not invent a
-/// state out of a failure.
-async fn halted_on_consensus(
+/// Persist an ending independently of scheduling: a Pause replay still records
+/// votes, but its pending user release must not be pre-empted by a consensus halt.
+/// Returns whether the done-vote write succeeded.
+async fn record_turn_ending(
     deps: &SequencerDeps,
-    holder: &mut Option<Participant>,
-    epoch: &mut u64,
     participant_id: i64,
     ending: TurnEnding,
 ) -> bool {
@@ -3500,6 +3537,22 @@ async fn halted_on_consensus(
             error = %e,
             "sequencer: done vote not recorded; continuing the cycle"
         );
+        return false;
+    }
+    true
+}
+
+/// Record an ending, then halt if every active participant voted done.
+/// A pass can reach consensus only if its participant left the active roster;
+/// a storage failure cannot manufacture a vote or a halt.
+async fn halted_on_consensus(
+    deps: &SequencerDeps,
+    holder: &mut Option<Participant>,
+    epoch: &mut u64,
+    participant_id: i64,
+    ending: TurnEnding,
+) -> bool {
+    if !record_turn_ending(deps, participant_id, ending).await {
         return false;
     }
     match deps.storage.all_active_voted_done(&deps.session_id).await {
@@ -9798,6 +9851,90 @@ mod tests {
             "the replayed completion was re-held by the second pause, so B was \
              handed no turn"
         );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn a_pause_release_with_a_held_completion_deals_once_in_a_solo_ring() {
+        assert_pause_release_deals_once(&[("a", "active")]).await;
+    }
+
+    #[tokio::test]
+    async fn a_pause_release_with_a_held_completion_deals_once_in_a_pair() {
+        assert_pause_release_deals_once(&[("a", "active"), ("b", "active")]).await;
+    }
+
+    async fn assert_pause_release_deals_once(roster: &[(&str, &str)]) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        // s-fc4651c9: the held completion dealt the new user row, then the
+        // release dealt again. Solo: an empty-read pass hid live work under a
+        // halt. Pair: both participants received work at the same time.
+        for ending in [SPOKE, TurnEnding::Passed, TurnEnding::Done] {
+            let (mut deps, storage, mut seats, activity) = ring_with_activity(roster).await;
+            let a = seats[0].id;
+            let epoch = Arc::new(AtomicU64::new(0));
+            deps.epochs.insert(a, Arc::clone(&epoch));
+            post(&storage, "user", None, "first task").await;
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            send(&tx, user_message()).await;
+            assert_eq!(seats[0].expect(1).await, vec!["first task"]);
+            assert_eq!(epoch.load(Ordering::Acquire), 1);
+
+            let phase_epoch = storage.phase_epoch("s1").await.unwrap();
+            storage.cast_phase_vote("s1", a, "plan", "fixture", phase_epoch).await.unwrap();
+            send(&tx, SequencerCommand::Pause).await;
+            send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending }).await;
+            post(&storage, "user", None, "resume with this task").await;
+            send(&tx, user_message()).await;
+
+            assert_eq!(seats[0].expect(1).await, vec!["resume with this task"]);
+            for seat in seats.iter_mut().skip(1) {
+                seat.quiet().await;
+                assert_eq!(storage.cursor_for(seat.id).await.unwrap(), 0);
+            }
+            assert_eq!(epoch.load(Ordering::Acquire), 2, "one new deal after {ending:?}");
+            assert!(activity.any_busy(), "the new turn is still working after {ending:?}");
+            assert!(notices(&storage).await.is_empty(), "no false yield after {ending:?}");
+            assert!(!storage.participant_by_id(a).await.unwrap().unwrap().done_vote);
+            let remaining: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM phase_votes WHERE participant_id = ? AND retracted_at IS NULL",
+            )
+            .bind(a)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+            assert_eq!(remaining, i64::from(ending != TurnEnding::Passed), "held pass still retracts its phase vote");
+            drop(tx);
+            assert!(exited(task).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_pause_release_preserves_a_held_gate_and_the_users_mention() {
+        let (deps, storage, mut seats) = ring(&[("a", "active"), ("b", "on_mention")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "first task").await;
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["first task"]);
+
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, gate_opened("held-gate")).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        post(&storage, "user", None, "review this").await;
+        send(&tx, summoning(&[b])).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert_eq!(storage.cursor_for(b).await.unwrap(), 0, "the held gate still blocks delivery");
+
+        send(&tx, gate_resolved("held-gate")).await;
+        send(&tx, answer_message()).await;
+        assert_eq!(seats[1].expect(2).await, vec!["first task", "review this"]);
+        seats[0].quiet().await;
         drop(tx);
         assert!(exited(task).await);
     }
