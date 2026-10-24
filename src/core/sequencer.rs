@@ -1436,6 +1436,12 @@ struct RingState {
     /// hours. The user stopped it by hand, which is the one thing a backstop is
     /// supposed to make unnecessary.
     spoke_this_lap: bool,
+    /// Only accepted completions count as passes. An empty/stale lap is not
+    /// evidence that the current roster declined all its turns.
+    passed_this_lap: std::collections::HashSet<i64>,
+    /// Distinguishes the holder still working from its completed turn while a
+    /// handover is being decided. Busy UI state is not the scheduling authority.
+    completed_turn: Option<(i64, u64)>,
     /// The Stage toggle's flag (2026-08-15): a user response is staged in
     /// AppState and delivery is owed at the next turn boundary. The boundary
     /// PARKS instead of dealing and emits `StagedDeliveryDue`; the delivery
@@ -1472,6 +1478,9 @@ struct RingState {
     /// `None` = nothing held. Two releases in the window merge into one — the
     /// rows are already in the channel, and one restart drains them.
     stashed_release: Option<(Vec<i64>, bool)>,
+    /// Non-preempting tray answers wait for a LIVE holder, without the short
+    /// wind-down deadline: real work may take minutes, and is not interrupted.
+    pending_answer: Option<Vec<i64>>,
     /// The ring's own boot latch (feedback #10): set at construction when the
     /// spawn boots ([`SequencerDeps::boots`]), cleared ONLY by `BootEnded`.
     /// While set, a release is held in `boot_release` and a stage is held —
@@ -1536,6 +1545,10 @@ struct RingState {
 }
 
 impl RingState {
+    fn has_live_turn(&self) -> bool {
+        self.holder.as_ref().is_some_and(|p| self.completed_turn != Some((p.id, self.epoch)))
+    }
+
     /// Hold a release back for the halted holder's completion (round 10, B1).
     /// A second release in the window merges its mentions into the first — one
     /// restart drains every row.
@@ -1572,6 +1585,18 @@ impl RingState {
     fn take_stashed_release(&mut self) -> Option<(Vec<i64>, bool)> {
         if self.winding_down.is_some() {
             return None;
+        }
+        if !self.has_live_turn() {
+            if let Some(mut mentions) = self.pending_answer.take() {
+                let restarts = match self.stashed_release.take() {
+                    Some((later_mentions, restarts)) => {
+                        mentions.extend(later_mentions);
+                        restarts
+                    }
+                    None => false,
+                };
+                return Some((mentions, restarts));
+            }
         }
         self.stashed_release.take()
     }
@@ -1657,6 +1682,7 @@ impl RingState {
                 );
             }
             if live {
+                self.completed_turn = Some((participant_id, completed));
                 // A substantive turn is what makes a lap worth dealing
                 // (rc3 D27). Recorded before the consensus check so a turn
                 // that BOTH speaks and halts still counts as speech.
@@ -1668,8 +1694,11 @@ impl RingState {
                 // tally exists to reach.
                 if !matches!(ending, TurnEnding::Passed) {
                     self.spoke_this_lap = true;
+                    self.passed_this_lap.remove(&participant_id);
+                } else {
+                    self.passed_this_lap.insert(participant_id);
                 }
-                if self.pause_releases_pending != 0 {
+                if self.pause_releases_pending != 0 || self.pending_answer.is_some() {
                     record_turn_ending(deps, participant_id, ending).await;
                     // The old turn finished; duplicate completions and joins
                     // must not act on it while the release is still replaying.
@@ -1679,7 +1708,7 @@ impl RingState {
                         session = %deps.session_id,
                         participant_id,
                         completed,
-                        "sequencer: recorded held completion; the pause release owns the next deal"
+                        "sequencer: recorded held completion; the pending user release owns the next deal"
                     );
                     return;
                 }
@@ -2119,6 +2148,17 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     state.stash_release(mentions, restarts_rotation);
                     continue;
                 }
+                if !restarts_rotation && state.has_live_turn() {
+                    state.pending_answer.get_or_insert_with(Vec::new).extend(mentions);
+                    // Repair a stale UI mark from the ring's actual owner;
+                    // never let that stale mark license a second live deal.
+                    if let (Some(activity), Some(holder)) = (&deps.activity, &state.holder) {
+                        activity.mark_busy_for_epoch(&holder.slug, state.epoch);
+                    }
+                    debug!(session = %deps.session_id, epoch = state.epoch,
+                        "sequencer: tray answer retained for the live holder's completion");
+                    continue;
+                }
                 release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation).await;
             }
             SequencerCommand::MessageStaged if state.boot_hold => {
@@ -2491,13 +2531,17 @@ async fn release_ring(
     deps: &SequencerDeps,
     rx: &mut mpsc::Receiver<SequencerCommand>,
     state: &mut RingState,
-    mentions: Vec<i64>,
+    mut mentions: Vec<i64>,
     restarts_rotation: bool,
 ) {
     if state.pause_releases_pending != 0 {
         state.summons.queue.extend(mentions);
         state.pause_release_restarts |= restarts_rotation;
         return;
+    }
+    if let Some(mut earlier) = state.pending_answer.take() {
+        earlier.append(&mut mentions);
+        mentions = earlier;
     }
     // **Whoever the user named takes the next turn, in the order
     // they were named** (rc3 D17). Appended rather than assigned:
@@ -2576,6 +2620,24 @@ async fn release_ring(
 /// halves travel together"; here it is a shared constant).
 pub(crate) const STARVATION_SUMMONS_MIN_PEER_TEXTS: i64 = 10;
 
+async fn all_dealable_participants_passed(
+    deps: &SequencerDeps,
+    passed: &std::collections::HashSet<i64>,
+) -> bool {
+    let roster = match deps.storage.participants_for_session(&deps.session_id).await {
+        Ok(roster) => roster,
+        Err(error) => {
+            warn!(session = %deps.session_id, %error, "cannot establish an all-pass lap");
+            return false;
+        }
+    };
+    let orienting = orienting_now(deps);
+    let active: Vec<_> = roster.iter().filter(|p| {
+        p.enabled && p.participation_mode == crate::storage::MODE_ACTIVE && !orienting.contains(&p.id)
+    }).collect();
+    !active.is_empty() && active.iter().all(|p| passed.contains(&p.id))
+}
+
 async fn advance_turn(
     deps: &SequencerDeps,
     rx: &mut mpsc::Receiver<SequencerCommand>,
@@ -2588,6 +2650,11 @@ async fn advance_turn(
     // in that replay, not just the interrupted holder's completion.
     if state.pause_releases_pending != 0 {
         return;
+    }
+    let has_live_generation = state.has_live_turn();
+    if user_spoke {
+        state.spoke_this_lap = false;
+        state.passed_this_lap.clear();
     }
     // Destructured rather than reached through `state.` at each of the sixty-odd
     // uses below, and that is deliberate: binding through a `&mut RingState`
@@ -2605,6 +2672,7 @@ async fn advance_turn(
         laps,
         summons,
         spoke_this_lap,
+        passed_this_lap,
         halted_pending_user,
         open_gates,
         staged_pending,
@@ -2998,7 +3066,7 @@ async fn advance_turn(
             // [`DEFAULT_ROUND_CAP_LAPS`] for why the margin depends on N).
             // Erring one lap LATE is the safe direction for a net that must
             // never fire on legitimate work.
-            let wrapped = match (current_key, next.as_ref()) {
+            let wrapped = !user_spoke && match (current_key, next.as_ref()) {
                 (Some(cur), Some(n)) => (n.turn_position, n.id) <= cur,
                 _ => false,
             };
@@ -3022,7 +3090,9 @@ async fn advance_turn(
                 // which ends the work. This says nobody has anything to add
                 // right now, which ends the LAP. A pass still casts no vote and
                 // still clears nothing.
-                if !*spoke_this_lap {
+                if !*spoke_this_lap && !has_live_generation
+                    && all_dealable_participants_passed(deps, passed_this_lap).await
+                {
                     // **Not while someone is still orienting** (D4; EYES
                     // 28dca9fc). They have had no turn at all, so "every
                     // participant passed" is false — and a lone ready
@@ -3042,6 +3112,7 @@ async fn advance_turn(
                         .await;
                         return;
                     }
+                    passed_this_lap.clear();
                     halt(deps, holder, epoch).await;
                     announce_all_passed(deps).await;
                     // Every stop is a HALT (2026-08-15: "HALT means the floor
@@ -3096,6 +3167,7 @@ async fn advance_turn(
                 // A new lap begins: whether anyone speaks in THIS one is a
                 // fresh question.
                 *spoke_this_lap = false;
+                passed_this_lap.clear();
                 let cap = round_cap_laps(deps);
                 // `0` is off, and it is tested BEFORE the comparison rather than
                 // folded into it: `*laps >= 0` is true on the very first lap, so
@@ -9852,6 +9924,83 @@ mod tests {
             "the replayed completion was re-held by the second pause, so B was \
              handed no turn"
         );
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    #[tokio::test]
+    async fn an_answer_after_an_all_pass_halt_starts_a_fresh_lap() {
+        for roster in [vec![("a", "active")], vec![("a", "active"), ("b", "active")]] {
+            let (deps, storage, mut seats, activity) = ring_with_activity(&roster).await;
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            post(&storage, "user", None, "first task").await;
+            send(&tx, user_message()).await;
+            for (i, seat) in seats.iter_mut().enumerate() {
+                assert_eq!(seat.expect(1).await, vec!["first task"]);
+                activity.set_busy_slug(roster[i].0, false);
+                send(&tx, SequencerCommand::TurnComplete {
+                    participant_id: seat.id, epoch: i as u64 + 1, ending: TurnEnding::Passed,
+                }).await;
+            }
+            for seat in &mut seats { seat.quiet().await; }
+            assert_eq!(notices(&storage).await.len(), 1, "the actual all-pass lap yielded");
+            post(&storage, "user", None, "new answer after the halt").await;
+            send(&tx, answer_message()).await;
+            let rows = seats[0].woken().await;
+            assert!(rows.iter().any(|row| row == "new answer after the halt"));
+            assert_eq!(notices(&storage).await.len(), 1, "old passes cannot halt the new answer");
+            assert!(activity.is_busy_slug("a"));
+            drop(tx);
+            assert!(exited(task).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tray_answer_waits_for_the_live_solo_turn_even_if_busy_was_cleared() {
+        assert_answer_waits_for_live_turn(&[("a", "active")]).await;
+    }
+
+    #[tokio::test]
+    async fn a_tray_answer_waits_for_the_live_pair_turn_even_if_busy_was_cleared() {
+        assert_answer_waits_for_live_turn(&[("a", "active"), ("b", "active")]).await;
+    }
+
+    async fn assert_answer_waits_for_live_turn(roster: &[(&str, &str)]) {
+        let (deps, storage, mut seats, activity) = ring_with_activity(roster).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "first task").await;
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["first task"]);
+        // The actual 17:23 precondition: a phantom completion had cleared the
+        // UI's flag, but the ring still owned a live generation.
+        activity.set_busy_slug("a", false);
+        post(&storage, "user", None, "the tray answer").await;
+        send(&tx, answer_message()).await;
+        for seat in &mut seats { seat.quiet().await; }
+        if seats.len() == 1 {
+            // This is an ordinary working turn, not an interrupted one. The
+            // three-second wind-down timer must not release its answer early.
+            tokio::time::sleep(HALT_WIND_DOWN_GRACE + std::time::Duration::from_millis(30)).await;
+            seats[0].quiet().await;
+        }
+        let holder: Option<i64> = sqlx::query_scalar(
+            "SELECT current_turn_participant_id FROM sessions WHERE id = 's1'",
+        ).fetch_one(storage.pool()).await.unwrap();
+        assert_eq!(holder, Some(a), "an answer cannot replace or halt the live holder");
+        assert!(notices(&storage).await.is_empty(), "no pass occurred");
+
+        post(&storage, "participant", Some("a"), "first turn finished").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        if seats.len() == 1 {
+            assert_eq!(seats[0].expect(1).await, vec!["the tray answer"]);
+        } else {
+            assert_eq!(seats[1].expect(3).await, vec!["first task", "the tray answer", "first turn finished"]);
+            seats[0].quiet().await;
+        }
+        assert!(notices(&storage).await.is_empty(), "a fresh user cycle is not an all-pass lap");
         drop(tx);
         assert!(exited(task).await);
     }

@@ -483,6 +483,12 @@ the round cap ends it.
    yields to the user with a visible notice (rc3 D27, `announce_all_passed`):
    nobody had anything to add, and the only party who can change that is the
    user. A staged message is delivered at that boundary like any other.
+   The ring counts accepted pass completions from the current lap and requires
+   all currently dealable active participants to have passed. It never derives
+   an all-pass lap merely from a lack of speech. A new user release clears that
+   accounting; a tray answer received while a generation is still live waits
+   for its completion, regardless of the UI's busy flag. That wait has no
+   interrupt wind-down deadline: an answer does not interrupt ongoing work.
 
    **A user message releasing Pause owns the next deal.** The ring replays
    held state changes before that message, preserving gates, vote retractions

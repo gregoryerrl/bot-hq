@@ -13,6 +13,12 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **Tray answers wait for the current turn to finish.** A stale idle indicator
+  could let an answer replace a working turn or falsely halt the session.
+  Scheduling now checks the actual turn owner. A new answer also starts fresh
+  pass accounting, so an earlier all-pass halt cannot swallow it.
+  Answers wait for the turn to end even when it takes several minutes;
+  Pause remains the way to interrupt it immediately.
 - **An interrupted turn cannot finish a newer turn.** A completion arriving
   after a new deal keeps the interrupted turn's identity, including when the
   old turn had not produced output. Its busy flag cannot clear the new turn's,
