@@ -1700,7 +1700,9 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   to a user decision when no reviewer remains. Pending user gates survive removal
   of their requester. Activity slots and the weak watchdog roster refresh together.
   Candidate prompt excerpts (phase docs, own handoff, first three/latest six
-  user rows) cap encoded bytes at64KB and never advance a reader cursor.
+  authored-user ledger entries, including tray choices) cap encoded bytes at64KB
+  and never advance a reader cursor. Channel `origin=user` is not proof of human
+  authorship: it can also carry host/plugin text or command output.
   Full bootstrap/history budgeting, meter reset, UI controls and delegated-agent
   authorization remain integration work; no Session Settings control invokes the
   host API yet. A connector startup receipt is not proof of a successful model turn.

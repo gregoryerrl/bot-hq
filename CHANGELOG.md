@@ -140,7 +140,9 @@ model side by side. Migration 0102 applies on first launch.
   refresh no longer hold the global lock used by other sessions' controls.
   Activity, watchdog and reviewer registration
   follow the changed roster; outstanding review bodies are delivered again.
-  Candidate prompts include bounded, attributed session excerpts. The controls
+  Candidate prompts include bounded, attributed session excerpts; human
+  instructions come from the authorship ledger and include tray choices,
+  without treating host/plugin text or command output as the user's words. The controls
   and complete history-transfer flow are still being connected; these operations
   are not yet exposed in Session Settings.
 - **Auto-allowed publications still receive review.** Both connectors and

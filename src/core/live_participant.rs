@@ -227,11 +227,13 @@ async fn transfer_context(storage: &Storage, p: &crate::storage::Participant) ->
             7_500,
         ));
     }
+    // The channel's user origin also carries host/plugin text and gate output.
+    // Only the explicit authorship ledger identifies human words and tray picks.
     let users: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, created_at, substr(content, 1, 4000) FROM messages WHERE session_id = ? AND origin = 'user' AND kind = 'text' \
-         AND id IN (SELECT id FROM messages WHERE session_id = ? AND origin = 'user' AND kind = 'text' ORDER BY id LIMIT 3) \
-         UNION SELECT id, created_at, substr(content, 1, 4000) FROM messages WHERE session_id = ? AND origin = 'user' AND kind = 'text' \
-         AND id IN (SELECT id FROM messages WHERE session_id = ? AND origin = 'user' AND kind = 'text' ORDER BY id DESC LIMIT 6) ORDER BY id")
+        "SELECT message_id AS id, created_at, substr(text, 1, 4000) FROM session_user_words WHERE session_id = ? \
+         AND session_user_words.id IN (SELECT id FROM session_user_words WHERE session_id = ? ORDER BY id LIMIT 3) \
+         UNION SELECT message_id AS id, created_at, substr(text, 1, 4000) FROM session_user_words WHERE session_id = ? \
+         AND session_user_words.id IN (SELECT id FROM session_user_words WHERE session_id = ? ORDER BY id DESC LIMIT 6) ORDER BY id")
         .bind(&p.session_id).bind(&p.session_id).bind(&p.session_id).bind(&p.session_id).fetch_all(storage.pool()).await?;
     for (id, at, body) in users {
         // Every selected directive gets a record, including the latest ones.
@@ -307,6 +309,24 @@ pub(crate) fn refresh_runtime_roster(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn transfer_uses_authored_user_words_including_tray_answers() {
+        let storage = Storage::memory().await.unwrap();
+        storage.create_session("s1", "transfer", None).await.unwrap();
+        storage.ensure_session_roster("s1", 1).await.unwrap();
+        let participant = storage.participants_for_session("s1").await.unwrap().remove(0);
+        storage.post_to_channel("s1", "user", None, "text", "HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN", None).await.unwrap();
+        let typed = storage.post_to_channel("s1", "user", None, "text", "REAL-HUMAN-DIRECTION", None).await.unwrap();
+        storage.record_user_words("s1", typed.message_id(), "REAL-HUMAN-DIRECTION").await.unwrap();
+        let answer = storage.post_to_channel("s1", "user", None, "system_notice", "answer wrapper and command output", None).await.unwrap();
+        storage.record_user_words("s1", answer.message_id(), "HUMAN-CHOICE: keep working").await.unwrap();
+        let text = transfer_context(&storage, &participant).await.unwrap();
+        assert!(!text.contains("HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN"), "origin=user alone is not authorship");
+        assert!(text.contains("REAL-HUMAN-DIRECTION"));
+        assert!(text.contains("HUMAN-CHOICE: keep working"), "tray answers are human direction too");
+        assert!(!text.contains("answer wrapper and command output"));
+    }
     #[tokio::test]
     async fn transfer_caps_encoded_bytes_and_keeps_every_selected_user_record() {
         let storage = Storage::memory().await.unwrap();
@@ -352,6 +372,7 @@ mod tests {
                     .unwrap()
                     .message_id(),
             );
+            storage.record_user_words("s1", *ids.last().unwrap(), &format!("directive-{n} {body}")).await.unwrap();
         }
         let before = storage.cursor_for(participant.id).await.unwrap();
         let text = transfer_context(&storage, &participant).await.unwrap();
