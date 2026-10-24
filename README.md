@@ -55,6 +55,12 @@ are enforced at the tool gate, so unticking one takes the ability away rather th
 merely asking the agent not to use it. A participant is shown as `ROLE · Model`,
 never as a persona.
 
+**Change agents during a session.** Open the session's Settings gear to add a saved
+role/model, remove an agent, or change its model/provider/account. Requests wait for
+the current turn; pending requests can be cancelled. A model change starts fresh
+context with bounded session excerpts and can consume substantial usage. Other
+agents keep their context; stored history and pending decisions remain available.
+
 **You are the orchestrator.** You give the task, answer the questions participants
 park for you, approve the steps that need a human, and decide when the work is
 done. They don't run off on their own; you conduct.
@@ -318,6 +324,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `session_doc_edit(slug, old_string, new_string, expect_occurrences?)` | Correct a passage of an existing session doc in place — exact old→new, the count asserted; the previous body is archived. |
 | `session_doc_search(query?, phase?)` | List this session's scratch docs, bodies within a 48 KB budget (a larger doc is listed with its size and headings); `phase` filter for cross-phase retrieval. |
 | `session_doc_read(slug, heading?, lines?, grep?)` | Read a session doc by slug — whole, or one section, a line range, or the matching lines. |
+| `session_history(source?, record_id?, message_id?, before_id?, offset_bytes?, limit?)` | Read your own session's raw channel or recorded human words under `read_channel`; bounded pages and long-body offsets, without advancing delivery cursors. |
 | `web_search(query, engine?)` | Search the web via a headless webview, so non-first-party models without a server-side search tool can fetch live results. |
 | `terminal_exec(command, wait_ms?, block?, to_job?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits until the shell is back at its prompt and the output is quiet, and returns the captured tail (a command still holding the terminal at `wait_ms` is named); `block:false` for long-running processes. While another program holds the terminal (a pager, a server, a REPL) the command is refused naming it, unless `to_job:true` says to type into that program; a password prompt (`sudo`, `ssh`…) is never typed into. Gate-matched commands are refused (route via `action_gate`). |
 | `terminal_read(lines?, raw?)` | Tail of the session terminal's scrollback as plain text, as the screen shows it — escape sequences removed, `\r` and backspace redraws applied (default 100 lines, max 500; `raw:true` for the bytes) — evidence agents can paste into chat or IPAV docs. `terminal_exec`'s output is rendered the same way. |

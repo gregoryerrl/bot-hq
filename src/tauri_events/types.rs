@@ -187,6 +187,15 @@ impl AgentContextEvent {
     pub const EVENT_NAME: &'static str = "session:agent_context";
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+pub struct ParticipantChangedEvent {
+    pub session_id: String,
+    pub agent: String,
+}
+impl ParticipantChangedEvent {
+    pub const EVENT_NAME: &'static str = "session:participant_changed";
+}
+
 /// Emitted when a session's activity changes (idle / busy / awaiting-user /
 /// cancelling), so the chat input can lock while a participant is working and
 /// re-open when it's the user's turn. `state` is the `SessionActivity::as_str`

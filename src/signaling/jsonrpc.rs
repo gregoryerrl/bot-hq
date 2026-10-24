@@ -1846,6 +1846,15 @@ async fn call_tool(
             bridge.note_doc_seen_whole(&caller.session_id, &caller.agent, &d).await;
             Ok(ToolCallResult::text(with(meta, json!({ "body": d.body }))))
         }
+        "session_history" => {
+            let request: crate::storage::HistoryRequest = serde_json::from_value(args.clone())
+                .map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
+            request.validate().map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
+            let storage = bridge.storage_handle().await
+                .ok_or_else(|| JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, "storage unavailable"))?;
+            let page = storage.read_session_history(&caller.session_id, &request).await.map_err(internal_err_no_prefix)?;
+            Ok(result_json(&page, "{}"))
+        }
         "cl_index_search" => {
             let project = args.get("project").and_then(Value::as_str);
             let query = args.get("query").and_then(Value::as_str);
@@ -4740,6 +4749,39 @@ mod tests {
         serde_json::from_str(reply).unwrap_or_else(|e| panic!("a JSON reply ({e}): {reply}"))
     }
 
+    #[tokio::test]
+    async fn session_history_wire_requires_channel_access_and_authenticates_its_scope() {
+        let (bridge, storage) = two_role_session().await;
+        let id = storage.post_to_channel("s1", "user", None, "text", "raw wrapper", None).await.unwrap().message_id();
+        storage.record_user_words("s1", id, "real human choice").await.unwrap();
+        storage.create_session("other", "other", None).await.unwrap();
+        let foreign = storage.post_to_channel("other", "user", None, "text", "other session private", None).await.unwrap().message_id();
+        let raw = parsed(&tool(&bridge, caller(), "session_history", json!({"message_id":id})).await.unwrap());
+        assert_eq!(raw["records"][0]["body"], "raw wrapper");
+        let human = parsed(&tool(&bridge, eyes_caller(), "session_history", json!({"source":"human_words", "message_id":id})).await.unwrap());
+        assert_eq!(human["records"][0]["body"], "real human choice");
+        assert_eq!(human["records"][0]["origin"], "human");
+        let absent = parsed(&tool(&bridge, caller(), "session_history", json!({"record_id":foreign})).await.unwrap());
+        assert_eq!(absent["records"], json!([]));
+        assert_eq!(tool(&bridge, caller(), "session_history", json!({"session_id":"other"})).await.unwrap_err().code, JsonRpcError::INVALID_PARAMS);
+        for args in [json!({"offset_bytes":1}), json!({"record_id":id,"before_id":id}), json!({"limit":11}), json!({"record_id":0})] {
+            assert_eq!(tool(&bridge, caller(), "session_history", args).await.unwrap_err().code, JsonRpcError::INVALID_PARAMS);
+        }
+        let mut denied = caller();
+        denied.capabilities = crate::agents::ResolvedCapabilities::Known(crate::agents::CapabilitySet::default());
+        let denial = call_tool("session_history", json!({"message_id":id}), &denied, &bridge).await.unwrap();
+        assert!(denial.is_error);
+        assert!(serde_json::to_string(&denial).unwrap().contains("read_channel"));
+        denied.capabilities = crate::agents::ResolvedCapabilities::Unreadable { reason: "test failure" };
+        assert!(call_tool("session_history", json!({}), &denied, &bridge).await.unwrap().is_error);
+        for p in storage.participants_for_session("s1").await.unwrap() {
+            assert_eq!(storage.cursor_for(p.id).await.unwrap(), 0);
+        }
+        assert!(!crate::signaling::protocol::always_loaded_for("session_history", &caller().capabilities));
+        let descriptor = crate::signaling::protocol::tool_descriptors().iter().find(|d| d.name == "session_history").unwrap();
+        assert!(descriptor.description.contains("read_channel"));
+    }
+
     /// Feedback #75: a bare `session_doc_search` returned every doc's whole
     /// body — 476,583 characters in one session — and overflowed the tool
     /// result. Bodies now ride within a budget, newest first; a doc that does
@@ -5018,7 +5060,11 @@ mod tests {
 
         let file = crate::agents::handoff::file_path(handoffs.path(), "s1", "hands").unwrap();
         let rendered = std::fs::read_to_string(&file).unwrap();
-        let footer = rendered.rsplit("[bot-hq]").next().unwrap();
+        // A current-roster host block may follow the dated handoff. Select
+        // its actual continuation instruction, then execute it unchanged.
+        let footer = rendered.rsplit("[bot-hq]")
+            .find(|part| part.contains("Read the rest: session_doc_read("))
+            .expect("truncated handoff must retain a callable continuation");
         assert!(footer.contains("Read the rest: session_doc_read(slug: \"handoff-hands\", lines: \""), "{footer}");
         let from = footer.find("lines: \"").unwrap() + "lines: \"".len();
         let lines_arg = &footer[from..from + footer[from..].find('"').unwrap()];

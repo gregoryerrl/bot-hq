@@ -109,7 +109,7 @@ const FINDINGS_KEYS = ["list_session_findings"] as const;
 // often already mounted and read them, so the SpawnBadge stayed blank for the
 // session. The spawn's first observable event is the agent's health flip, so
 // the roster refetches on `session:agent_health` and on the resync sweep.
-const ROSTER_KEYS = ["list_session_participants"] as const;
+const ROSTER_KEYS = ["list_session_participants", "get_session_participant_controls"] as const;
 // Plugin registry: install / enable / disable / uninstall / crash all change
 // `list_installed_plugins`, which the tab row (Shell) and the manager panel
 // share as one cache entry. Round 8: the two components each carried their own
@@ -199,6 +199,15 @@ function GlobalEventSync() {
     },
     [invalidate, clearHealth, clearActivity, clearContext, clearChat],
   );
+  const onParticipantChanged = useCallback(
+    (p: { session_id: string; agent: string }) => {
+      useContextStore.getState().clearAgent(p.session_id, p.agent);
+      for (const command of ["list_session_participants", "get_session_participant_controls", "get_session"]) {
+        void queryClient.invalidateQueries({ queryKey: [command, { sessionId: p.session_id }] });
+      }
+      void queryClient.invalidateQueries({ queryKey: ["get_session_runtime"] });
+    }, [queryClient],
+  );
   const onAgentContext = useCallback(
     (p: {
       session_id: string;
@@ -261,7 +270,12 @@ function GlobalEventSync() {
   // lagged and dropped events — refetch every event-backed query so the UI
   // can't be left stale. This is what lets us drop the fixed-interval safety
   // polls (PendingTray/phase/pending-choices) that previously filled this gap.
-  const onResync = useCallback(() => invalidate(RESYNC_KEYS), [invalidate]);
+  const onResync = useCallback(() => {
+    // The lost broadcast may have replaced a runtime. There is no live-meter
+    // readback endpoint: forget uncertain readings until the new pump reports.
+    useContextStore.setState({ bySession: {} });
+    invalidate(RESYNC_KEYS);
+  }, [invalidate]);
 
   // A staged message DELIVERED clears that session's persisted composer draft
   // — for ANY session, mounted or not. `SessionView` clears the live box and
@@ -311,6 +325,7 @@ function GlobalEventSync() {
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:agent_context", onAgentContext, [onAgentContext]);
+  useTauriEvent("session:participant_changed", onParticipantChanged, [onParticipantChanged]);
   useTauriEvent("session:attention", onAttention, [onAttention]);
   useTauriEvent("session:activity", onActivity, [onActivity]);
   useTauriEvent("session:resync", onResync, [onResync]);

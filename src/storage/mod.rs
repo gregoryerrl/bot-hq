@@ -47,6 +47,7 @@ mod plugins;
 mod projects;
 mod retrieval_events;
 mod session_docs;
+mod session_history;
 mod sessions;
 mod time;
 mod tray;
@@ -69,6 +70,7 @@ pub use participant_changes::{ParticipantChange, ParticipantChangeOrigin, Partic
 pub use participant_mutations::{PreparedParticipantChange, ParticipantSpawnMetadata};
 pub use feedback::{FEEDBACK_KINDS, FEEDBACK_STATUSES};
 pub use session_docs::{phase_doc_slug, reviewer_codoc_phase, DOC_KIND_USER_ACTION, REVIEWER_CODOC_SLUGS};
+pub use session_history::{HistoryRequest, HistorySource, HistoryPage, HistoryRecord, HISTORY_REPLY_BYTES};
 #[cfg(test)]
 pub(crate) use participants::untimed_wire;
 pub use tray::{

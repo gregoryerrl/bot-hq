@@ -86,6 +86,22 @@ pub fn file_path(handoff_dir: &Path, session_id: &str, participant: &str) -> Opt
 /// still written down, and how to start a doc. Both open with
 /// [`INJECT_MARKER`], and the whole text is at most [`FILE_BUDGET_BYTES`].
 pub fn render(session_id: &str, participant: &str, doc: Option<(&str, &str)>) -> String {
+    render_with_roster(session_id, participant, doc, "")
+}
+
+/// The host roster is separate from the author's dated handoff. Reserve its
+/// bytes inside the existing hook budget without changing the handoff date.
+pub fn render_with_roster(session_id: &str, participant: &str, doc: Option<(&str, &str)>, roster: &str) -> String {
+    let cut = crate::text::floor_char_boundary(roster, 6_800);
+    let mut roster = if cut < roster.len() {
+        format!("{}\n[bot-hq] Roster details truncated; recent host notices in session_history retain the changes.\n", &roster[..cut])
+    } else { roster.to_string() };
+    let body = render_budgeted(session_id, participant, doc, FILE_BUDGET_BYTES.saturating_sub(roster.len()));
+    roster.insert_str(0, &body);
+    roster
+}
+
+fn render_budgeted(session_id: &str, participant: &str, doc: Option<(&str, &str)>, budget: usize) -> String {
     let slug = doc_slug(participant);
     let Some((body, updated_at)) = doc.filter(|(b, _)| !b.trim().is_empty()) else {
         return format!(
@@ -109,7 +125,7 @@ pub fn render(session_id: &str, participant: &str, doc: Option<(&str, &str)>) ->
     );
     // Room for the longest footer: two 20-digit byte counts and a line number.
     const FOOTER_RESERVE: usize = 240;
-    let room = FILE_BUDGET_BYTES.saturating_sub(header.len() + FOOTER_RESERVE + AGE_STAMP_RESERVE);
+    let room = budget.saturating_sub(header.len() + FOOTER_RESERVE + AGE_STAMP_RESERVE);
     if body.len() <= room {
         return format!("{header}{body}\n---\n[bot-hq] End of `{slug}`.\n");
     }

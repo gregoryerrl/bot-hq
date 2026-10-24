@@ -20,7 +20,7 @@ use crate::signaling::{SignalingBridge, SignalingEvent};
 use crate::storage::Storage;
 use crate::tauri_events::batch_emitter::BatchEmitter;
 use crate::tauri_events::types::{
-    AgentContextEvent, AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent,
+    AgentContextEvent, AgentHealthEvent, AwaitingUser, ChoiceResolvedEvent, DocChangedEvent, ParticipantChangedEvent,
     FindingsChangedEvent, GateUrgentEvent, PendingChoiceEvent, PhaseChangedEvent,
     SessionActivityEvent, SessionAttentionEvent, SessionClosedEvent, SESSION_HALT_CLEARED,
     SESSION_RESYNC, SESSION_STAGE_DELIVERED,
@@ -192,6 +192,10 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 AgentContextEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
+        }
+        SignalingEvent::ParticipantChanged { session_id, agent } => {
+            emit_event(ParticipantChangedEvent::EVENT_NAME,
+                serde_json::to_value(ParticipantChangedEvent { session_id, agent }).unwrap_or(Value::Null));
         }
         SignalingEvent::SessionActivity {
             session_id,
@@ -391,5 +395,15 @@ mod tests {
         let captured = captured_events.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(captured[0].0, "session:halt_cleared");
+    }
+
+    #[tokio::test]
+    async fn roster_runtime_event_reaches_the_ui_with_target_identity() {
+        let emitter = BatchEmitter::new(|_| {}, test_storage().await);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        route(SignalingEvent::ParticipantChanged { session_id: "s1".into(), agent: "eyes-2".into() }, &emitter,
+            &move |name: &str, payload: Value| captured.lock().unwrap().push((name.to_string(), payload)));
+        assert_eq!(*events.lock().unwrap(), vec![("session:participant_changed".into(), serde_json::json!({"session_id":"s1", "agent":"eyes-2"}))]);
     }
 }

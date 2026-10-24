@@ -256,6 +256,7 @@ impl Fixture {
         } else {
             Storage::memory().await.unwrap()
         };
+        let storage = storage.with_handoff_dir(temp.path().join("data/.local/handoffs"));
         for id in ["old", "new"] {
             storage
                 .upsert_model(&Model {
@@ -518,6 +519,11 @@ async fn worker_switches_both_connectors_without_restarting_peers_and_receives_n
     for codex in [false, true] {
         let f = Fixture::new(codex).await;
         let (services, mut spawned) = services(false);
+        let mut changes = f.state.bridge.subscribe();
+        let peer_handoff = crate::agents::handoff::doc_slug(&f.rows[1].slug);
+        f.state.storage.upsert_session_document("s1", &peer_handoff, "Keep this handoff", None).await.unwrap();
+        let before_handoff = f.state.storage.session_document_by_slug("s1", &peer_handoff).await.unwrap().unwrap();
+        f.state.storage.write_handoff_due("s1", &f.rows[1].slug, "Still owed");
         let original_peer = f.state.sessions.lock().await["s1"].participants[1]
             .handle
             .incarnation()
@@ -525,6 +531,23 @@ async fn worker_switches_both_connectors_without_restarting_peers_and_receives_n
             .to_string();
         f.start("switch", f.switch(), services).await;
         assert_eq!(f.done("switch").await.status, "applied");
+        let mut changed = vec![];
+        while let Ok(event) = changes.try_recv() {
+            if let crate::signaling::SignalingEvent::ParticipantChanged { session_id, agent } = event {
+                assert_eq!(session_id, "s1"); changed.push(agent);
+            }
+        }
+        assert_eq!(changed, vec![f.rows[0].slug.clone()]);
+        let controls = crate::tauri_cmd::participant_changes::controls(&f.state.storage, "s1").await.unwrap();
+        assert_eq!(controls.latest_change.unwrap().status, "applied");
+        assert_eq!(controls.selections.iter().find(|s| s.participant_id == f.rows[0].id).unwrap().model_id.as_deref(), Some("new"));
+        let dir = f._temp.path().join("data/.local/handoffs");
+        let mirror = std::fs::read_to_string(crate::agents::handoff::file_path(&dir, "s1", &f.rows[1].slug).unwrap()).unwrap();
+        assert!(mirror.contains("\"model\":\"new\""), "unchanged peers must see the new roster: {mirror}");
+        assert!(mirror.contains("Keep this handoff"));
+        assert_eq!(crate::agents::handoff::written_at(&mirror), Some(before_handoff.updated_at.as_str()));
+        assert!(crate::agents::handoff::due_path(&dir, "s1", &f.rows[1].slug).unwrap().exists(), "refresh is not an authored handoff");
+        assert!(mirror.len() <= crate::agents::handoff::FILE_BUDGET_BYTES);
         let mut fresh = spawned.recv().await.unwrap();
         assert_eq!(fresh.config.model_name, "new");
         assert_eq!(fresh.resume, None);

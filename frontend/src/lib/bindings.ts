@@ -57,6 +57,30 @@ async listSessionParticipants(sessionId: string) : Promise<Result<ParticipantVie
     else return { status: "error", error: e  as any };
 }
 },
+async getSessionParticipantControls(sessionId: string) : Promise<Result<SessionParticipantControls, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_participant_controls", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async changeSessionParticipant(sessionId: string, requestId: string, revision: number, request: ParticipantChangeRequest) : Promise<Result<ParticipantChangeView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("change_session_participant", { sessionId, requestId, revision, request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async cancelSessionParticipantChange(sessionId: string, requestId: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_session_participant_change", { sessionId, requestId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 /**
  * Per-participant delivery lag for a session — the visibility half of the
  * anti-starvation work: 137 events across 38 sessions went undiagnosed
@@ -2081,6 +2105,8 @@ undelivered_peer_texts: number;
  * drift.
  */
 starving: boolean }
+export type ParticipantChangeRequest = { kind: "add"; role_id: number; model_id: string; label: string | null } | { kind: "remove"; participant_id: number } | { kind: "switch_model"; participant_id: number; model_id: string }
+export type ParticipantChangeView = { id: string; request: ParticipantChangeRequest; status: string; error: string | null }
 /**
  * One row of the dialog's participant list: a role, optionally a model that
  * overrides the role's default (rc3 **D8**), and that row's own spawn knobs
@@ -2107,6 +2133,7 @@ color: string | null;
  * ordinal (rc3 **D20**, migration 0053).
  */
 label: string | null }
+export type ParticipantSelectionView = { participant_id: number; model_id: string | null }
 /**
  * One participant's composed system prompt — the ~48 KB of standing
  * instruction bot-hq assembled for it at spawn (rc3 **P1**).
@@ -2586,6 +2613,7 @@ multi_participant: boolean;
  * (via `list_active_sessions_with_preview`).
  */
 last_message: string | null; last_author: string | null }
+export type SessionParticipantControls = { revision: number; closed: boolean; max_participants: number; selections: ParticipantSelectionView[]; latest_change: ParticipantChangeView | null }
 export type SessionProjectInfo = { 
 /**
  * Resolved project name, or None for a repo-less session.

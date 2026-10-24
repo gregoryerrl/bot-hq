@@ -115,41 +115,24 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Added
 
-- **Session agent controls (in progress).** Durable change requests retain
-  their status and recovery checkpoint across restart. Repeated requests are
-  idempotent; stale roster edits, unavailable selections and removal of the
-  last active agent are refused. Roster preparation and rollback are now
-  transactional; close/reopen settles unfinished changes, and failed additions
-  retain their history. A conflicting newer edit is preserved and recorded
-  instead of preventing a close. The host can now reserve a completed turn,
-  keeping Pause and queued directions intact while replacing the participant's
-  input and turn identity together. Loss of that reservation's worker leaves a
-  recovery recap. Retired runtimes now have a fence for pending host writes,
-  late events, teardown and delayed retries; token revocation preserves a
-  replacement's newer credential. Process callbacks keep their identity through
-  queued turns and Pause, so old wakeups, joins and interrupts can be discarded
-  without dropping user mentions or recorded halts. Candidate startup can stage
-  metadata until publication; a late probe cannot overwrite a closed or
-  rolled-back participant, and publication detects intervening roster edits.
-  Session startup recovers interrupted changes before selecting agents; a
-  recovery conflict stops startup with a recap instead of spawning mixed state.
-  The host worker now changes one runtime at a completed turn, waits for
-  connector shutdown receipts, replaces its input and epoch, and restores the
-  prior runtime on startup failure. Close/restart joins candidate cleanup before
-  removing session resources. A change's database writes and queued-review
-  refresh no longer hold the global lock used by other sessions' controls.
-  Activity, watchdog and reviewer registration
-  follow the changed roster; outstanding review bodies are delivered again.
-  Candidate prompts include bounded, attributed session excerpts; human
-  instructions come from the authorship ledger and include tray choices,
-  without treating host/plugin text or command output as the user's words.
-  Added agents start at a captured history boundary without false delivery
-  receipts. Model changes preserve unread messages. Startup excerpts stop at
-  that boundary, scale to a conservative allowance for the configured window,
-  and identify omitted or truncated text; later messages arrive normally.
-  The controls
-  and complete history-transfer flow are still being connected; these operations
-  are not yet exposed in Session Settings.
+- **Agents can retrieve older records from their own session.** The
+  `session_history` tool pages raw channel history or the recorded human
+  instructions and tray choices separately. Long records can be read in
+  bounded chunks. Retrieval requires channel-read permission and changes
+  neither the turn cursor nor delivery receipts; context-transfer prompts
+  point to it for omitted text.
+
+- **Add, remove and change agents in Session Settings.** Choose a saved role
+  and model, or switch an existing agent to another model, provider or account.
+  Changes wait for a completed turn; pending requests can be cancelled, and
+  progress or failure remains visible after reopening Settings. The last active
+  agent cannot be removed. Other agents keep their conversations; history,
+  findings and pending gates stay available after removal.
+  Model changes start fresh context with bounded, attributed excerpts and a
+  usage warning. Startup failure restores the prior configuration and runtime;
+  an unrecoverable failure leaves a recovery recap. Current roster facts are
+  refreshed in compaction handoffs without changing their author dates, and
+  only the affected agent's live context meter is reset.
 - **Auto-allowed publications still receive review.** Both connectors and
   `action_gate` queue unread publication content for the reviewer, then the
   background worker runs it without a user approval card. The queue survives

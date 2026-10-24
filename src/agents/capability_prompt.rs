@@ -31,9 +31,10 @@
 //! |---|---|
 //! | every tool in [`capability::required_for`], `close_session` included (rc3 D16; `jsonrpc::PARITY_HOLD` is empty) | the tool gate, per call |
 //! | `edit_files` | spawn: the child's permission posture + which MCP servers it inherits |
-//! | `read_channel`, `post_channel`, `run_bash` | nowhere — described here only |
+//! | `read_channel` | `session_history` calls; ordinary turn delivery remains instruction-carried |
+//! | `post_channel`, `run_bash` | described here only |
 //!
-//! Those last four rows are why the preamble in [`render`] tells the agent to
+//! The instruction-carried permissions are why the preamble in [`render`] tells the agent to
 //! treat a refusal as binding rather than promising that the call would fail.
 //! Wording it the other way would be the exact defect this module was written
 //! against, pointed in the opposite direction.

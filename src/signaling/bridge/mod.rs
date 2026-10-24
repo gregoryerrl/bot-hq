@@ -298,6 +298,8 @@ pub enum SignalingEvent {
         used_tokens: u64,
         context_window: u64,
     },
+    /// Runtime replacement/removal invalidates only this agent's live meter.
+    ParticipantChanged { session_id: String, agent: String },
     /// A session's activity changed (idle / busy / awaiting-user /
     /// cancelling). Drives the chat-input lock + Cancel button: the UI disables
     /// input while `busy`/`cancelling`, re-enables on `idle`/`awaiting_user`.
@@ -2472,6 +2474,12 @@ impl SignalingBridge {
             agent: agent.to_string(),
             used_tokens,
             context_window,
+        });
+    }
+
+    pub fn notify_participant_changed(&self, session_id: &str, agent: &str) {
+        let _ = self.event_tx.send(SignalingEvent::ParticipantChanged {
+            session_id: session_id.into(), agent: agent.into(),
         });
     }
 

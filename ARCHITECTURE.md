@@ -890,7 +890,7 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (47)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (48)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
@@ -899,12 +899,20 @@ since D37 — see "The phase-advance vote"),
 `disposition_finding`, `check_open_findings`, `get_finding`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_edit`, `session_doc_search`,
-`session_doc_read`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
+`session_doc_read`, `session_history`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
 `cl_write_file`, `cl_edit_file`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`,
 `terminal_exec`, `terminal_read`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
+
+`session_history` requires `read_channel` and fixes its scope to the
+authenticated caller's session. It returns raw channel rows or explicit
+human-word ledger records, newest first (10 per page,48KB encoded). Long bodies
+use source-record IDs and resumable UTF-8 byte offsets; a channel message ID can
+select multiple human-ledger records. It never advances ring cursors or records
+delivery. Metadata clipping is marked; wrappers are never re-labelled as human
+words. Its descriptor stays deferred.
 
 `tools/list` is unfiltered but answered **per caller**: a core set
 (`protocol::ALWAYS_LOADED_TOOLS` — the ring verbs, the session-document tools,
@@ -1630,7 +1638,7 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   color, label, effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded)
   — the roster; capabilities are the invite-time snapshot the runtime
   enforces.
-- `session_participant_changes` (0107, controls in progress) records add,
+- `session_participant_changes` (0107) records add,
   remove and model-switch intent, authenticated host-supplied origin,
   expected roster revision, a fingerprint of selected role/model settings,
   status/timestamps/error and a write-once recovery checkpoint. One pending
@@ -1714,9 +1722,15 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   Each excerpt reports source/shown bytes and truncation, and the prompt states
   which history was omitted. Channel `origin=user` is not proof of human
   authorship: it can also carry host/plugin text or command output.
-  Full bootstrap/history budgeting, meter reset, UI controls and delegated-agent
-  authorization remain integration work; no Session Settings control invokes the
-  host API yet. A connector startup receipt is not proof of a successful model turn.
+  Session Settings invokes this worker through typed request/status/cancel commands.
+  It shows saved role/model choices, last-active and capacity guards, a context-usage
+  warning and durable operation status. Publication emits `session:participant_changed`
+  before starting the replacement pump; the frontend refreshes the roster and drops
+  only that participant's old live context reading. Existing peers' handoff mirrors
+  gain a bounded host roster section, within the existing file budget, without
+  rewriting their dated source docs or clearing handoff reminders. Omitted records
+  are available through `session_history`. Delegated-agent authorization is separate
+  work. A connector startup receipt is not proof of a successful model turn.
 - `participant_cursors` (participant → last read message id) and
   `participant_deliveries` (participant, message_id, delivered_at,
   withheld_reason) — the ring's per-participant read position and its

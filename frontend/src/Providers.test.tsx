@@ -7,6 +7,7 @@ import { Providers } from "./Providers";
 import { useActivityStore } from "./stores/activity";
 import { useHealthStore } from "./stores/health";
 import { slotKey } from "./lib/participants";
+import { useContextStore } from "./stores/context";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -87,6 +88,22 @@ describe("Providers — the slot-shaped runtime wire", () => {
     });
   });
 
+  it("refreshes a changed roster and clears only the replaced agent's meter", async () => {
+    let client: import("@tanstack/react-query").QueryClient | undefined;
+    function Probe() { client = useQueryClient(); return null; }
+    render(<Providers><Probe /></Providers>);
+    await waitFor(() => expect(handlers.has("session:participant_changed")).toBe(true));
+    const reading = { usedTokens: 900, contextWindow: 1000 };
+    useContextStore.setState({ bySession: { s1: { hands: reading, eyes: reading }, s2: { hands: reading } } });
+    const key = ["list_session_participants", { sessionId: "s1" }];
+    client!.setQueryData(key, []);
+    emit("session:participant_changed", { session_id: "s1", agent: "hands" });
+    expect(useContextStore.getState().bySession.s1.hands).toBeUndefined();
+    expect(useContextStore.getState().bySession.s1.eyes).toEqual(reading);
+    expect(useContextStore.getState().bySession.s2.hands).toEqual(reading);
+    expect(client!.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
   // issues.md #3: the composer's persisted draft is cleared by SessionView's
   // handler ONLY for the session on screen. A staged message delivered to any
   // other session left `bothq:draft:<sid>` holding the sent text, and the box
@@ -103,6 +120,11 @@ describe("Providers — the slot-shaped runtime wire", () => {
     // And the resync handler is subscribed at all.
     renderProviders();
     await waitFor(() => expect(handlers.has("session:resync")).toBe(true));
+    // The dropped event may have replaced a model. Query invalidation alone
+    // cannot repair an event-only meter; old usage must become unknown.
+    useContextStore.setState({ bySession: { s1: { hands: { usedTokens: 900, contextWindow: 1000 } } } });
+    emit("session:resync", {});
+    expect(useContextStore.getState().bySession.s1?.hands).toBeUndefined();
   });
 
   it("clears a delivered session's persisted draft even when no view for it is mounted", async () => {

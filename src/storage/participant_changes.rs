@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ParticipantChangeRequest {
     Add { role_id: i64, model_id: String, label: Option<String> },
@@ -159,6 +159,11 @@ pub(super) async fn validate_request(
 }
 
 impl Storage {
+    pub async fn latest_participant_change(&self, session_id: &str) -> Result<Option<ParticipantChange>> {
+        Ok(sqlx::query_as(&format!("SELECT {COLUMNS} FROM session_participant_changes WHERE session_id = ? ORDER BY rowid DESC LIMIT 1"))
+            .bind(session_id).fetch_optional(&self.pool).await?)
+    }
+
     pub async fn roster_revision(&self, session_id: &str) -> Result<i64> {
         sqlx::query_scalar("SELECT roster_revision FROM sessions WHERE id = ?")
             .bind(session_id).fetch_optional(&self.pool).await?.context("session does not exist")

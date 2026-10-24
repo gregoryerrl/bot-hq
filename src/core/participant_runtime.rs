@@ -457,6 +457,11 @@ impl AppState {
             } else { self.storage.finish_participant_change(&row.session_id, &row.id, None).await? };
             anyhow::ensure!(committed, "participant publication lost to session closure or recovery");
             published = true;
+            // Reset before starting the new pump so its first real reading
+            // cannot be erased by a delayed reset from this change.
+            if let Some(changed) = roster.iter().find(|p| p.id == target) {
+                self.bridge.notify_participant_changed(&row.session_id, &changed.slug);
+            }
             {
                 let mut sessions = self.sessions.lock().await;
                 let handle = sessions.get_mut(&row.session_id).filter(|h| Self::owns_change(h, context, run)).context("parent runtime changed before installation")?;
@@ -464,6 +469,7 @@ impl AppState {
                 if let Some(fresh) = candidate.take() { self.install_candidate(handle, fresh, context); }
                 refresh_runtime_roster(handle, &self.storage, &self.bridge, &roster);
             }
+            self.storage.refresh_roster_handoffs(&row.session_id).await;
             self.bridge.reconcile_roster_publications(&row.session_id).await?;
             Ok(())
         }.await;
@@ -669,6 +675,7 @@ impl AppState {
                 handle
                     .participants
                     .retain(|p| p.participant_id != Some(old.participant.id));
+                self.bridge.notify_participant_changed(&row.session_id, &old.participant.slug);
                 self.install_candidate(handle, fresh.take().unwrap(), context);
                 Ok(())
             }
@@ -711,6 +718,7 @@ impl AppState {
                 .context("parent runtime changed after rollback")?;
             refresh_runtime_roster(handle, &self.storage, &self.bridge, &roster);
         }
+        self.storage.refresh_roster_handoffs(&row.session_id).await;
         self.bridge
             .reconcile_roster_publications(&row.session_id)
             .await?;

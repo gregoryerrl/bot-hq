@@ -304,6 +304,7 @@ async fn transfer_context(
         shown += 1;
     }
     out.push_str(&format!("\n{shown} excerpt records included. Truncated records and omitted history are not a claim of full context transfer.\n"));
+    out.push_str("Retrieve omitted channel records with session_history. For a human excerpt's id use source=human_words and message_id=id; follow the returned record_id/next_offset_bytes for long text. This read never advances delivery. Read full documents with session_doc_read.\n");
     debug_assert!(out.len() <= budget);
     Ok(out)
 }

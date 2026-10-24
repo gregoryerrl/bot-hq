@@ -214,6 +214,22 @@ impl Storage {
     /// handoff directory. Best-effort by design: the doc write has already
     /// succeeded, so a failed mirror is logged and never returned.
     pub async fn sync_handoff_file(&self, session_id: &str, slug: &str) {
+        self.mirror_handoff_file(session_id, slug, true).await;
+    }
+
+    /// Roster changes do not count as an author's handoff update: keep the
+    /// reminder and the human-word cutoff, and only replace the host section.
+    pub async fn refresh_roster_handoffs(&self, session_id: &str) {
+        if self.handoff_dir.is_none() { return; }
+        match self.participants_for_session(session_id).await {
+            Ok(rows) => for row in rows.iter().filter(|p| p.enabled) {
+                self.mirror_handoff_file(session_id, &crate::agents::handoff::doc_slug(&row.slug), false).await;
+            },
+            Err(e) => tracing::warn!(?e, session_id, "reading roster to refresh handoffs"),
+        }
+    }
+
+    async fn mirror_handoff_file(&self, session_id: &str, slug: &str, clear_due: bool) {
         let (Some(dir), Some(participant)) =
             (self.handoff_dir.as_deref(), crate::agents::handoff::participant_of(slug))
         else {
@@ -224,7 +240,7 @@ impl Storage {
         };
         // A write of the handoff doc is what the mid-turn reminder asked for
         // (B1e): the due file goes, whatever reading wrote it.
-        if let Some(due) = crate::agents::handoff::due_path(dir, session_id, participant) {
+        if let Some(due) = crate::agents::handoff::due_path(dir, session_id, participant).filter(|_| clear_due) {
             crate::agents::handoff::clear_due(&due);
         }
         let doc = match self.session_document_by_slug(session_id, slug).await {
@@ -234,10 +250,31 @@ impl Storage {
                 return;
             }
         };
-        let text = crate::agents::handoff::render(
+        let mut roster = String::new();
+        match self.participants_for_session(session_id).await {
+            Ok(rows) if !rows.is_empty() => {
+                roster.push_str("\n[bot-hq] Current enabled session roster (host snapshot, refreshed on membership/model changes). This supersedes older roster descriptions; each participant's grants are listed, not granted to you:\n");
+                for row in rows.into_iter().filter(|p| p.enabled).take(super::MAX_SESSION_PARTICIPANTS) {
+                    let model = match row.model_id.as_deref() {
+                        Some(id) => self.get_model(id).await.ok().flatten().map(|m| m.display_name),
+                        None => None,
+                    };
+                    let cap = |s: &str| s[..crate::text::floor_char_boundary(s, 160)].to_string();
+                    let entry = serde_json::json!({ "participant": row.slug, "model": model.as_deref().map(cap),
+                        "label": row.label.as_deref().map(cap), "mode": row.participation_mode,
+                        "capabilities": serde_json::from_str::<serde_json::Value>(&row.capabilities).unwrap_or(serde_json::Value::Null) });
+                    roster.push_str(&entry.to_string());
+                    roster.push('\n');
+                }
+            }
+            Ok(_) => {},
+            Err(e) => tracing::warn!(?e, session_id, "reading current roster for handoff"),
+        }
+        let text = crate::agents::handoff::render_with_roster(
             session_id,
             participant,
             doc.as_ref().map(|d| (d.body.as_str(), d.updated_at.as_str())),
+            &roster,
         );
         if let Err(e) = crate::agents::handoff::write_file(&path, &text) {
             tracing::warn!(?e, path = %path.display(), "writing a handoff file");

@@ -22,7 +22,7 @@ pub fn typescript_config() -> specta_typescript::Typescript {
 
 use crate::tauri_cmd::{
     claude_config, cl, docs, feedback, files, findings, messages, models, notifications,
-    plugin_api, plugins, policy, roles, sessions, telemetry, terminal, tool_gate, tray,
+    participant_changes, plugin_api, plugins, policy, roles, sessions, telemetry, terminal, tool_gate, tray,
     updates,
 };
 use tauri_specta::{collect_commands, Builder};
@@ -36,6 +36,9 @@ pub fn builder() -> Builder<tauri::Wry> {
         sessions::get_session_project_info,
         // rc3 D10: the roster read that replaced every brian_*/rain_* pair.
         sessions::list_session_participants,
+        participant_changes::get_session_participant_controls,
+        participant_changes::change_session_participant,
+        participant_changes::cancel_session_participant_change,
         // WS1c: per-participant delivery lag — the starvation chip's read.
         sessions::session_participant_backlogs,
         // rc3 P1: what a running participant was actually told.

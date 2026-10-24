@@ -476,6 +476,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, `active_close_card` / `insert_close_card` (archive intent persisted before review), purge, closed/orphan withdraw | M |
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
+| `src/storage/session_history.rs` | caller-scoped channel/human-ledger pages and UTF-8 byte chunks, encoded reply bounds, no cursor/receipt mutation; consumed by the `session_history` MCP dispatch | S |
 | `src/storage/gate_results.rs` | gate resolution receipts (0106), one-time MCP notices, per-participant compaction mirrors; actual delivery proof persists separately from telemetry retention | S |
 | `src/storage/user_words.rs` | `session_user_words` (0092): the user's own words, recorded by the caller that knows whose they are (`core::Authored`, the tray answer), mirrored to the words file the compaction hook prints | S |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
@@ -758,6 +759,7 @@ every other FE area imports.
 | `frontend/src/app/RolesPanel.tsx` | role CRUD, capability grid, participation mode | L |
 | `frontend/src/app/ModelsPanel.tsx` | saved-model registry + connection test | M |
 | `frontend/src/app/SessionPolicyPanel.tsx`, `frontend/src/components/PolicyForm.tsx`, `frontend/src/components/GatedKeywordList.tsx` | session gear drawer; shared policy editor; gated keyword rows | M / S / S |
+| `frontend/src/app/SessionRosterEditor.tsx`, `frontend/src/lib/participantChanges.ts`, `src/tauri_cmd/participant_changes.rs` | live add/remove/model controls, checked request/status types, thin host worker commands; pending cancellation and durable status | M / S / S |
 | `frontend/src/app/ViolationsPanel.tsx`, `frontend/src/app/FeedbackPanel.tsx`, `frontend/src/app/MeasurementView.tsx` | violations viewer; feedback triage; CL retrieval stats | M / S / S |
 | `frontend/src/app/PromptcodesPanel.tsx` | Settings → Promptcodes: `{code, prompt}` pairs the composer's `/` picker expands (`app_settings` key `promptcodes`) | M |
 | `frontend/src/components/UpdateBanner.tsx` | dismissible update banner | S |

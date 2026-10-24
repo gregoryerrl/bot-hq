@@ -806,9 +806,9 @@ function RoleForm({
           anything unticked is simply not granted. Most boxes are enforced when
           the agent calls the matching tool; <em>Edit files</em> is enforced at
           spawn, by how the agent&rsquo;s process is launched.{" "}
-          <em>Read the channel</em>, <em>Post to the channel</em> and{" "}
-          <em>Run Bash</em> are described to the agent but not yet mechanically
-          enforced.
+          <em>Read the channel</em> gates history lookup; ordinary turn delivery
+          still relies on the agent&rsquo;s instructions. <em>Post to the channel</em>{" "}
+          and <em>Run Bash</em> are also carried by instructions.
         </p>
         {!capsReady ? (
           <p className="font-code-sm text-code-sm text-warning">

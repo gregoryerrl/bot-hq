@@ -23,6 +23,7 @@ interface ContextStore {
    *  provider that doesn't report a window. */
   bySession: Record<string, SessionContext>;
   setContext: (sessionId: string, agent: string, ctx: AgentContext) => void;
+  clearAgent: (sessionId: string, agent: string) => void;
   clearSession: (sessionId: string) => void;
 }
 
@@ -35,6 +36,13 @@ export const useContextStore = create<ContextStore>((set) => ({
         [sessionId]: { ...s.bySession[sessionId], [agent]: ctx },
       },
     })),
+  clearAgent: (sessionId, agent) =>
+    set((s) => {
+      if (!s.bySession[sessionId]?.[agent]) return s;
+      const session = { ...s.bySession[sessionId] };
+      delete session[agent];
+      return { bySession: { ...s.bySession, [sessionId]: session } };
+    }),
   clearSession: (sessionId) =>
     set((s) => {
       if (!s.bySession[sessionId]) return s;

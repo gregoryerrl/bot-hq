@@ -219,6 +219,7 @@ impl Capability {
 pub fn required_for(tool: &str) -> Option<Capability> {
     use Capability::*;
     Some(match tool {
+        "session_history" => ReadChannel,
         "ask_user_choice" => AskUser,
         "mark_awaiting_user" | "halt" => Halt,
         "request_approval" => ParkApproval,
@@ -664,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_four_capabilities_gate_no_tool() {
+    fn exactly_three_capabilities_have_no_direct_tool_gate() {
         // `capability_prompt`'s module doc publishes a table of WHERE each
         // capability is enforced, and tells the agent to treat a refusal as
         // binding precisely because a few are carried by the prompt alone. That
@@ -672,10 +673,11 @@ mod tests {
         // left to rot the first time a tool mapping is added.
         //
         // A capability with no tool in `required_for` is not enforced by the
-        // tool gate. Of the four below, `edit_files` IS enforced — at spawn, by
+        // tool gate. Of the three below, `edit_files` IS enforced — at spawn, by
         // the child's permission posture and its MCP servers
         // (`spawn::build_command`, `core::session::user_mcp_servers_for_agent`).
-        // The other three have no enforcement site at all today.
+        // `read_channel` now gates session_history; ordinary channel delivery
+        // remains instruction-carried. PostChannel/RunBash have no direct tool.
         let registry = crate::signaling::protocol::tool_descriptors();
         let unmapped: Vec<&'static str> = Capability::ALL
             .into_iter()
@@ -686,7 +688,7 @@ mod tests {
             .collect();
         assert_eq!(
             unmapped,
-            vec!["read_channel", "post_channel", "edit_files", "run_bash"],
+            vec!["post_channel", "edit_files", "run_bash"],
             "the set of capabilities the TOOL GATE cannot enforce changed — \
              update the enforcement table in `capability_prompt`'s module doc \
              and the Roles tab's capability hint before changing this"
