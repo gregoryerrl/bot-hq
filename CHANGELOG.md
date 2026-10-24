@@ -13,6 +13,13 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **A close approval belongs to its card.** An old Approve can no longer
+  authorize a later close request after new work or a rejection. Concurrent
+  requests share one current card. “Close and archive” is now stored on that
+  card and survives review, retry and restart; a retry cannot change what the
+  user is being asked to approve. An unchanged old shipped close paragraph
+  is upgraded inside customized HANDS instructions; surrounding custom text,
+  edited paragraphs and capabilities are preserved.
 - **Close responses describe the card that actually exists.** The tool now
   reports its status, card ID and next action as structured data alongside
   its explanation. Repeated calls return the same queued or pending card,

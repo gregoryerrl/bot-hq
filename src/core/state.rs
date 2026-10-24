@@ -1191,7 +1191,7 @@ impl AppState {
                 // learnings turn it just started (B2-5). The row is already
                 // closed by that path, so the user's Close has taken effect —
                 // except the ARCHIVE half (round 11): the winner may have closed
-                // unarchived (the agent's tool passes `archive = false`), and
+                // unarchived, and
                 // `close_session` cannot re-apply the flag on a closed row, so
                 // a "close and archive" that joins applies it here.
                 if archive {

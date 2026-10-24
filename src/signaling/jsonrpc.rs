@@ -1173,6 +1173,10 @@ async fn call_tool(
             Ok(ToolCallResult::text(output))
         }
         "close_session" => {
+            let _close_guard = bridge.close_request_guard(&caller.session_id).await;
+            if bridge.storage_handle().await.is_none() {
+                return Err(JsonRpcError::new(JsonRpcError::INTERNAL_ERROR, "close approval storage is not configured"));
+            }
             let archive = args
                 .get("archive")
                 .and_then(Value::as_bool)
@@ -1181,10 +1185,11 @@ async fn call_tool(
             // restart. Do not consume advisory reports again or describe a
             // pending user card as still waiting for reviewer delivery.
             if let Some(storage) = bridge.storage_handle().await {
-                if storage.get_session(&caller.session_id).await.map_err(internal_err_no_prefix)?
-                    .is_some_and(|session| session.closed_at.is_some()) {
-                    return Ok(ToolCallResult::text("session is already closed; no further action is needed")
-                        .with_structured(json!({"status":"closed", "choice_id":null, "next_action":"none"})));
+                if let Some(session) = storage.get_session(&caller.session_id).await.map_err(internal_err_no_prefix)? {
+                    if session.closed_at.is_some() {
+                        return Ok(ToolCallResult::text("session is already closed; this retry does not change its archive state")
+                            .with_structured(json!({"status":"closed", "choice_id":null, "archive":session.archived != 0, "next_action":"none"})));
+                    }
                 }
                 if let Some(card) = storage.active_close_card(&caller.session_id).await.map_err(internal_err_no_prefix)? {
                     let waiting = if card.status == "queued" { "QUEUED for the reviewer's read" } else { "PARKED for the user's approval" };
@@ -1192,7 +1197,7 @@ async fn call_tool(
                         "close already {waiting} (card {}). End your turn; no further close_session call is needed. \
                          Approve closes; Reject keeps the session open and its answer is the next instruction. \
                          Existing card:\n{}", card.choice_id, card.prompt,
-                    )).with_structured(json!({"status":card.status, "choice_id":card.choice_id, "next_action":"end_turn"})));
+                    )).with_structured(json!({"status":card.status, "choice_id":card.choice_id, "archive":card.close_archive, "next_action":"end_turn"})));
                 }
             }
             // A3b (adherence), kept as the ONE refusal in the close path (EYES
@@ -1205,41 +1210,13 @@ async fn call_tool(
                     "Before requesting close: persist a bounded learnings delta only if this \
                      session learned something reusable. Use cl_write_file with mode: append \
                      for new notes; do not manufacture a learning or rewrite the whole file. \
-                     Then call close_session again. If there is nothing to persist, retry once \
+                     Then call close_session again with the same archive choice. If there is nothing to persist, retry once \
                      without writing anything. No close card has been created yet.",
-                ).with_structured(json!({"status":"needs_learnings", "choice_id":null, "next_action":"persist_or_retry"})));
+                ).with_structured(json!({"status":"needs_learnings", "choice_id":null, "archive":archive, "next_action":"persist_or_retry"})));
             }
-            // 0081 (F4): an AGENT's close needs the user's word given SINCE the
-            // session was last (re)opened — a `close` card answered Approve at or
-            // after COALESCE(reopened_at, created_at). Two closes in week 35 had
-            // none: one re-used a "reclose" given before a reopen, the other
-            // fired 90 s after "before you close, draft…". The REOPENED notice
-            // said pre-close instructions are void; both agents read it and
-            // closed anyway — so this is mechanical now. The UI Close button is
-            // a different path (tauri_cmd) and stays ungated, as is who holds
-            // `CloseSession` (rc3 D16).
-            let approved = {
-                let storage = bridge.storage_handle().await;
-                match storage {
-                    Some(storage) => storage
-                        .close_approved_since_open(&caller.session_id)
-                        .await
-                        .map_err(internal_err_no_prefix)?,
-                    // No storage wired (test bridges built via ::new): nothing
-                    // to check against, close as before.
-                    None => true,
-                }
-            };
-            if approved {
-                bridge.request_session_close(
-                    caller.session_id.clone(),
-                    caller.agent.clone(),
-                    archive,
-                );
-                return Ok(ToolCallResult::text(
-                    "session close requested — your subprocess will be terminated shortly",
-                ).with_structured(json!({"status":"closing", "choice_id":null, "next_action":"end_turn"})));
-            }
+            // Approval is consumed by resolve_choice on the current close
+            // card. An old answered card is history, never permission for a
+            // later tool call (including after rejection or new work).
             let recap = bridge.close_recap(&caller.session_id).await;
             let detail = if recap.detail.is_empty() {
                 String::new()
@@ -1251,7 +1228,7 @@ async fn call_tool(
             // close is queued for its read and parks after its turn; without
             // one it parks directly, as before.
             let queued = bridge
-                .queue_close_card(&caller.session_id, &caller.agent, &recap.card, &recap.detail)
+                .queue_close_card(&caller.session_id, &caller.agent, &recap.card, &recap.detail, archive)
                 .await
                 .map_err(internal_err_no_prefix)?;
             use crate::signaling::bridge::CloseQueue;
@@ -1263,7 +1240,7 @@ async fn call_tool(
                      user's Approve; on Reject a system row tells you to keep working. End your \
                      turn so review can proceed; no further close_session call is needed. Recap on the card:\n{}{detail}",
                     recap.card
-                )).with_structured(json!({"status":"queued", "choice_id":card, "next_action":"end_turn"})));
+                )).with_structured(json!({"status":"queued", "choice_id":card, "archive":archive, "next_action":"end_turn"})));
             }
             // A reviewer that is down cannot read the recap (EYES d95f95c7):
             // the card parks directly and the reply says the review was skipped.
@@ -1275,7 +1252,7 @@ async fn call_tool(
                 _ => String::new(),
             };
             let card = bridge
-                .park_close_card(&caller.session_id, &caller.agent, &recap.card)
+                .park_close_card(&caller.session_id, &caller.agent, &recap.card, archive)
                 .await
                 .map_err(internal_err_no_prefix)?;
             Ok(ToolCallResult::text(format!(
@@ -1284,7 +1261,7 @@ async fn call_tool(
                  answer text is the next instruction.{skipped} No further close_session call is \
                  needed. Recap on the card:\n{}{detail}",
                 recap.card
-            )).with_structured(json!({"status":"pending", "choice_id":card, "next_action":"end_turn"})))
+            )).with_structured(json!({"status":"pending", "choice_id":card, "archive":archive, "next_action":"end_turn"})))
         }
         "check_commit_message" => {
             let message = arg_required_str(&args, "message")?;
@@ -2592,39 +2569,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_session_emits_event() {
+    async fn close_session_without_storage_cannot_skip_approval() {
         let bridge = SignalingBridge::new();
-        let mut sub = bridge.subscribe();
-        let res = dispatch(
-            req(
-                "tools/call",
-                json!({"name": "close_session", "arguments": {}}),
-                1,
-            ),
-            &caller(),
-            &bridge,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let v = serde_json::to_value(&res).unwrap();
-        assert!(v["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("close requested"));
-        let ev = sub.recv().await.unwrap();
-        match ev {
-            SignalingEvent::SessionCloseRequest {
-                session_id,
-                agent,
-                archive,
-            } => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(agent, "hands");
-                assert!(!archive);
-            }
-            other => panic!("expected SessionCloseRequest, got {other:?}"),
-        }
+        let mut events = bridge.subscribe();
+        let error = dispatch(
+            req("tools/call", json!({"name":"close_session", "arguments":{}}), 1),
+            &caller(), &bridge,
+        ).await.unwrap_err();
+        assert!(error.message.contains("storage"));
+        assert!(events.try_recv().is_err(), "no approval store means no close request");
     }
 
     /// Dispatch `close_session` for the default caller and return the tool text.
@@ -2634,8 +2587,12 @@ mod tests {
     }
 
     async fn close_result(bridge: &std::sync::Arc<SignalingBridge>, id: i64) -> Value {
+        close_result_with_archive(bridge, id, false).await
+    }
+
+    async fn close_result_with_archive(bridge: &std::sync::Arc<SignalingBridge>, id: i64, archive: bool) -> Value {
         let res = dispatch(
-            req("tools/call", json!({"name": "close_session", "arguments": {}}), id),
+            req("tools/call", json!({"name": "close_session", "arguments": {"archive":archive}}), id),
             &caller(),
             bridge,
         )
@@ -2643,6 +2600,94 @@ mod tests {
         .unwrap()
         .unwrap();
         serde_json::to_value(&res).unwrap()["result"].clone()
+    }
+
+    #[tokio::test]
+    async fn a_past_close_answer_never_authorizes_a_later_request() {
+        for after in ["nothing", "new work", "later rejection", "ordinary Close choice"] {
+            let bridge = SignalingBridge::new();
+            let storage = crate::storage::Storage::memory().await.unwrap();
+            storage.create_session("s1", "close", None).await.unwrap();
+            bridge.set_storage(storage.clone()).await;
+            close_result(&bridge, 1).await; // the one learnings nudge
+            if after == "ordinary Close choice" {
+                storage.insert_tray_entry("s1", "ordinary", "hands", crate::storage::QuestionKind::Choice,
+                    "Close session?", Some(&["Close".into(), "Keep working".into()]), None, None).await.unwrap();
+                storage.answer_tray_entry("ordinary", "Close").await.unwrap();
+            } else {
+                approve_close_card(&storage, "old-close").await;
+            }
+            if after == "new work" {
+                storage.post_to_channel("s1", "user", None, "text", "Do another task first", None).await.unwrap();
+            } else if after == "later rejection" {
+                let rejected = bridge.park_close_card("s1", "hands", "later request", false).await.unwrap();
+                bridge.resolve_choice(&rejected, "Reject — still working".into()).await.unwrap();
+            }
+            let mut events = bridge.subscribe();
+            let result = close_result(&bridge, 2).await;
+            assert_eq!(result["structuredContent"]["status"], "pending", "{after}: {result}");
+            assert_ne!(result["structuredContent"]["choice_id"], "old-close");
+            while let Ok(event) = events.try_recv() {
+                assert!(!matches!(event, SignalingEvent::SessionCloseRequest { .. }), "{after} reused past consent");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn close_card_keeps_archive_intent_through_review_restart_and_approval() {
+        for review in [false, true] {
+            for archive in [false, true] {
+                let bridge = SignalingBridge::new();
+                let storage = crate::storage::Storage::memory().await.unwrap();
+                storage.create_session("s1", "close", None).await.unwrap();
+                storage.ensure_session_roster("s1", 2).await.unwrap();
+                bridge.set_storage(storage.clone()).await;
+                if review { bridge.register_session_reviewers("s1".into(), vec!["eyes".into()]); }
+                close_result(&bridge, 1).await;
+                let first = close_result_with_archive(&bridge, 2, archive).await;
+                let id = first["structuredContent"]["choice_id"].as_str().unwrap();
+                if review {
+                    let row = storage.get_tray_entry(id).await.unwrap().unwrap();
+                    let notice = storage.messages_for_session("s1", None).await.unwrap().into_iter()
+                        .find(|message| Some(message.id) == row.body_row_id).unwrap();
+                    assert_eq!(notice.content.contains("Close and archive this session"), archive, "the reviewer sees the card's archive intent too");
+                    let reviewer = storage.participant_by_slug("s1", "eyes").await.unwrap().unwrap().id;
+                    storage.commit_delivery(reviewer, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+                    bridge.settle_queued_outward("s1", reviewer).await;
+                }
+                let restarted = SignalingBridge::new();
+                restarted.set_storage(storage.clone()).await;
+                let retry = close_result_with_archive(&restarted, 3, !archive).await;
+                assert_eq!(retry["structuredContent"]["choice_id"], id);
+                let mut events = restarted.subscribe();
+                restarted.resolve_choice(id, "Approve".into()).await.unwrap();
+                restarted.resolve_choice(id, "Approve".into()).await.unwrap();
+                let mut closes = 0;
+                while let Ok(event) = events.try_recv() {
+                    if let SignalingEvent::SessionCloseRequest { archive: actual, .. } = event {
+                        assert_eq!(actual, archive, "review={review}: the approved card, not a changed retry argument, owns archive");
+                        closes += 1;
+                    }
+                }
+                assert_eq!(closes, 1, "duplicate answers cannot request another close");
+                assert_eq!(retry["structuredContent"]["archive"], archive);
+                let row = storage.get_tray_entry(id).await.unwrap().unwrap();
+                assert_eq!(row.prompt.starts_with("Close and archive this session?"), archive);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_close_requests_share_one_card_and_one_archive_choice() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        storage.create_session("s1", "close", None).await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        close_result(&bridge, 1).await;
+        let (a, b) = tokio::join!(close_result_with_archive(&bridge, 2, false), close_result_with_archive(&bridge, 3, true));
+        assert_eq!(a["structuredContent"]["choice_id"], b["structuredContent"]["choice_id"]);
+        assert_eq!(a["structuredContent"]["archive"], b["structuredContent"]["archive"]);
+        assert_eq!(storage.tray_entries_for_session("s1").await.unwrap().iter().filter(|r| r.kind == "close").count(), 1);
     }
 
     #[tokio::test]
@@ -2810,30 +2855,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_approve_since_open_lets_an_agent_close_through_without_a_card() {
-        // P3's regression case too: `reopened_at` is NULL on a never-reopened
-        // session, and COALESCE makes the bound `created_at` — a scalar max()
-        // would have made it NULL and parked a card on every close.
-        let bridge = SignalingBridge::new();
-        let storage = crate::storage::Storage::memory().await.unwrap();
-        storage.create_session("s1", "close", None).await.unwrap();
-        assert!(storage.get_session("s1").await.unwrap().unwrap().reopened_at.is_none());
-        // A CL write this session lifts the delta nudge; the card is the only
-        // thing left between the agent and the close.
-        bridge.set_storage(storage.clone()).await;
-        approve_close_card(&storage, "card-1").await;
-        // Skip the delta nudge for this test by taking it once.
-        let _ = close_text(&bridge, 1).await;
-        let mut sub = bridge.subscribe();
-        let result = close_result(&bridge, 2).await;
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert_eq!(result["structuredContent"]["status"], "closing", "a requested close is not yet a persisted closed session");
-        assert!(text.contains("close requested"), "got: {text}");
-        assert!(matches!(sub.recv().await.unwrap(), SignalingEvent::SessionCloseRequest { .. }));
-        assert!(pending_close_card(&storage).await.is_none());
-    }
-
-    #[tokio::test]
     async fn an_approve_given_before_a_reopen_does_not_count() {
         // s-34a1b88e 08:56, mechanised: the user approved a close, reopened the
         // session, and the agent re-used the old approval. The bound moves to
@@ -2851,7 +2872,6 @@ mod tests {
         let reopened_at = reopened.reopened_at.clone().expect("reopen stamps reopened_at");
         let old = storage.get_tray_entry("card-old").await.unwrap().unwrap();
         assert!(old.answered_at.unwrap() < reopened_at, "fixture: the Approve predates the reopen");
-        assert!(!storage.close_approved_since_open("s1").await.unwrap());
 
         let _ = close_text(&bridge, 1).await; // the delta nudge
         let mut sub = bridge.subscribe();

@@ -418,42 +418,6 @@ impl Storage {
         Ok(res.rows_affected() > 0)
     }
 
-    /// Has the user approved an AGENT close of this session since it was last
-    /// (re)opened? — a `close` card (0081) answered with the exact `Approve`
-    /// at or after `COALESCE(reopened_at, created_at)`.
-    ///
-    /// **`COALESCE`, never scalar `max()`** (EYES P3): SQLite's multi-argument
-    /// `max(created_at, reopened_at)` is NULL when either argument is NULL, and
-    /// `reopened_at` is NULL for every never-reopened session — so `max()`
-    /// would find no approval ever and park a card on every close, voiding the
-    /// "no extra click when you already said Approve" half of the design. An
-    /// Approve given BEFORE a reopen falls below the bound and does not count:
-    /// that is s-34a1b88e 08:56 ("reopening again, please don't close without my
-    /// permission"), the failure this query exists to stop. The three columns
-    /// are all RFC3339-Z from `now_utc()`, so the string compare is
-    /// chronological — an INVARIANT this query depends on, not a coincidence:
-    /// `0001_init.sql` still defaults `sessions.created_at` to SQLite's
-    /// `datetime('now')` (space-separated, no `T`, no zone), which would sort
-    /// wrongly against an RFC3339 `answered_at`. No insert path uses that
-    /// default today (`create_session` binds `now_utc()`); one that did would
-    /// have to be found by this comment, so keep binding the timestamp.
-    pub async fn close_approved_since_open(&self, session_id: &str) -> Result<bool> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT EXISTS( \
-                SELECT 1 FROM session_tray t JOIN sessions s ON s.id = t.session_id \
-                WHERE t.session_id = ? \
-                  AND t.kind = 'close' \
-                  AND t.status = 'answered' \
-                  AND t.picked_option = 'Approve' \
-                  AND t.answered_at >= COALESCE(s.reopened_at, s.created_at))",
-        )
-        .bind(session_id)
-        .fetch_one(&self.pool)
-        .await
-        .with_context(|| format!("checking close approval for session {session_id}"))?;
-        Ok(row.0 != 0)
-    }
-
     /// SWAP two sessions' dashboard positions — the user's literal pick
     /// (tray c38a216b: "Swap (literal exchange of two slots)", over both
     /// reviewers' move recommendation): dragging tile A onto tile B exchanges

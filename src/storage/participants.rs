@@ -4327,6 +4327,53 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn the_close_card_reseed_preserves_custom_and_empty_roles() {
+        let s = Storage::memory().await.unwrap();
+        let new = crate::agents::prompts::PRESET_HANDS_ROLE;
+        let old = new.replacen("It parks a CLOSE CARD the user answers",
+            "It does not close on its own: unless the user already approved a close since the session was last (re)opened, it parks a CLOSE CARD the user answers", 1);
+        assert_ne!(old, new);
+        let custom = format!("{old}\nCustom role instruction.");
+        let statement = reseed_statement(include_str!("../../migrations/0105_close_card_intent.sql"), "0105", "-- 1. HANDS");
+        let capabilities = s.role_by_slug("hands").await.unwrap().unwrap().capabilities;
+        for (before, expected) in [(Some(old.as_str()), Some(new)), (Some(custom.as_str()), Some(custom.as_str())), (Some(""), Some("")), (None, None)] {
+            sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = 'hands'").bind(before).execute(s.pool()).await.unwrap();
+            sqlx::query(&statement).execute(s.pool()).await.unwrap();
+            let role = s.role_by_slug("hands").await.unwrap().unwrap();
+            assert_eq!(role.description_prompt.as_deref(), expected);
+            assert_eq!(role.capabilities, capabilities, "a prose fix must not change grants");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_stock_close_paragraph_is_repaired_inside_a_custom_hands_role() {
+        let s = Storage::memory().await.unwrap();
+        let old = include_str!("../../migrations/0067_role_prose_says_what_the_ring_does.sql")
+            .lines().find(|line| line.starts_with("**When the task itself is settled")).unwrap()
+            .replace("''", "'");
+        let new = crate::agents::prompts::PRESET_HANDS_ROLE.lines()
+            .find(|line| line.starts_with("**When the task itself is settled")).unwrap();
+        let migration = include_str!("../../migrations/0105_close_card_intent.sql");
+        let update = &migration[migration.find("-- 2. HANDS").unwrap()..];
+        let custom = format!("My custom preface.\n\n{old}\n\nMy custom footer: keep my model and capabilities.");
+        let edited = custom.replace("Keep working", "Keep investigating");
+        let duplicate = format!("{custom}\n\n{old}");
+        let quoted = format!("My custom rule quotes: {old}");
+        let expected = custom.replace(&old, new);
+        let capabilities = s.role_by_slug("hands").await.unwrap().unwrap().capabilities;
+        for (before, after) in [(&custom, &expected), (&edited, &edited), (&duplicate, &duplicate), (&quoted, &quoted)] {
+            sqlx::query("UPDATE roles SET description_prompt = ? WHERE slug = 'hands'")
+                .bind(before).execute(s.pool()).await.unwrap();
+            sqlx::raw_sql(update).execute(s.pool()).await.unwrap();
+            let role = s.role_by_slug("hands").await.unwrap().unwrap();
+            assert_eq!(role.description_prompt.as_deref(), Some(after.as_str()));
+            assert_eq!(role.capabilities, capabilities);
+            sqlx::raw_sql(update).execute(s.pool()).await.unwrap();
+            assert_eq!(s.role_by_slug("hands").await.unwrap().unwrap().description_prompt.as_deref(), Some(after.as_str()), "the repair is idempotent");
+        }
+    }
+
     /// `0055_yield_discipline_stops_manufacturing_work.sql`'s single UPDATE.
     fn yield_discipline_statement() -> String {
         reseed_statement(

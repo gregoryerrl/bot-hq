@@ -494,6 +494,7 @@ mod tests {
     #[test]
     fn tray_view_decodes_options_and_keeps_command() {
         let entry = crate::storage::SessionTrayEntry {
+            close_archive: false,
             id: 1,
             session_id: "s".into(),
             choice_id: "c".into(),

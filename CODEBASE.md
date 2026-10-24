@@ -465,7 +465,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/sessions.rs` | `sessions` CRUD, `reopen_session`/`archive_session`, spawn-model/effort columns, halt slot (`declare_session_halt`/`clear_session_halt`), boot orphan sweep | M |
 | `src/storage/participants.rs` | roles · session_participants (roster seed/invite, labels, colours) · turn cycle (`next_active_participant`, `set_current_turn`, done votes, `round_number`) · cursors + deliveries (`commit_delivery`, `unread_for_participant`/`channel_page`, `UNREAD_BATCH_LIMIT`) · channel wire (`post_to_channel`, envelope) — six clean extraction seams | XL |
 | `src/storage/messages.rs` | `messages` insert/read: since-id watermark (`messages_for_session`, unbounded), the chat's tail page (`messages_tail`), the spin-detection read (`participant_text_since`); the three production SQL strings are fns (`messages_since_sql`, `messages_tail_sql`, `participant_text_since_sql`) EXPLAINed by tests | M |
-| `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, purge, closed/orphan withdraw | M |
+| `src/storage/tray.rs` | `session_tray` (questions/approvals/gated commands), `pending_gate_ids`, `active_close_card` / `insert_close_card` (archive intent persisted before review), purge, closed/orphan withdraw | M |
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/user_words.rs` | `session_user_words` (0092): the user's own words, recorded by the caller that knows whose they are (`core::Authored`, the tray answer), mirrored to the words file the compaction hook prints | S |

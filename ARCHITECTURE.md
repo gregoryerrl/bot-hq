@@ -1458,12 +1458,11 @@ sessions.
 
 ## The close card (0081) and the close-out learnings epilogue (rc3 **D15**)
 
-An AGENT's `close_session` closes only with the user's word given since the
-session was last (re)opened: a `session_tray` row of kind `close` answered
-`Approve` at or after `COALESCE(sessions.reopened_at, created_at)`
-(`Storage::close_approved_since_open`; `reopened_at` is stamped by
-`reopen_session`, so an Approve given before a reopen is void — the REOPENED
-notice's rule, now mechanical). Without one, `jsonrpc.rs`'s arm parks the card
+An AGENT's `close_session` requests a current `session_tray` card of kind
+`close`. Only answering that card Approve emits `SessionCloseRequest`; an old
+answer is history, never permission for a later tool call, even before reopen.
+The tool requires storage and serializes the whole read/nudge/recap/insert
+sequence per session. `jsonrpc.rs`'s arm parks the card
 (`SignalingBridge::park_close_card`: a gate — latches the ring, gate slot,
 canonical Approve/Reject, no in-memory oneshot) carrying `close_recap`'s lines
 (staleness sweep demoted to one advisory line, open-advisory count, whether a
@@ -1488,13 +1487,18 @@ The tool returns its readable explanation plus `structuredContent` containing
 `status`, `choice_id` and `next_action`. `needs_learnings` is the one retry
 before a card exists; `queued` and `pending` require ending the turn, with no
 further close call. A retry reads the existing card before generating a recap
-or consuming advisory reports, including after a host restart. `closing`
-means the close request was emitted; `closed` means storage already records
-closure. Reject names the card and preserves the user's next instruction.
+or consuming advisory reports, including after a host restart. `closed` means
+storage already records closure. Reject names the card and preserves the user's
+next instruction. The card persists `close_archive` before review/approval
+(0105); its prompt states that intent, and a retry cannot change it. Approval
+passes that stored flag to the ordinary close path once, even after restart.
 Advisory details never ask for another close request. `user_action` documents
 are excluded from the unpromoted-scratch warning and named separately as
 remaining on the dashboard until dismissed. The default role already uses
-this one-card flow (0082); customized role prose is not rewritten.
+this one-card flow (0082/0105). Migration 0105 also repairs one unchanged,
+standalone 0067 close paragraph inside a custom HANDS role, preserving all
+surrounding text and other role fields. Edited or duplicated paragraphs stay
+untouched.
 
 A session that ends before anyone wrote anything down is D15's gap. The
 agent's own `close_session` tool is soft-gated with a write-the-delta nudge

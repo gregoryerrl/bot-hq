@@ -271,8 +271,8 @@ pub enum QuestionKind {
     /// gate slot, latches the ring — whose Approve closes the session instead
     /// of running a command. Its own kind so the resolve path can tell it from
     /// a command gate durably (a `command_text` sentinel would be executed as a
-    /// shell command by the post-restart path) and so `close_approved_since_open`
-    /// can find it by name.
+    /// shell command by the post-restart path). Only answering this card can
+    /// request a close; its old answer never authorizes another tool call.
     Close,
     // Round 11 removed two variants nothing produced or consumed: `OpenAsk`
     // (`"open_ask"` — never written), and `Halt` (`"halt"` — a
@@ -407,6 +407,10 @@ pub struct SessionTrayEntry {
     /// Reposting a revised body invalidates this proof.
     #[serde(default)]
     pub reviewed_at: Option<String>,
+    /// The close card's approved intent (0105); retries cannot change it.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub close_archive: bool,
 }
 
 fn approval_required_by_default() -> bool { true }

@@ -1831,6 +1831,25 @@ impl SignalingBridge {
         CloseRecap { card: card.join("\n"), detail: detail.join("\n\n") }
     }
 
+    /// Serialize the tool's read/nudge/recap/insert sequence. This key cannot
+    /// collide with command keys (SHA-256 hex); the weak registry is shared.
+    pub async fn close_request_guard(&self, session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self.gate_preparations.lock().await;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            let entry = locks.entry((session_id.to_string(), "close-request".to_string())).or_default();
+            match entry.upgrade() {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(Mutex::new(()));
+                    *entry = Arc::downgrade(&lock);
+                    lock
+                }
+            }
+        };
+        lock.lock_owned().await
+    }
+
     /// Queue an AGENT's close for the REVIEWER's read before the user's card
     /// (feedback #73 (2), the user's pick): the recap — the card text and its
     /// detail — is posted as the body row the reviewer must read, the reviewer
@@ -1846,6 +1865,7 @@ impl SignalingBridge {
         agent: &str,
         recap_card: &str,
         recap_detail: &str,
+        archive: bool,
     ) -> Result<CloseQueue> {
         let storage = self
             .storage
@@ -1876,20 +1896,21 @@ impl SignalingBridge {
             return Ok(CloseQueue::Queued(existing.choice_id));
         }
         let choice_id = uuid::Uuid::new_v4().to_string();
+        let action = if archive { "Close and archive" } else { "Close" };
         let question = crate::policy::secret_scan::redact_string(format!(
-            "Close this session? {agent} says the work is done.\n\n{recap_card}\n\n\
+            "{action} this session? {agent} says the work is done.\n\n{recap_card}\n\n\
              Approve closes it (the close-out epilogue runs as usual); Reject keeps it \
              open — anything you type with the Reject is the next instruction."
         ));
-        storage.insert_queued_close(session_id, &choice_id, agent, &question).await?;
+        storage.insert_queued_close(session_id, &choice_id, agent, &question, archive).await?;
         let detail = if recap_detail.trim().is_empty() {
             String::new()
         } else {
             format!("\n\nDetail behind the recap:\n{recap_detail}")
         };
         let notice = format!(
-            "📋 Close recap queued for review (gate {choice_id}) — {agent} asks to close the \
-             session:\n{recap_card}{detail}\n\n[Reviewer: read the recap on this turn — what would \
+            "📋 Close recap queued for review (gate {choice_id}) — {agent}: {action} this \
+             session.\n{recap_card}{detail}\n\n[Reviewer: read the recap on this turn — what would \
              archive, what is still open. To keep the session open, file a `blocking` finding with \
              gate_id \"{choice_id}\" saying what must happen first; anything else lets the close \
              card park for the user after your turn.]"
@@ -1925,6 +1946,7 @@ impl SignalingBridge {
         session_id: &str,
         agent: &str,
         recap: &str,
+        archive: bool,
     ) -> Result<String> {
         let storage = self
             .storage
@@ -1944,22 +1966,21 @@ impl SignalingBridge {
         // F10: redacted here as well as at the store, so the card's event and
         // its row say the same thing (EYES N3). The recap is host-built counts
         // and flags today; this keeps it true if that ever changes.
+        let action = if archive { "Close and archive" } else { "Close" };
         let question = crate::policy::secret_scan::redact_string(format!(
-            "Close this session? {agent} says the work is done.\n\n{recap}\n\n\
+            "{action} this session? {agent} says the work is done.\n\n{recap}\n\n\
              Approve closes it (the close-out epilogue runs as usual); Reject keeps it \
              open — anything you type with the Reject is the next instruction."
         ));
         let options = vec!["Approve".to_string(), "Reject".to_string()];
         storage
-            .insert_tray_entry(
+            .insert_close_card(
                 session_id,
                 &choice_id,
                 agent,
-                crate::storage::QuestionKind::Close,
                 &question,
-                Some(&options),
-                None,
-                None,
+                false,
+                archive,
             )
             .await?;
         self.set_session_awaiting(session_id, agent, false).await;
@@ -2184,8 +2205,8 @@ impl SignalingBridge {
             .send(SignalingEvent::SessionClosed { session_id });
     }
 
-    /// Called by the MCP `tools/call` handler for `close_session`. Broadcasts
-    /// a request; AppState's signaling subscriber processes it (kills agents,
+    /// Called when the CURRENT close card wins its approval transition.
+    /// Broadcasts a request; AppState's signaling subscriber processes it (kills agents,
     /// marks closed in storage). Fire-and-forget — by the time the agent
     /// reads our "ok" response, the subprocess might already be dying.
     pub fn request_session_close(&self, session_id: String, agent: String, archive: bool) {

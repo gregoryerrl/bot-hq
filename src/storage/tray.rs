@@ -11,7 +11,7 @@ const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
      body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
      run_timeout_secs, pinned_scripts, urgent_reason, run_not_before, run_not_after, run_started_at, \
-     approval_required, reviewed_at";
+     approval_required, reviewed_at, close_archive";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -214,12 +214,17 @@ impl Storage {
     /// reviewer reads the recap before the user sees the card. Kind `close`,
     /// no command; promoted or withdrawn by the same settlement as a queued
     /// publish.
-    pub async fn insert_queued_close(&self, session_id: &str, choice_id: &str, agent: &str, prompt: &str) -> Result<i64> {
+    pub async fn insert_queued_close(&self, session_id: &str, choice_id: &str, agent: &str, prompt: &str, archive: bool) -> Result<i64> {
+        self.insert_close_card(session_id, choice_id, agent, prompt, true, archive).await
+    }
+
+    /// Persist all close intent before exposing the card or summoning review.
+    pub async fn insert_close_card(&self, session_id: &str, choice_id: &str, agent: &str, prompt: &str, queued: bool, archive: bool) -> Result<i64> {
         let prompt = crate::policy::secret_scan::redact(prompt);
         let res = sqlx::query(
             "INSERT INTO session_tray \
-                (session_id, choice_id, agent, kind, prompt, options_json, command_text, asked_at, status) \
-             VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                (session_id, choice_id, agent, kind, prompt, options_json, asked_at, status, close_archive) \
+             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? FROM sessions WHERE id = ? AND closed_at IS NULL",
         )
         .bind(session_id)
         .bind(choice_id)
@@ -228,10 +233,13 @@ impl Storage {
         .bind(prompt.as_ref())
         .bind(GATE_OPTIONS_JSON)
         .bind(now_utc())
-        .bind(TRAY_STATUS_QUEUED)
+        .bind(if queued { TRAY_STATUS_QUEUED } else { "pending" })
+        .bind(archive)
+        .bind(session_id)
         .execute(&self.pool)
         .await
-        .with_context(|| format!("queueing close card {choice_id} for session {session_id}"))?;
+        .with_context(|| format!("recording close card {choice_id} for session {session_id}"))?;
+        anyhow::ensure!(res.rows_affected() == 1, "the session already closed; no close card was created");
         Ok(res.last_insert_rowid())
     }
 
@@ -1008,6 +1016,22 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn close_card_intent_is_bounded_defaults_to_no_archive_and_requires_an_open_session() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "close", None).await.unwrap();
+        s.insert_close_card("s1", "close-intent", "hands", "Close?", false, true).await.unwrap();
+        let row = s.get_tray_entry("close-intent").await.unwrap().unwrap();
+        assert!(row.close_archive && row.approval_required);
+        let mut old = serde_json::to_value(&row).unwrap();
+        old.as_object_mut().unwrap().remove("close_archive");
+        assert!(!serde_json::from_value::<SessionTrayEntry>(old).unwrap().close_archive, "legacy JSON must not acquire archive intent");
+        assert!(sqlx::query("UPDATE session_tray SET close_archive = 2 WHERE choice_id = 'close-intent'").execute(s.pool()).await.is_err());
+        s.close_session("s1", false).await.unwrap();
+        assert!(s.insert_close_card("s1", "too-late", "hands", "Close?", true, false).await.is_err());
+        assert!(s.get_tray_entry("too-late").await.unwrap().is_none());
+    }
 
     async fn automatic_gate(s: &Storage, id: &str) -> i64 {
         if s.participant_by_slug("s-auto", "hands").await.unwrap().is_none() {

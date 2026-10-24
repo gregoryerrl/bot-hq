@@ -4954,7 +4954,7 @@ mod tests {
         drain(&mut ring);
         use super::super::CloseQueue;
         let CloseQueue::Queued(card) = bridge
-            .queue_close_card("s1", "hands", "CL learnings delta: written this session.", "nothing open")
+            .queue_close_card("s1", "hands", "CL learnings delta: written this session.", "nothing open", false)
             .await
             .unwrap()
         else {
@@ -4969,7 +4969,7 @@ mod tests {
         assert_eq!(summons_in(&drain(&mut ring)), vec![eyes]);
         assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty(), "nothing parked for the user yet");
         // A second close while queued: the same card.
-        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), CloseQueue::Queued(card.clone()));
+        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "", false).await.unwrap(), CloseQueue::Queued(card.clone()));
         // Not read: stays queued. Read: parks for the user as a close card.
         bridge.settle_queued_outward("s1", eyes).await;
         assert_eq!(storage.get_tray_entry(&card).await.unwrap().unwrap().status, "queued");
@@ -4981,10 +4981,10 @@ mod tests {
         let rows = storage.messages_for_session("s1", None).await.unwrap();
         assert!(rows.iter().any(|m| m.content.contains("The close card") && m.content.contains("is now PARKED for the user")), "{:?}", rows.last().map(|m| &m.content));
         // While a close card is pending, a further close returns it too.
-        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "").await.unwrap(), CloseQueue::Queued(card.clone()));
+        assert_eq!(bridge.queue_close_card("s1", "hands", "again", "", false).await.unwrap(), CloseQueue::Queued(card.clone()));
         bridge.resolve_choice(&card, "Reject".into()).await.unwrap();
         // A queued close a blocking finding names is withdrawn: the session keeps working.
-        let CloseQueue::Queued(card2) = bridge.queue_close_card("s1", "hands", "second try", "").await.unwrap() else { panic!("queued") };
+        let CloseQueue::Queued(card2) = bridge.queue_close_card("s1", "hands", "second try", "", false).await.unwrap() else { panic!("queued") };
         let body2 = storage.get_tray_entry(&card2).await.unwrap().unwrap().body_row_id.unwrap();
         storage.commit_delivery(eyes, &[(body2, None)]).await.unwrap();
         bridge
@@ -4996,7 +4996,7 @@ mod tests {
         assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
         // An ADVISORY naming a queued close is a note, not a #69 revise hold
         // (EYES d95f95c7): no hold row, and the read still parks the card.
-        let CloseQueue::Queued(card3) = bridge.queue_close_card("s1", "hands", "third try", "").await.unwrap() else { panic!("queued") };
+        let CloseQueue::Queued(card3) = bridge.queue_close_card("s1", "hands", "third try", "", false).await.unwrap() else { panic!("queued") };
         let body3 = storage.get_tray_entry(&card3).await.unwrap().unwrap().body_row_id.unwrap();
         storage.commit_delivery(eyes, &[(body3, None)]).await.unwrap();
         drain(&mut ring);
@@ -5014,13 +5014,13 @@ mod tests {
         // window) cannot read the recap: the caller parks the card directly.
         bridge.notify_agent_health("s1".to_string(), "eyes", "stalled");
         assert_eq!(
-            bridge.queue_close_card("s1", "hands", "fourth try", "").await.unwrap(),
+            bridge.queue_close_card("s1", "hands", "fourth try", "", false).await.unwrap(),
             CloseQueue::ReviewerDown("eyes".to_string())
         );
         assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty(), "nothing queued for a down reviewer");
         // An RPC from the reviewer inside the window is stronger evidence: queued again.
         bridge.note_agent_rpc("s1", "eyes");
-        assert!(matches!(bridge.queue_close_card("s1", "hands", "fifth try", "").await.unwrap(), CloseQueue::Queued(_)));
+        assert!(matches!(bridge.queue_close_card("s1", "hands", "fifth try", "", false).await.unwrap(), CloseQueue::Queued(_)));
     }
 
     /// Feedback #66a: the run window's validation — RFC3339 in, UTC out; the

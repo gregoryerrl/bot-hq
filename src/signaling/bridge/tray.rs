@@ -926,7 +926,7 @@ impl SignalingBridge {
                             row.status == "pending"
                                 && crate::storage::is_gate_row(&row.kind, row.options_json.as_deref())
                         })
-                        .map(|row| (row.session_id, row.kind, row.agent)),
+                        .map(|row| (row.session_id, row.kind, row.agent, row.close_archive)),
                     Err(e) => {
                         // Not silent, and not fatal: the flip below still runs,
                         // and the latch reseeds from the durable rows on the
@@ -966,16 +966,16 @@ impl SignalingBridge {
         // through delivery so it never wakes before the answer/result exists
         // or before the bridge has finished clearing the approval's wait flag.
         let gate_resolution = if flipped {
-            gate_row.as_ref().map(|(session_id, kind, agent)| {
+            gate_row.as_ref().map(|(session_id, kind, agent, archive)| {
                 (session_id.clone(), agent.clone(),
                  kind == crate::storage::QuestionKind::Close.as_str()
-                    && matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved))
+                    && matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved), *archive)
             })
         } else {
             None
         };
         if flipped {
-            if let Some((session_id, kind, agent)) = gate_row {
+            if let Some((session_id, kind, agent, _)) = gate_row {
                 // 0081: a `close` card's verdict, on the flip only (so a duplicate
                 // resolve cannot close twice or decline twice). Approve → the same
                 // `SessionCloseRequest` the agent's direct close emits, routed by
@@ -1209,14 +1209,14 @@ impl SignalingBridge {
             }
         }
         }.await;
-        if let Some((session_id, agent, closing)) = gate_resolution {
+        if let Some((session_id, agent, closing, archive)) = gate_resolution {
             let may_resume = self.prepare_gate_release(&session_id).await;
             let notified = self.notify_ring_gate_with_resume(&session_id, choice_id, false, !closing && may_resume).await;
             if let Ok(ResolveOutcome::DeliveredOutOfBand { gate_notified, .. }) = &mut delivered {
                 *gate_notified = notified;
             }
             if closing {
-                self.request_session_close(session_id, agent, false);
+                self.request_session_close(session_id, agent, archive);
             }
         }
         delivered
@@ -5019,7 +5019,7 @@ mod tests {
         bridge.register_session_sequencer("s1".into(), ring_tx).await;
         let mut sub = bridge.subscribe();
 
-        let card = bridge.park_close_card("s1", "hands", "recap line").await.unwrap();
+        let card = bridge.park_close_card("s1", "hands", "recap line", false).await.unwrap();
         let row = storage.get_tray_entry(&card).await.unwrap().unwrap();
         assert_eq!(row.kind, "close");
         assert_eq!(row.status, "pending");
@@ -5029,7 +5029,7 @@ mod tests {
             Ok(crate::core::sequencer::SequencerCommand::GateOpened { choice_id }) if choice_id == card
         ));
         // Parking twice returns the same card.
-        assert_eq!(bridge.park_close_card("s1", "hands", "again").await.unwrap(), card);
+        assert_eq!(bridge.park_close_card("s1", "hands", "again", false).await.unwrap(), card);
 
         bridge
             .resolve_choice(&card, "Reject — one more thing first".into())
@@ -5052,7 +5052,6 @@ mod tests {
             rows.iter().any(|r| r.contains(&format!("DECLINED close card {card}"))),
             "the executor is told to keep working: {rows:?}"
         );
-        assert!(!storage.close_approved_since_open("s1").await.unwrap());
     }
 
     #[tokio::test]
@@ -5083,7 +5082,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         bridge.register_session_sequencer("s1".into(), tx).await;
         let mut events = bridge.subscribe();
-        let card = bridge.park_close_card("s1", "hands", "recap").await.unwrap();
+        let card = bridge.park_close_card("s1", "hands", "recap", false).await.unwrap();
         assert!(matches!(rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::GateOpened { .. })));
         bridge.resolve_choice(&card, "Approve".into()).await.unwrap();
         assert!(matches!(rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::GateResolved { resume: false, .. })));
@@ -5691,7 +5690,7 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         let mut sub = bridge.subscribe();
         let recap = format!("2 commits; the token {} was rotated", f10_token());
-        let card = bridge.park_close_card("s1", "hands", &recap).await.unwrap();
+        let card = bridge.park_close_card("s1", "hands", &recap, false).await.unwrap();
         let event = loop {
             match sub.recv().await.unwrap() {
                 SignalingEvent::PendingChoice(p) => break p,
