@@ -1194,6 +1194,16 @@ pub async fn pump_agent(
     storage: Storage,
     ipav_state: Arc<Mutex<IpavState>>,
 ) {
+    // A replacement inherits the session/slug, never the retired process's
+    // cached health. Publish startup once, without relying on a model event
+    // or the reviewer's short RPC-grace exception. Retirement fences this
+    // write just like event/teardown writes below.
+    {
+        let Some(_lease) = cfg.incarnation.enter().await else { return };
+        if let Some(bridge) = &cfg.bridge {
+            bridge.notify_agent_health(cfg.session_id.to_string(), &cfg.slug, "running");
+        }
+    }
     let mut buffer = String::new();
     // peer_ack (behavioral layer): set when the agent calls the `peer_ack` tool
     // during this turn; consumed at the turn's flush to suppress that turn's

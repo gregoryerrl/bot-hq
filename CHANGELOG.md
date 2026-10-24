@@ -13,6 +13,12 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- **A respawned reviewer drops the old process's dead status.** Its new event
+  pump publishes current liveness at startup, so a healthy replacement does
+  not become commit-blocking again when its last tool call is a minute old.
+  Retired pumps cannot reset the replacement's health; an actual exit still
+  marks it dead and blocks commits.
+
 - **Codex account folders work through filesystem aliases.** Hook identity
   checks accept the same file through paths such as `/tmp` and `/private/tmp`
   or a directory symlink. The configured account path stays unchanged, and

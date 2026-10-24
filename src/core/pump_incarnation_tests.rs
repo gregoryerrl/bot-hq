@@ -3,6 +3,54 @@ mod incarnation_fence {
     use crate::signaling::SignalingEvent;
 
     #[tokio::test]
+    async fn a_new_reviewer_pump_replaces_dead_health_without_an_rpc_grace_period() {
+        let (storage, state) = setup().await;
+        storage.ensure_session_roster("s1", 2).await.unwrap();
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        bridge.register_session_reviewers("s1".into(), vec!["eyes".into()]);
+        bridge.notify_agent_health("s1".into(), "eyes", "dead");
+        assert!(bridge.check_open_findings("s1").await.unwrap().starts_with("blocked: reviewer down"));
+        let mut signals = bridge.subscribe();
+        let mut cfg = fast_cfg("eyes");
+        cfg.bridge = Some(bridge.clone());
+        let (events, rx) = mpsc::channel(4);
+        let task = tokio::spawn(pump_agent(cfg, rx, storage, state));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let SignalingEvent::AgentHealth { agent, health, .. } = signals.recv().await.unwrap() {
+                    if agent == "eyes" && health == "running" { break; }
+                }
+            }
+        }).await.expect("the newly installed pump must retire its predecessor's dead mark");
+        // No RPC was recorded at all: this is durable for the incarnation,
+        // not the sixty-second exception for a recently active reviewer.
+        assert_eq!(bridge.check_open_findings("s1").await.unwrap(), "ok");
+        drop(events);
+        task.await.unwrap();
+        assert!(bridge.check_open_findings("s1").await.unwrap().starts_with("blocked: reviewer down"),
+            "a genuinely ended replacement must still block");
+    }
+
+    #[tokio::test]
+    async fn a_retired_pump_cannot_reset_its_replacements_dead_health_at_startup() {
+        let (storage, state) = setup().await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        bridge.register_session_reviewers("s1".into(), vec!["eyes".into()]);
+        bridge.notify_agent_health("s1".into(), "eyes", "dead");
+        let mut cfg = fast_cfg("eyes");
+        cfg.bridge = Some(bridge.clone());
+        cfg.incarnation.retire().await;
+        let (events, rx) = mpsc::channel(4);
+        events.send(AgentEvent::Init { session_id: Some("obsolete".into()), api_key_source: None }).await.unwrap();
+        drop(events);
+        pump_agent(cfg, rx, storage, state).await;
+        assert_eq!(bridge.current_agent_health("s1", "eyes").as_deref(), Some("dead"));
+        assert!(bridge.check_open_findings("s1").await.unwrap().starts_with("blocked: reviewer down"));
+    }
+
+    #[tokio::test]
     async fn pump_interrupts_and_completions_carry_the_actual_handle_identity() {
         let (storage, state) = setup().await;
         let (mut cfg, mut ring_rx) = cfg_with_ring("hands");
