@@ -26,6 +26,7 @@ mod bridge;
 pub(crate) use bridge::control_claim::ControlClaim;
 #[cfg(test)]
 pub(crate) use bridge::ApprovalContext;
+pub(crate) use bridge::McpTokenProof;
 pub(crate) use bridge::{commands_run, gate_surface, is_gh_api_read, is_outward, GateSurface, RunCommand};
 mod jsonrpc;
 /// Parity oracle for the session-focused redesign — pins today's tool

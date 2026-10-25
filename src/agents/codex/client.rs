@@ -51,6 +51,10 @@ pub enum ServerAnswer {
     Error { code: i64, message: String },
 }
 
+/// A connector-owned handler, never supplied by the model. Managed helpers
+/// use it for their bounded repository reads; ordinary participants use None.
+pub type ServerRequestHandler = Arc<dyn Fn(&str, &Value) -> Option<ServerAnswer> + Send + Sync>;
+
 /// Everything the server sends that the driver reads, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
@@ -157,6 +161,14 @@ impl CodexClient {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        Self::start_with_handler(reader, writer, None)
+    }
+
+    pub fn start_with_handler<R, W>(reader: R, writer: W, handler: Option<ServerRequestHandler>) -> (Self, mpsc::UnboundedReceiver<Incoming>)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (out_tx, mut out_rx) = mpsc::channel::<String>(256);
         let (in_tx, in_rx) = mpsc::unbounded_channel::<Incoming>();
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
@@ -222,7 +234,11 @@ impl CodexClient {
                     // A server request: answer it, then report it.
                     (Some(id), Some(method)) => {
                         let params = v.get("params").cloned().unwrap_or(Value::Null);
-                        let answer = answer_server_request(&method, &params);
+                        let handled = if let Some(handler) = handler.clone() {
+                            let method = method.clone(); let params = params.clone();
+                            tokio::task::spawn_blocking(move || handler(&method, &params)).await.ok().flatten()
+                        } else { None };
+                        let answer = handled.unwrap_or_else(|| answer_server_request(&method, &params));
                         let reply = match &answer {
                             ServerAnswer::Result(r) => json!({ "id": id, "result": r }),
                             ServerAnswer::Error { code, message } => {

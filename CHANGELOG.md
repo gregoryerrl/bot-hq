@@ -11,9 +11,15 @@ A second connector is on its way in: OpenAI's Codex CLI beside claude-code,
 chosen per saved model, so one session can run a Claude model and a GPT
 model side by side. Migration 0102 applies on first launch.
 
-Managed sub-agent development is in progress. The restricted Claude helper
-connector is being verified; the role checkbox and session batch controls are
-not enabled yet.
+Managed sub-agent development is in verification. Roles now offers an opt-in
+**Sub-agent development** capability: up to two read-only helpers, selected by
+saved Claude model/account, usable by either parent runtime. Starts return
+immediately; bounded status waits and stable request IDs prevent duplicate
+launches after a lost reply. Helpers stop with their parent's turn and leave
+recent evidence in one bounded document; retained findings and compact traces
+remain readable by reviewers. Final findings survive long commentary and file
+results. The parent still integrates and verifies the
+work. Codex helper selection is not enabled yet.
 
 ### Fixed
 

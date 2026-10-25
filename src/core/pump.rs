@@ -1852,6 +1852,9 @@ pub async fn pump_agent(
                 let current_completion = cfg.turn_epoch.as_ref().is_none_or(|cell| {
                     completed_epoch.is_some_and(|epoch| epoch != 0 && epoch == cell.load(Ordering::Acquire))
                 });
+                if current_completion {
+                    if let Some(epoch)=completed_epoch {cfg.incarnation.end_helper_epoch(epoch);}
+                }
                 // Context occupancy rides the turn-complete event because that
                 // is the only place claude-code reports `contextWindow`.
                 // Publish it BEFORE the error branch below: a failed turn still
@@ -2533,6 +2536,7 @@ pub async fn pump_agent(
         }
     }
 
+    cfg.incarnation.stop_helpers("parent event stream ended",true);
     let Some(_incarnation_lease) = cfg.incarnation.enter().await else { return };
     // Pump terminated (channel closed — the supervisor suppresses per-incarnation
     // Exited events, so a closed channel is the reliable "agent stopped" signal).
@@ -2639,6 +2643,29 @@ mod tests {
         s.create_session("s1", "test", None).await.unwrap();
         let st = Arc::new(Mutex::new(IpavState::default()));
         (s, st)
+    }
+
+    #[tokio::test]
+    async fn a_real_parent_completion_stops_helpers_before_the_ring_advances() {
+        let (storage,state)=setup().await;
+        let (mut cfg,mut ring)=cfg_with_ring("hands");
+        cfg.turn_epoch=Some(Arc::new(std::sync::atomic::AtomicU64::new(7)));
+        let stopped=Arc::new(std::sync::atomic::AtomicBool::new(false));let mark=stopped.clone();
+        let owner=cfg.incarnation.clone();
+        let _registration=owner.attach_helper("fixture-child".into(),owner.helper_ticket(7).unwrap(),Box::new(move |_|{mark.store(true,Ordering::Release);})).unwrap();
+        let (events,rx)=mpsc::channel(8);
+        let pump=tokio::spawn(pump_agent(cfg,rx,storage,state));
+        events.send(AgentEvent::Text("parent work complete".into())).await.unwrap();
+        events.send(AgentEvent::TurnComplete {stop_reason:None,subtype:Some("success".into()),is_error:false,api_error_status:None,context:ContextReport::none(ContextVerdict::NoUsage)}).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3),async {
+            while let Some(command)=ring.recv().await {
+                let command=match command {crate::core::sequencer::SequencerCommand::FromIncarnation {command,..}=>*command,command=>command};
+                if matches!(command,crate::core::sequencer::SequencerCommand::TurnComplete{..}) {break;}
+            }
+        }).await.unwrap();
+        assert!(stopped.load(Ordering::Acquire),"helper must stop on completion, not only when the pump closes");
+        assert!(owner.helper_ticket(7).is_none());
+        drop(events);pump.await.unwrap();
     }
 
     /// `slug` is the roster slug a real session carries (`"hands"` / `"eyes"`).

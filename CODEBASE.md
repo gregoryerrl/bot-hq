@@ -89,14 +89,17 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `src/agents/runtime.rs` | `Runtime` — the CONNECTOR a model row spawns through (`claude_code` \| `codex`, column value of `models.runtime`, 0102); `parse` refuses the unknown (Save), `from_column` reads it as claude-code (a pre-0102 row) | S |
 | `src/agents/incarnation.rs` | installed-runtime identity and host-write leases; retirement revokes new writers and drains admitted ones before replacement publication | S |
 | `src/agents/helpers.rs` | restricted Claude helper command: three read tools, strict empty MCP, no inherited instructions/plugins or parent authority; connector groundwork, not yet exposed by a role grant | S |
+| `src/agents/helper_reads.rs` | bounded host read/list/search tools; pinned directory descriptors reject traversal and symlink substitution; currently Unix-only | M |
+| `src/agents/codex/helpers.rs` | isolated Codex helper startup, inherited MCP disabling, dynamic repository-tool handler and owned startup/turn cleanup; no shared hook-file writes | M |
 | `tests/helper_claude_live_test.rs` | IGNORED native Claude helper inventory and outside/symlink read-boundary probe; explicit model/account selection, no live bot-hq server | — |
+| `tests/helper_codex_live_test.rs` | IGNORED native pair of Codex helpers, dynamic reads/outside refusal, inherited-MCP trap and unchanged shared hook file | — |
 | `src/agents/events.rs` | stdout/stderr pumps; `translate` stream-json → `AgentEvent`; context-window arithmetic (`parse_context_usage`) | L |
 | `src/agents/protocol.rs` | stream-json wire types both directions | M |
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |
 | `src/agents/prompts.rs` | layer-3 hardcoded role prose (`HANDS_ROLE`/`EYES_ROLE`, keyed by ROLE SLUG) — seeds `roles.description_prompt`; live prose is the DB row | L |
 | `src/agents/general_rules.rs` | layer-1 `GENERAL_RULES` (compiled in) | M |
 | `src/agents/handoff.rs` | the pinned handoff doc put back after a compaction: slug `handoff-<participant>`, the rendered file (byte budget, markers, the age stamp), its path under `.local/handoffs/`; written by `Storage::sync_handoff_file`, printed by `policy-check compact-handoff`; the compaction summary's instructions (`compaction_instructions`), printed by `policy-check pre-compact`; the user's words file `user-words.log` (length-prefixed records, `render_user_words` under its own budget), printed by `policy-check compact-user-words`; the mid-turn reminder's due file `<participant>.due` (`due_path`, `due_text`, `due_hook_output`, `clear_due`; B1e), written by the pump and printed by `policy-check handoff-due` | M |
-| `src/agents/capability.rs` | `Capability` (16), `CapabilitySet`, `ResolvedCapabilities`, `required_for` = THE tool→capability map | L |
+| `src/agents/capability.rs` | `Capability`, `CapabilitySet`, `ResolvedCapabilities`, `required_for` = THE tool→capability map | L |
 | `src/agents/capability_prompt.rs` | layer-2 generator: grants/denials + live roster prose from a `CapabilitySet` (`phrasing()` exhaustive) | L |
 | `src/agents/llm_proxy.rs` | localhost reverse proxy for non-Anthropic gateways (started by `src/main.rs`); forwards only to upstreams a spawn registered via `proxied_base_url`, refuses browser-shaped requests | L |
 | `docs/stream-json-events.md` | empirical claude-code stream schema (frozen since 2026-05; the raw captures it was written from were removed 2026-09-09 — they were real sessions, and no test ever loaded them) | — |
@@ -217,6 +220,7 @@ check.
 | `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the big glue fn); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
 | `src/core/spawn_draft_tests.rs` | async draft/publication wire tests for both connectors: close/rollback during probe, frozen input settings, staged metadata/token/notices and operation-owned publication | — |
 | `src/core/participant_runtime.rs` | host-owned live change worker: reserve/claim, retire, stage, publish or restore; cancellation and process shutdown receipts | M |
+| `src/core/helpers.rs` | managed helper start/status/cancel, owned batches, model selection and transcript/result collection; current public selection is Claude-only | M |
 | `src/core/live_participant.rs` | candidate prompt/config/pump construction, frozen-frontier/window-budgeted history excerpts with authorship and truncation, dynamic activity/watchdog/reviewer roster refresh | M |
 | `src/core/participant_runtime_tests.rs` | injected connector tests through the runtime worker, real ring, storage and close path | — |
 | `src/core/close_learnings.rs` | pure `decide`/`plan(decision, claimed, in_flight)` for the D15 close-out epilogue (in-flight decides first, round 11), `outcome_notice` | M |
@@ -492,6 +496,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/models.rs` | `models` registry (incl. `claude_config_dir`, 0090) + `app_settings` kv | M |
 | `src/storage/codex_hook_trust.rs` | `codex_hook_trust` — exact reported key/hash cached under the selected credential home (0103); `codex_hook_trust_candidates` supplies same-home rows for physical-file matching on probe failure (#120) | S |
 | `src/storage/participant_changes.rs` | Durable roster-change intent (0107): revision/selection validation, one pending/applying request per session, idempotent request IDs, claim/cancel transitions; completion delegates to transactional mutation/recovery | M |
+| `src/storage/helpers.rs` | durable helper IDs/results, grant revalidation, once-only transcript append and restart cancellation; migration 0111 | S |
 | `src/storage/participant_mutations.rs` | `prepare_participant_change` snapshots and appends/disables/resets atomically; initial invite frontier, frozen spawn inputs and delivered cursor, `publish_participant_spawn` (metadata + applied status under preparation revision/frontier), owned-field rollback, cold-start recovery, and close/reopen settlement; caller must hold the ring boundary | M |
 | `src/storage/account_marks.rs` | `account_marks` — the advisory usage-limit mark per Claude account (config dir + organisation, 0091) | S |
 | `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |

@@ -87,15 +87,29 @@ multi-thread runtime. Tauri owns the OS main thread.
 
 Every agent is a subprocess.
 
-**Managed helpers (connector groundwork, not yet exposed):**
+**Managed helpers (in verification):**
 `spawn_claude_helper` uses the existing process cleanup and event path with a
 separate restricted command. It starts fresh with only Read/Grep/Glob, confines
 file reads to the working directory, refuses inbound peer messages, and excludes
 MCP, inherited instructions, plugins and parent bot-hq identity. Model routing
 and account authentication remain explicit; only the selected model's catalog
 mapping is copied from its arbitrary CLI-settings fragment. Helpers receive a
-separate brief outside the participant channel. The owning batch supervisor,
-Codex helper connector and role capability are still being connected.
+separate brief outside the participant channel. The opt-in `delegate_tasks`
+capability (no preset grant) exposes models/start/status/cancel. Starts record a
+stable request ID before model work; repeats with identical content reuse it.
+One batch per parent contains at most two helpers. Status waits are at most 45 s,
+and the host bounds every response to 50 s. Parent interrupts, turn completion,
+retirement and process teardown cancel attached helpers, including starts still
+waiting to attach. Results and recent `helpers` document excerpts commit together;
+unchanged generated excerpts rotate at four batches / 128 KiB while user annotations survive.
+The read-channel tool `helper_result` pages retained batch findings and compact traces,
+so reviewers do not need the launch grant. Final findings are separated from tool
+commentary; bounded traces preserve the end and summarize file results. Restart
+marks unfinished batches interrupted without replay. The parent verifies
+evidence and owns integration. Either parent runtime can select a saved Claude
+helper model/account. The Codex helper connector remains unavailable through the
+tool until its remaining native-tool acceptance checks pass. Native Claude
+delegation outside this managed feature is unchanged pending the user's choice.
 
 ### One agent backend
 
@@ -900,7 +914,7 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (49)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (51)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
@@ -909,7 +923,7 @@ since D37 — see "The phase-advance vote"),
 `disposition_finding`, `check_open_findings`, `get_finding`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_edit`, `session_doc_search`,
-`session_doc_read`, `session_history`, `app_control`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
+`session_doc_read`, `session_history`, `helper_result`, `delegate_tasks`, `app_control`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
 `cl_write_file`, `cl_edit_file`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`,
 `terminal_exec`, `terminal_read`,

@@ -45,8 +45,8 @@ async fn claude_helper_native_inventory_and_read_boundary() {
         let mut text = String::new();
         BufReader::new(stderr).take(16_384).read_to_string(&mut text).await.unwrap(); text
     });
-    let brief = format!("Make these real tool calls, continuing after denials: Read {}; Grep INSIDE_READER in {}; Glob inside.txt in {}. Then Read {}; Grep PRIVATE in {}; Glob outside.txt in {}. On Unix also Read {} (a symlink). Do not read CLAUDE.md. Finally try Bash, Write, Agent, SendMessage and an MCP tool only if they are actually available; otherwise state they are absent. Report each read/search result briefly; do not infer a denial without attempting its available tool.",
-        inside.display(), repo.display(), repo.display(), outside.display(), outside.display(), root.path().display(), repo.join("escape.txt").display());
+    let brief = format!("Make these real tool calls, continuing after denials: Read {}; Grep INSIDE_READER in {}; Glob inside.txt in {}. Then Read {}; Grep PRIVATE in {}; Glob outside.txt in {}. On Unix also Read {} (a symlink). Also Grep OUTSIDE_PRIVATE across the whole repository {} to check traversal. Do not read CLAUDE.md or AGENTS.md. Finally try Bash, Write, Agent, SendMessage and an MCP tool only if they are actually available; otherwise state they are absent. Report each read/search result briefly; do not infer a denial without attempting its available tool.",
+        inside.display(), repo.display(), repo.display(), outside.display(), outside.display(), root.path().display(), repo.join("escape.txt").display(), repo.display());
     let input = json!({"type":"user","message":{"role":"user","content":brief}}).to_string()+"\n";
     child.stdin.take().unwrap().write_all(input.as_bytes()).await.unwrap();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
@@ -84,9 +84,15 @@ async fn claude_helper_native_inventory_and_read_boundary() {
     for tool in ["Read","Grep","Glob"] { assert!(uses.iter().any(|v|v["name"]==tool), "{tool} was not exercised"); }
     let errors: Vec<_> = events.iter().filter(|v|v["type"]=="user").flat_map(|v|v["message"]["content"].as_array().into_iter().flatten())
         .filter(|v|v["type"]=="tool_result" && v["is_error"]==true).collect();
-    assert!(errors.len()>=3,"outside Read/Grep/Glob must each refuse; results={errors:?}");
-    #[cfg(unix)]
-    assert!(uses.iter().any(|v|v["name"]=="Read" && v["input"]["file_path"].as_str().is_some_and(|p|p.ends_with("escape.txt"))), "symlink must be exercised");
+    let denied = |tool: &str, key: &str, path: &std::path::Path| {
+        let call = uses.iter().find(|v|v["name"]==tool && v["input"][key].as_str()==path.to_str()).expect("required outside attempt missing");
+        assert!(errors.iter().any(|result|result["tool_use_id"]==call["id"]), "{tool} at {} must be denied", path.display());
+    };
+    denied("Read","file_path",&outside);
+    denied("Grep","path",&outside);
+    denied("Glob","path",root.path());
+    #[cfg(unix)] denied("Read","file_path",&repo.join("escape.txt"));
+    assert!(uses.iter().any(|v|v["name"]=="Grep" && v["input"]["path"].as_str()==repo.to_str() && v["input"]["pattern"]=="OUTSIDE_PRIVATE"), "search traversal must be exercised");
     let completed = events.last().expect("completed result");
     assert_eq!(completed["type"],"result");
     assert_eq!(completed["is_error"],false,"native turn failed: {completed}");

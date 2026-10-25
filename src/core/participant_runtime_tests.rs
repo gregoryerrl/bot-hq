@@ -264,6 +264,183 @@ async fn driver_rpc(state: &Arc<AppState>, args: serde_json::Value) -> anyhow::R
     Ok(serde_json::from_str(text)?)
 }
 
+async fn helper_rpc(state: &Arc<AppState>, args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let body=reqwest::Client::new().post(format!("http://{}/sessions/s1/hands/mcp",state.signaling_addr))
+        .header("x-bot-hq-mcp-token","token-hands").header("content-type","application/json")
+        .body(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delegate_tasks","arguments":args}}).to_string())
+        .send().await?.text().await?;
+    let reply: serde_json::Value=serde_json::from_str(&body)?;
+    anyhow::ensure!(reply.get("error").is_none(),"{reply}");
+    let text=reply["result"]["content"][0]["text"].as_str().context("missing helper reply")?;
+    anyhow::ensure!(reply["result"]["isError"]!=true,"{text}");
+    Ok(serde_json::from_str(text)?)
+}
+
+async fn helper_fixture() -> (Fixture,mpsc::UnboundedReceiver<(String,Seat)>) {
+    helper_fixture_with_database(false).await
+}
+async fn helper_fixture_with_database(disk: bool) -> (Fixture,mpsc::UnboundedReceiver<(String,Seat)>) {
+    let mut f=Fixture::with_database(false,disk).await;
+    sqlx::query("UPDATE roles SET capabilities=json_insert(capabilities,'$[#]','delegate_tasks') WHERE id=?").bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap();
+    sqlx::query("UPDATE session_participants SET capabilities=json_insert(capabilities,'$[#]','delegate_tasks') WHERE id=?").bind(f.rows[0].id).execute(f.state.storage.pool()).await.unwrap();
+    let (tx,rx)=mpsc::unbounded_channel();
+    f.state.helpers.set_spawner(Arc::new(move |cfg,brief| {
+        let tx=tx.clone(); Box::pin(async move {
+            let (handle,seat)=fake_agent(&cfg.session_id,&cfg.agent_name);
+            tx.send((brief,seat)).unwrap(); Ok(handle)
+        })
+    }));
+    f.state.storage.post_to_channel("s1","user",None,"text","Investigate using helpers.",None).await.unwrap();
+    f.ring.send(SequencerCommand::UserMessage {mentions:vec![],restarts_rotation:true}).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3),f.seats[0].input.recv()).await.unwrap().unwrap();
+    (f,rx)
+}
+
+fn helper_start(id: &str) -> serde_json::Value {
+    serde_json::json!({"action":"start","request_id":id,"tasks":[{"goal":"Inspect fixture","files":["source.rs"],"expected_evidence":"path:line","model_id":"old"}],"timeout_secs":30})
+}
+
+#[tokio::test]
+async fn helpers_start_once_collect_transcripts_and_do_not_join_the_roster() {
+    let (f,mut spawned)=helper_fixture().await;
+    let request=helper_start("one");
+    let first=helper_rpc(&f.state,request.clone()).await.unwrap();
+    let (brief,seat)=tokio::time::timeout(Duration::from_secs(3),spawned.recv()).await.unwrap().unwrap();
+    assert!(brief.contains("Inspect fixture"));
+    let retry=helper_rpc(&f.state,request.clone()).await.unwrap(); assert_eq!(first["batch_id"],retry["batch_id"]);
+    assert!(spawned.try_recv().is_err());
+    assert!(helper_rpc(&f.state,helper_start("second")).await.unwrap_err().to_string().contains("active helper"));
+    let mut conflict=request.clone();conflict["tasks"][0]["goal"]="Changed".into();
+    assert!(helper_rpc(&f.state,conflict).await.unwrap_err().to_string().contains("different batch"));
+    seat.events.send(AgentEvent::Text("source.rs:1 evidence".into())).await.unwrap();
+    seat.events.send(AgentEvent::TurnComplete {stop_reason:None,subtype:Some("success".into()),is_error:false,api_error_status:None,context:crate::agents::spawn::ContextReport::none(crate::agents::spawn::ContextVerdict::NoUsage)}).await.unwrap();
+    let result=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"one","wait_secs":5})).await.unwrap();
+    assert_eq!(result["status"],"completed"); assert_eq!(result["result"]["helpers"][0]["cleanup_confirmed"],true);
+    assert!(result["result"]["helpers"][0].get("transcript").is_none());
+    let doc=f.state.storage.session_document_by_slug("s1","helpers").await.unwrap().unwrap();
+    assert!(doc.body.contains("source.rs:1 evidence") && doc.body.contains("Inspect fixture"));
+    assert_eq!(f.state.storage.participants_for_session("s1").await.unwrap().len(),2);
+    assert_eq!(helper_rpc(&f.state,request).await.unwrap()["batch_id"],first["batch_id"]);
+    assert!(spawned.try_recv().is_err());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn helpers_preserve_final_findings_after_long_commentary_and_file_results() {
+    let (f,mut spawned)=helper_fixture().await;
+    helper_rpc(&f.state,helper_start("long-answer")).await.unwrap();
+    let (_,seat)=tokio::time::timeout(Duration::from_secs(3),spawned.recv()).await.unwrap().unwrap();
+    seat.events.send(AgentEvent::Text("EARLY_COMMENTARY ".repeat(2000))).await.unwrap();
+    seat.events.send(AgentEvent::ToolUse {id:"read".into(),name:"Read".into(),input:serde_json::json!({"file_path":"src/source.rs"})}).await.unwrap();
+    seat.events.send(AgentEvent::ToolResult {tool_use_id:"read".into(),content:"BULKY_FILE_CONTENT ".repeat(20_000),is_error:false}).await.unwrap();
+    seat.events.send(AgentEvent::Text("Checking the call site. ".repeat(700))).await.unwrap();
+    seat.events.send(AgentEvent::ToolUse {id:"grep".into(),name:"Grep".into(),input:serde_json::json!({"pattern":"call_site"})}).await.unwrap();
+    seat.events.send(AgentEvent::ToolResult {tool_use_id:"grep".into(),content:"source.rs:42".into(),is_error:false}).await.unwrap();
+    let finding="src/source.rs:42 — final finding with the actionable correction.";
+    seat.events.send(AgentEvent::Text(finding.into())).await.unwrap();
+    seat.events.send(AgentEvent::TurnComplete {stop_reason:None,subtype:Some("success".into()),is_error:false,api_error_status:None,context:crate::agents::spawn::ContextReport::none(crate::agents::spawn::ContextVerdict::NoUsage)}).await.unwrap();
+    let result=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"long-answer","wait_secs":5})).await.unwrap();
+    assert_eq!(result["result"]["helpers"][0]["output"],finding);
+    let doc=f.state.storage.session_document_by_slug("s1","helpers").await.unwrap().unwrap();
+    assert!(doc.body.contains(finding));
+    assert!(!doc.body.contains(&"BULKY_FILE_CONTENT ".repeat(100)));
+    f.end().await;
+}
+
+#[tokio::test]
+async fn helper_result_is_paged_and_readable_by_a_reviewer_without_launch_permission() {
+    let (f,mut spawned)=helper_fixture().await;
+    let started=helper_rpc(&f.state,helper_start("readable")).await.unwrap();
+    let (_,seat)=tokio::time::timeout(Duration::from_secs(3),spawned.recv()).await.unwrap().unwrap();
+    let answer=format!("FINAL_START {} FINAL_END","evidence ".repeat(3000));
+    seat.events.send(AgentEvent::Text(answer.clone())).await.unwrap();
+    seat.events.send(AgentEvent::TurnComplete {stop_reason:None,subtype:Some("success".into()),is_error:false,api_error_status:None,context:crate::agents::spawn::ContextReport::none(crate::agents::spawn::ContextVerdict::NoUsage)}).await.unwrap();
+    let status=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"readable","wait_secs":5})).await.unwrap();
+    assert_eq!(status["result"]["helpers"][0]["output_preview_truncated"],true);
+    let batch=started["batch_id"].as_str().unwrap();let mut offset=0;let mut hash=None;let mut text=String::new();
+    loop {
+        let raw=reqwest::Client::new().post(format!("http://{}/sessions/s1/eyes/mcp",f.state.signaling_addr))
+            .header("x-bot-hq-mcp-token","token-eyes").header("content-type","application/json")
+            .body(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"helper_result","arguments":{"batch_id":batch,"offset_bytes":offset}}}).to_string())
+            .send().await.unwrap().text().await.unwrap();
+        let reply: serde_json::Value=serde_json::from_str(&raw).unwrap();assert!(reply.get("error").is_none(),"{reply}");
+        assert_ne!(reply["result"]["isError"],true,"{reply}");
+        let page: serde_json::Value=serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if let Some(hash)=&hash {assert_eq!(&page["sha256"],hash);} else {hash=Some(page["sha256"].clone());}
+        assert!(page["content"].as_str().unwrap().len()<=16*1024);text.push_str(page["content"].as_str().unwrap());
+        let Some(next)=page["next_offset_bytes"].as_u64() else {break};assert!(next>offset);offset=next;
+    }
+    let saved: serde_json::Value=serde_json::from_str(&text).unwrap();assert_eq!(saved["helpers"][0]["output"],answer);
+    assert!(f.state.storage.helper_result("another-session",Some(batch),None,0).await.is_err());
+    let index=f.state.storage.helper_result("s1",None,None,0).await.unwrap();assert_eq!(index["batches"][0]["batch_id"],batch);
+    assert!(f.state.storage.helper_actor("s1","eyes").await.is_err(),"reviewer still cannot launch helpers");
+    f.end().await;
+}
+
+#[tokio::test]
+async fn helpers_stop_on_parent_interrupt_retirement_and_turn_end() {
+    for mode in ["interrupt","retire","complete"] {
+        let (f,mut spawned)=helper_fixture().await;
+        helper_rpc(&f.state,helper_start("cancelled")).await.unwrap();
+        let (_,mut seat)=tokio::time::timeout(Duration::from_secs(3),spawned.recv()).await.unwrap().unwrap();
+        let owner={let sessions=f.state.sessions.lock().await;let agent=&sessions["s1"].participants[0];
+            let epoch=agent.turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
+            if mode=="interrupt" {agent.handle.interrupt_at("test-pause",epoch);}
+            if mode=="complete" {agent.handle.incarnation().end_helper_epoch(epoch);}
+            agent.handle.incarnation()};
+        if mode=="retire" {owner.retire().await;}
+        let result=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"cancelled","wait_secs":5})).await.unwrap();
+        assert_eq!(result["status"],"cancelled","{mode}: {result}");
+        if !*seat.stopped.borrow() {tokio::time::timeout(Duration::from_secs(2),seat.stopped.changed()).await.unwrap().unwrap();}
+        assert!(*seat.stopped.borrow());
+        f.end().await;
+    }
+}
+
+#[tokio::test]
+async fn helpers_enforce_grants_model_selection_and_wait_bounds() {
+    let (f,mut spawned)=helper_fixture().await;
+    assert!(!helper_rpc(&f.state,serde_json::json!({"action":"models"})).await.unwrap()["models"].as_array().unwrap().is_empty());
+    let mut bad=helper_start("bad");bad["tasks"][0]["model_id"]="missing".into();assert!(helper_rpc(&f.state,bad).await.is_err());
+    assert!(helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"missing","wait_secs":46})).await.unwrap_err().to_string().contains("45"));
+    sqlx::query("UPDATE roles SET capabilities='[]' WHERE id=?").bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap();
+    assert!(helper_rpc(&f.state,helper_start("revoked")).await.unwrap_err().to_string().contains("revoked"));
+    assert!(spawned.try_recv().is_err());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn helpers_queued_start_loses_to_pause_or_revocation() {
+    for revoke in [false,true] {
+        let (f,mut spawned)=helper_fixture_with_database(true).await;
+        let reached=Arc::new(tokio::sync::Notify::new());f.state.helpers.observe_claim(reached.clone());
+        let mut held=f.state.storage.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let state=f.state.clone();let start=tokio::spawn(async move{helper_rpc(&state,helper_start("queued")).await});
+        tokio::time::timeout(Duration::from_secs(3),reached.notified()).await.unwrap();
+        if revoke {sqlx::query("UPDATE roles SET capabilities='[]' WHERE id=?").bind(f.rows[0].role_id).execute(&mut *held).await.unwrap();}
+        else {let activity=f.state.sessions.lock().await["s1"].activity.clone();activity.set_paused(true);activity.set_paused(false);}
+        held.commit().await.unwrap();
+        assert!(start.await.unwrap().is_err());assert!(spawned.try_recv().is_err());
+        assert!(f.state.storage.helper_batch("s1",f.rows[0].id,"queued").await.unwrap().is_none());
+        f.end().await;
+    }
+}
+
+#[tokio::test]
+async fn helpers_cancel_and_expire_without_replaying_the_request() {
+    for timeout in [false,true] {
+        let (f,mut spawned)=helper_fixture().await;
+        let mut request=helper_start("ending");if timeout {request["timeout_secs"]=1.into();}
+        let started=helper_rpc(&f.state,request.clone()).await.unwrap();
+        let (_,seat)=tokio::time::timeout(Duration::from_secs(3),spawned.recv()).await.unwrap().unwrap();
+        if !timeout {helper_rpc(&f.state,serde_json::json!({"action":"cancel","request_id":"ending"})).await.unwrap();}
+        let row=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"ending","wait_secs":5})).await.unwrap();
+        assert_eq!(row["status"],"cancelled");assert!(*seat.stopped.borrow());
+        assert_eq!(helper_rpc(&f.state,request).await.unwrap()["batch_id"],started["batch_id"]);
+        assert!(spawned.try_recv().is_err());f.end().await;
+    }
+}
+
 async fn decision_args(f: &Fixture, id: &str, picked: &str) -> serde_json::Value {
     let choice = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":id})).await.unwrap();
     serde_json::json!({"action":"answer","choice_id":id,"picked":picked,"expected_choice_sha256":choice["result"]["sha256"],"confirm_stale":true})

@@ -13,6 +13,7 @@ pub use broadcast::{post_system_notice, Authored};
 pub mod mentions;
 pub mod close_learnings;
 pub mod git;
+pub mod helpers;
 pub mod pump;
 pub mod ipav;
 pub mod loopback;

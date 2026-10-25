@@ -9,6 +9,7 @@
 pub mod client;
 pub mod events;
 pub mod home;
+pub mod helpers;
 pub mod probe;
 pub mod spawn;
 

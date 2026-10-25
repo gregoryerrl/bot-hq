@@ -1146,6 +1146,13 @@ impl SignalingBridge {
         let _ = self.app_state.set(Arc::downgrade(state));
     }
 
+    pub(crate) async fn delegate_tasks(&self, session: &str, slug: &str, proof: Option<&McpTokenProof>, request: crate::core::helpers::DelegateRequest) -> anyhow::Result<serde_json::Value> {
+        use anyhow::Context;
+        let core=self.app_state.get().and_then(Weak::upgrade).context("helper runtime is not connected")?;
+        tokio::time::timeout(std::time::Duration::from_secs(50),core.delegate_tasks(session,slug,proof,request)).await
+            .context("helper request exceeded its response bound; read status or retry the identical request_id, never invent a replacement ID")?
+    }
+
 
     /// Register this launch's hook secret (see the `hook_token` field). Called
     /// once from `main.rs` after the token file is written.

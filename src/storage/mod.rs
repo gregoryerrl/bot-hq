@@ -37,6 +37,8 @@ mod context_readings;
 mod feedback;
 mod findings;
 mod gate_results;
+mod helpers;
+pub use helpers::HelperBatch;
 pub use gate_results::UnreadGateResult;
 mod gc;
 mod messages;

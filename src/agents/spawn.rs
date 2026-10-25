@@ -788,9 +788,8 @@ impl ParticipantInput {
     /// Hand a message to the CURRENT incarnation. Private to this module
     /// because it is supervisor plumbing, not a send.
     ///
-    /// **Only one of its two call sites is re-pointing, though — this doc said
-    /// both were.** They differ in exactly the way that matters for whether the
-    /// text is on record:
+    /// Only the supervisor's forwarding call is re-pointing. The other two
+    /// callers author input; their recording contracts differ:
     ///
     /// - the bridge in [`supervise`]'s select, which forwards whatever came off
     ///   `out_input_rx`. That message WAS authored one channel upstream, and if
@@ -801,6 +800,9 @@ impl ParticipantInput {
     ///   sets it, and nothing in this file writes it to storage — `supervise`
     ///   holds no `Storage` at all. So the resumed child reads a `[bot-hq]`
     ///   instruction that appears in no channel and no transcript.
+    /// - [`spawn_claude_helper`] delivers the helper's initial brief outside
+    ///   the participant channel. Its future batch owner must persist that
+    ///   brief in the helper ledger first; the connector alone does not.
     ///
     /// That makes the nudge the one ungated, unrecorded write to a
     /// participant's stdin (`send_unrouted`, once the other, went with the
@@ -863,6 +865,7 @@ pub(crate) struct StopControl {
 
 impl StopControl {
     pub fn kill(&self) {
+        self.incarnation.stop_helpers("parent process stopped",true);
         if let Some(tx) = self.kill.lock().unwrap_or_else(|p| p.into_inner()).take() { let _ = tx.send(()); }
     }
     pub async fn retire_and_wait(&self, timeout: Duration) -> std::result::Result<(), String> {
@@ -994,6 +997,7 @@ impl AgentHandle {
     /// participant goes through `core::session::SessionAgent::interrupt`, which
     /// supplies the epoch off the participant's own cell.
     pub fn interrupt_at(&self, request_id: impl Into<String>, epoch: u64) -> bool {
+        self.incarnation.stop_helpers("parent turn interrupted",false);
         self.interrupted_epoch
             .store(epoch, std::sync::atomic::Ordering::Release);
         self.interrupt(request_id)

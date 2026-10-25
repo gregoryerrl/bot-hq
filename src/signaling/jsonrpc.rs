@@ -748,6 +748,24 @@ async fn call_tool(
         return Ok(refuse_gated_tool(name, caller, bridge).await);
     }
     match name {
+        "helper_result" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Query { batch_id: Option<String>, before_id: Option<String>, #[serde(default)] offset_bytes: usize }
+            let query: Query=serde_json::from_value(args).map_err(|e|JsonRpcError::new(JsonRpcError::INVALID_PARAMS,e.to_string()))?;
+            let storage=bridge.storage_handle().await.ok_or_else(||JsonRpcError::new(JsonRpcError::INTERNAL_ERROR,"storage unavailable"))?;
+            match storage.helper_result(&caller.session_id,query.batch_id.as_deref(),query.before_id.as_deref(),query.offset_bytes).await {
+                Ok(value)=>Ok(ToolCallResult::text(value.to_string())),
+                Err(error)=>Ok(ToolCallResult::error(format!("{error:#}"))),
+            }
+        }
+        "delegate_tasks" => {
+            let request=serde_json::from_value(args).map_err(|e|JsonRpcError::new(JsonRpcError::INVALID_PARAMS,e.to_string()))?;
+            match bridge.delegate_tasks(&caller.session_id,&caller.agent,caller.token_proof.as_ref(),request).await {
+                Ok(value)=>Ok(ToolCallResult::text(value.to_string())),
+                Err(error)=>Ok(ToolCallResult::error(format!("{error:#}"))),
+            }
+        }
         "app_control" => {
             let request = serde_json::from_value(args).map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
             match bridge.app_control(&caller.session_id, &caller.agent, request, caller.token_proof.as_ref()).await {

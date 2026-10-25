@@ -284,6 +284,7 @@ fn short_duration(ms: i64) -> String {
 }
 
 pub struct AppState {
+    pub(crate) helpers: super::helpers::HelperRegistry,
     pub paths: Paths,
     pub storage: Storage,
     pub bridge: Arc<SignalingBridge>,
@@ -510,9 +511,15 @@ impl AppState {
     }
 
     pub async fn new(paths: Paths, storage: Storage, server: SignalingServer) -> Self {
+        let helpers=super::helpers::HelperRegistry::default();
+        match storage.recover_helper_batches().await {
+            Ok(())=>helpers.recovered.store(true,Ordering::Release),
+            Err(error)=>tracing::error!(%error,"helper recovery failed; starts remain disabled"),
+        }
         let bridge = Arc::clone(&server.bridge);
         let addr = server.local_addr;
         Self {
+            helpers,
             paths,
             storage,
             bridge,

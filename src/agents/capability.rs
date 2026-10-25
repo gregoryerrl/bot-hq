@@ -47,6 +47,7 @@ pub enum Capability {
     WriteContextLibrary,
     // Explicit application-wide delegation; never part of a preset.
     ControlBotHq,
+    DelegateTasks,
 }
 
 impl Capability {
@@ -69,7 +70,7 @@ impl Capability {
     /// below. `all_lists_every_variant_exactly_once` and `capability_prompt`'s
     /// `all_covers_every_capability_the_presets_and_the_tool_map_name` then
     /// cross-check this array against three independent sources.
-    pub const ALL: [Capability; 17] = {
+    pub const ALL: [Capability; 18] = {
         use Capability::*;
         [
             ReadChannel,
@@ -89,6 +90,7 @@ impl Capability {
             RunTerminal,
             WriteContextLibrary,
             ControlBotHq,
+            DelegateTasks,
         ]
     };
 
@@ -105,6 +107,7 @@ impl Capability {
             EditFiles | RunBash | GatedBash | RunTerminal => "Execution",
             WriteContextLibrary => "Knowledge",
             ControlBotHq => "Application control",
+            DelegateTasks => "Execution",
         }
     }
 
@@ -129,6 +132,7 @@ impl Capability {
             RunTerminal => "Run the terminal",
             WriteContextLibrary => "Write the Context Library",
             ControlBotHq => "Full control of bot-hq",
+            DelegateTasks => "Sub-agent development",
         }
     }
 
@@ -154,6 +158,7 @@ impl Capability {
             RunTerminal => "Drive the session's terminal (`terminal_exec`).",
             WriteContextLibrary => "Add to or edit the Context Library.",
             ControlBotHq => "Delegate user-level application control across projects and sessions, including approving its own commands and changing enforcement settings. New participants only; unchecking revokes existing controllers immediately. Grant only to a role you intend to drive bot-hq.",
+            DelegateTasks => "Run up to two managed read-only helpers using a selected saved model/account. Helpers consume that account's usage; the parent integrates and verifies their work. New participants only. Helpers stop with the parent's turn. Existing native Claude delegation is unchanged.",
         }
     }
 
@@ -177,6 +182,7 @@ impl Capability {
             RunTerminal => "run_terminal",
             WriteContextLibrary => "write_context_library",
             ControlBotHq => "control_bot_hq",
+            DelegateTasks => "delegate_tasks",
         }
     }
 
@@ -200,6 +206,7 @@ impl Capability {
             "run_terminal" => RunTerminal,
             "write_context_library" => WriteContextLibrary,
             "control_bot_hq" => ControlBotHq,
+            "delegate_tasks" => DelegateTasks,
             _ => return None,
         })
     }
@@ -228,7 +235,9 @@ pub fn required_for(tool: &str) -> Option<Capability> {
     use Capability::*;
     Some(match tool {
         "session_history" => ReadChannel,
+        "helper_result" => ReadChannel,
         "app_control" => ControlBotHq,
+        "delegate_tasks" => DelegateTasks,
         "ask_user_choice" => AskUser,
         "mark_awaiting_user" | "halt" => Halt,
         "request_approval" => ParkApproval,
@@ -642,13 +651,13 @@ mod tests {
                 ReadChannel | PostChannel | AskUser | ParkApproval | SupersedeQuestion | Halt
                 | CloseSession | FileFinding | ApproveFinding
                 | DispositionFinding | OverrideReviewerBlock | EditFiles | RunBash | GatedBash
-                | RunTerminal | WriteContextLibrary | ControlBotHq => {}
+                | RunTerminal | WriteContextLibrary | ControlBotHq | DelegateTasks => {}
             }
             assert!(seen.insert(cap), "{} is listed twice in ALL", cap.slug());
         }
         assert_eq!(
             seen.len(),
-            17,
+            18,
             "a capability is missing from `Capability::ALL`"
         );
     }

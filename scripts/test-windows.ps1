@@ -69,6 +69,7 @@ try {
         --test codebase_map_test `
         --test codex_live_test `
         --test helper_claude_live_test `
+        --test helper_codex_live_test `
         --test no_raw_spawn_test `
         --test phase_vote_wiring_test `
         --test policy_check_test `
