@@ -1821,8 +1821,9 @@ fn build_command(cfg: &SpawnConfig) -> Command {
     // to mutate. A prompt instruction alone failed (2026-05-28: the reviewer of
     // the day ran Edit + git commit + gh issue create on a client repo).
     // `--dangerously-skip-
-    // permissions` (bypass mode) CANNOT be used to enforce this because bypass
-    // mode disables the permission layer entirely — deny rules are ignored.
+    // permissions` (bypass mode) is not our read-only permission posture.
+    // Bare tool-name denies remove tools independently; scoped command rules
+    // below still use dontAsk rather than depending on bypass behavior.
     // Instead: `dontAsk` (no prompts, deny-by-default) + an allowlist of read-
     // only tools + an explicit denylist of the mutation surface. Deny wins
     // over allow, so `Bash` is allowed wholesale for read-only investigation
@@ -1926,10 +1927,11 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         }
     } else {
         cmd.arg("--dangerously-skip-permissions");
+        cmd.args(["--disallowedTools", &crate::policy::read_only_rules::NATIVE_DELEGATION_TOOL_NAMES.join(" ")]);
 
         // Mechanical backstop for a role that may edit. It runs in bypass mode,
-        // where claude-code's native deny rules are IGNORED — so the only thing
-        // that can hard-stop an outward/mutating command is a hook. Inject a
+        // where permission prompts are skipped. Bare-name native delegation
+        // removal above does not enforce shell policy, so inject a
         // PreToolUse Bash hook that calls back into THIS binary's `policy-check
         // tool-gate` to match each Bash command against the GLOBAL Tool Gate
         // keyword config BEFORE it executes: a `gate` keyword blocks the direct
@@ -3565,13 +3567,94 @@ mod tests {
     }
 
     #[test]
+    fn native_delegation_is_removed_for_every_role_and_helper_grant() {
+        for edits in [false, true] {
+            for helpers in [false, true] {
+                let mut c = cfg();
+                let mut grants = vec!["read_channel"];
+                if edits { grants.push("edit_files"); }
+                if helpers { grants.push("delegate_tasks"); }
+                c.capabilities = crate::agents::ResolvedCapabilities::Known(crate::agents::CapabilitySet::from_slugs(&grants));
+                let argv = debug_command(&c);
+                let denied = argv.windows(2).find(|w|w[0]=="--disallowedTools")
+                    .map(|w|w[1].split_whitespace().collect::<Vec<_>>()).unwrap_or_default();
+                for name in ["Agent", "Workflow", "Task"] {
+                    assert!(denied.contains(&name), "edits={edits} helpers={helpers}: {name} remains available");
+                }
+                assert_eq!(denied.contains(&"Write"), !edits, "ordinary editing posture must not change");
+            }
+        }
+        let instructions = include_str!("../../CLAUDE.md");
+        assert!(instructions.contains("`delegate_tasks`"));
+        assert!(!instructions.contains("spawn the `Agent` tool"));
+    }
+
+    #[tokio::test]
+    #[ignore = "starts native Claude; select BOT_HQ_HELPER_LIVE_MODEL and BOT_HQ_HELPER_LIVE_ACCOUNT"]
+    async fn native_delegation_tools_are_absent_in_both_claude_postures() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let model = std::env::var("BOT_HQ_HELPER_LIVE_MODEL").unwrap();
+        let account = std::env::var("BOT_HQ_HELPER_LIVE_ACCOUNT").unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let prompt = temp.path().join("prompt.txt");
+        std::fs::write(&prompt,"Tool inventory acceptance probe. Reply READY; do not use tools.").unwrap();
+        let mcp = temp.path().join("mcp.json");
+        std::fs::write(&mcp,r#"{"mcpServers":{}}"#).unwrap();
+        for edits in [false, true] {
+            let mut c = cfg();
+            c.config.model_name = model.clone();
+            c.config.auth_token = None;
+            c.account_dir = Some(account.clone());
+            c.working_dir = Some(temp.path().into());
+            c.system_prompt_path = prompt.clone();
+            c.mcp_config_path = Some(mcp.clone());
+            c.data_dir = temp.path().into();
+            c.project = None;
+            let grants = if edits {vec!["read_channel","edit_files","delegate_tasks"]} else {vec!["read_channel","delegate_tasks"]};
+            c.capabilities = crate::agents::ResolvedCapabilities::Known(crate::agents::CapabilitySet::from_slugs(&grants));
+            // Use the real participant command; safe-mode or --tools would hide
+            // the same tools and make this an invalid test of our denial.
+            let mut cmd = build_command(&c);
+            cmd.args(["--setting-sources","","--no-session-persistence","--no-chrome"])
+                .env("CLAUDE_CODE_DISABLE_CLAUDE_MDS","1").env("CLAUDE_CODE_DISABLE_AUTO_MEMORY","1")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+            #[cfg(unix)] {use std::os::unix::process::CommandExt;cmd.as_std_mut().process_group(0);}
+            let mut child = cmd.spawn().unwrap();
+            let init = tokio::time::timeout(Duration::from_secs(45),async {
+                child.stdin.take().unwrap().write_all(b"{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"Reply READY without using tools.\"}}\n").await.unwrap();
+                let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+                while let Some(line) = lines.next_line().await.unwrap() {
+                    let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {continue};
+                    if row["type"]=="system" && row["subtype"]=="init" {return Some(row);}
+                }
+                None
+            }).await;
+            if let Some(pid) = child.id() {
+                crate::process::kill_process_tree(pid);
+                #[cfg(unix)] unsafe {libc::kill(-(pid as i32),libc::SIGKILL);}
+            }
+            let _ = child.start_kill();
+            child.wait().await.unwrap();
+            let init = init.expect("native startup timed out").expect("native init missing");
+            let tools = init["tools"].as_array().unwrap();
+            for name in ["Agent","Workflow","Task"] {assert!(!tools.iter().any(|t|t==name),"edits={edits}: {init}");}
+            assert!(tools.iter().any(|t|t=="Read"));
+            assert_eq!(tools.iter().any(|t|t=="Write"),edits);
+            assert!(init["mcp_servers"].as_array().unwrap().is_empty());
+            eprintln!("native participant edits={edits}, helpers=true: tools={tools:?}; native delegation absent");
+        }
+    }
+
+    #[test]
     fn hands_still_gets_bypass() {
-        // HANDS keeps full power — bypass mode, no allow/deny lists.
+        // Editing keeps bypass mode and its shell policy hook. Native
+        // delegation is removed even when managed helpers are granted.
         let argv = debug_command(&cfg()); // cfg() is brian
         assert!(argv.iter().any(|a| a == "--dangerously-skip-permissions"));
         assert!(!argv.iter().any(|a| a == "--permission-mode"));
         assert!(!argv.iter().any(|a| a == "--allowedTools"));
-        assert!(!argv.iter().any(|a| a == "--disallowedTools"));
+        let denied = argv.windows(2).find(|w|w[0]=="--disallowedTools").unwrap();
+        assert_eq!(denied[1], "Agent Workflow Task");
         // Brian hits the real Anthropic API, which tolerates the system-role
         // message claude-code injects from plugin SessionStart hooks, so he
         // does NOT need --bare (and would lose CLAUDE.md/LSP if he had it).

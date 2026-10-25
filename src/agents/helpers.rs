@@ -53,7 +53,7 @@ pub fn claude_command(cfg: &SpawnConfig) -> Result<Command> {
         .args(["--permission-mode", "dontAsk", "--setting-sources", ""])
         .args(["--mcp-config", "{\"mcpServers\":{}}", "--strict-mcp-config"])
         .args(["--safe-mode", "--restricted", "--no-chrome", "--disable-slash-commands", "--no-session-persistence"])
-        .args(["--disallowedTools", "mcp__* Agent Workflow SendMessage ListAgents CronCreate CronList CronDelete RemoteTrigger Bash PowerShell Edit Write NotebookEdit"])
+        .args(["--disallowedTools", "mcp__* Agent Workflow Task SendMessage ListAgents CronCreate CronList CronDelete RemoteTrigger Bash PowerShell Edit Write NotebookEdit"])
         .arg("--append-system-prompt-file").arg(&cfg.system_prompt_path)
         .arg("--settings").arg(settings.to_string())
         .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")

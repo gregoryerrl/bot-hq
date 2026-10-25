@@ -19,7 +19,9 @@ launches after a lost reply. Helpers stop with their parent's turn and leave
 recent evidence in one bounded document; retained findings and compact traces
 remain readable by reviewers. Final findings survive long commentary and file
 results. The parent still integrates and verifies the
-work. Codex helper selection is not enabled yet.
+work. Codex helper selection is not enabled yet. Newly started Claude participants
+no longer expose native Agent/Workflow/Task delegation, with or without the checkbox;
+the checkbox grants managed helpers only. Existing processes adopt this at restart.
 
 ### Fixed
 

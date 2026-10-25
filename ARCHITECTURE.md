@@ -108,8 +108,10 @@ commentary; bounded traces preserve the end and summarize file results. Restart
 marks unfinished batches interrupted without replay. The parent verifies
 evidence and owns integration. Either parent runtime can select a saved Claude
 helper model/account. The Codex helper connector remains unavailable through the
-tool until its remaining native-tool acceptance checks pass. Native Claude
-delegation outside this managed feature is unchanged pending the user's choice.
+tool until its remaining native-tool acceptance checks pass. Every newly started
+Claude participant loses native Agent/Workflow/Task tools, whether it can edit or
+has the helper capability. Codex native delegation remains disabled. The capability
+grants managed helpers only; already-running processes keep their startup inventory.
 
 ### One agent backend
 
@@ -407,12 +409,15 @@ event → `AgentEvent::BackgroundTasks`): the stop is claude-code's interrupt, w
 cancels the process's background agents with the turn, so the turn runs beside
 the holder and a notice says why.
 
-**A helper's messages are not the participant's.** claude-code streams a
+**Legacy native-child messages are not the participant's.** Newly started
+participants have native delegation disabled, but an existing process may still
+stream a native child's output. claude-code streams a
 subagent's assistant messages and tool results on the parent's stdout, tagged
 `parent_tool_use_id` (the parent's own carry `null`). `agents::events::translate`
 drops them: they are neither chat rows under the parent's name, nor a turn the
 parent opened, nor its context reading. The helper's work reaches the parent
-through the Agent call's own result and its completion turn.
+through the Agent call's own result and its completion turn. Managed helpers use
+their separate owned event stream and retained results instead.
 
 **A participant still orienting when boot times out is not dealt.** Boot ends for
 the session at its timeout, but a shared orienting set — seeded on a first spawn

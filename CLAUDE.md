@@ -69,9 +69,11 @@ done; work is now incremental.
 
 - **Take work in small testable chunks.** Compile + test after each
   change.
-- **For non-trivial multi-step features,** spawn the `Agent` tool for
-  parallel work on independent sub-tasks. Brief each sub-agent with:
-  goal, files, interface, tests, definition of done.
+- **For independent investigation tasks,** use `delegate_tasks` when the
+  role has **Sub-agent development**. Give each managed helper a goal,
+  files and expected evidence; collect and verify its findings before ending
+  the turn. The parent owns edits, tests and integration. Native
+  `Agent`/`Workflow`/`Task` delegation is disabled for every participant.
 - **Don't litigate decisions already shipped** in `ARCHITECTURE.md`
   (e.g., HTTP MCP not stdio+UDS, hand-rolled JSON-RPC, role prose as
   user-editable roles rows seeded from `agents/prompts.rs` (rc3 D8/D10),

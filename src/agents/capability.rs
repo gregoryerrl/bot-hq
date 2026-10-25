@@ -158,7 +158,7 @@ impl Capability {
             RunTerminal => "Drive the session's terminal (`terminal_exec`).",
             WriteContextLibrary => "Add to or edit the Context Library.",
             ControlBotHq => "Delegate user-level application control across projects and sessions, including approving its own commands and changing enforcement settings. New participants only; unchecking revokes existing controllers immediately. Grant only to a role you intend to drive bot-hq.",
-            DelegateTasks => "Run up to two managed read-only helpers using a selected saved model/account. Helpers consume that account's usage; the parent integrates and verifies their work. New participants only. Helpers stop with the parent's turn. Existing native Claude delegation is unchanged.",
+            DelegateTasks => "Run up to two managed read-only helpers using a selected saved model/account. Helpers consume that account's usage; the parent integrates and verifies their work. New participants only. Helpers stop with the parent's turn. Native delegation is disabled for all newly started agents; this checkbox grants managed helpers only.",
         }
     }
 

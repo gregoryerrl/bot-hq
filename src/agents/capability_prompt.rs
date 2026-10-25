@@ -127,8 +127,8 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             peer: "holds delegated user-level control of bot-hq",
         },
         DelegateTasks => Phrasing {
-            grant: "use `delegate_tasks` for up to two managed read-only helpers. Start returns immediately; collect results with bounded status waits before ending your turn. You own integration, must verify cited evidence, and keep the same IPAV/reviewer checks. Helpers cannot edit, run builds, use bot-hq tools or speak for you. Select their model/account explicitly when your own connector is unavailable; usage is charged there. Helpers stop on parent interruption or turn end",
-            deny: "start managed helpers — `delegate_tasks` is refused for you",
+            grant: "use `delegate_tasks` for up to two managed read-only helpers. Start returns immediately; collect results with bounded status waits before ending your turn. You own integration, must verify cited evidence, and keep the same IPAV/reviewer checks. Helpers cannot edit, run builds, use bot-hq tools or speak for you. Select their model/account explicitly when your own connector is unavailable; usage is charged there. Helpers stop on parent interruption or turn end. Native Agent/Workflow/Task delegation is disabled; use managed helpers only",
+            deny: "delegate work to sub-agents — `delegate_tasks` is refused for you and native Agent/Workflow/Task delegation is disabled",
             peer: "delegates bounded read-only work to managed helpers",
         },
         FileFinding => Phrasing {

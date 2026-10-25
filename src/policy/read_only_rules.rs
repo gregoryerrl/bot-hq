@@ -84,7 +84,11 @@ pub const GH_WRITE_VERBS: &[(&str, &[&str])] = &[
 /// Tool names a read-only role may not call: claude-code's file editors and
 /// its sub-agent tool, and Codex's file editor (`apply_patch`, which the
 /// hook also sees as `Edit`/`Write` per the Codex hooks doc).
-pub const DENIED_TOOL_NAMES: &[&str] = &["Edit", "Write", "NotebookEdit", "Task", "apply_patch"];
+pub const DENIED_TOOL_NAMES: &[&str] = &["Edit", "Write", "NotebookEdit", "Agent", "Workflow", "Task", "apply_patch"];
+
+/// Native delegation is unavailable to every participant. The role capability
+/// grants only host-managed helpers, with separate authority and cleanup.
+pub const NATIVE_DELEGATION_TOOL_NAMES: &[&str] = &["Agent", "Workflow", "Task"];
 
 /// Space-joined `Bash(<tool> <verb>:*)` deny patterns for a deny-by-write-verb
 /// tool. Read forms (no listed verb) fall through to allowed `Bash`.
@@ -97,15 +101,16 @@ fn deny_write_verbs(tool: &str, verbs: &[&str]) -> String {
 }
 
 /// claude-code's `--disallowedTools` value for a read-only role: the static
-/// denies (Edit/Write/NotebookEdit/Task + `git commit` / `git push`), the
+/// denies (file editors/native delegation + `git commit` / `git push`), the
 /// verb-denied `git branch`, the full-noun git mutations, the verb-denied `gh`
 /// nouns, and `gh api` — the POST/PATCH/DELETE escape hatch, fully denied.
 /// Tools with a read form worth keeping (`git branch`, `gh`) are denied BY
 /// WRITE VERB rather than by blanket noun, so the read forms fall through to
 /// the allowed `Bash` (deny wins over allow).
 pub fn claude_disallowed_tools() -> String {
-    let mut parts: Vec<String> = ["Edit", "Write", "NotebookEdit", "Task"]
+    let mut parts: Vec<String> = ["Edit", "Write", "NotebookEdit"]
         .iter()
+        .chain(NATIVE_DELEGATION_TOOL_NAMES)
         .map(|s| s.to_string())
         .collect();
     // `commit` and `push` come before the branch verbs, as the list always
@@ -329,7 +334,7 @@ mod tests {
     fn the_claude_rendering_is_the_shipped_disallowed_list() {
         let list = claude_disallowed_tools();
         let padded = format!(" {list} ");
-        for fixed in ["Edit", "Write", "NotebookEdit", "Task", "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh api:*)"] {
+        for fixed in ["Edit", "Write", "NotebookEdit", "Agent", "Workflow", "Task", "Bash(git commit:*)", "Bash(git push:*)", "Bash(gh api:*)"] {
             assert!(padded.contains(&format!(" {fixed} ")), "{fixed} missing from {list}");
         }
         for verb in GIT_BRANCH_WRITE_VERBS {
@@ -353,7 +358,7 @@ mod tests {
     /// the connector calls it.
     #[test]
     fn a_read_only_role_may_not_edit_through_any_tool_name() {
-        for name in ["Edit", "Write", "NotebookEdit", "Task", "apply_patch"] {
+        for name in ["Edit", "Write", "NotebookEdit", "Agent", "Workflow", "Task", "apply_patch"] {
             assert!(tool_denial(name).is_some(), "{name} must be denied");
         }
         for name in ["Read", "Grep", "Bash", "mcp__bot-hq-signaling__session_doc_write", "exec_command"] {
