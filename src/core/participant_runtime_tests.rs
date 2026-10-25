@@ -394,6 +394,140 @@ async fn driver_send_preserves_pause_human_stage_and_retry_tombstones() {
 }
 
 #[tokio::test]
+async fn driver_lifecycle_closes_archives_and_reopens_through_native_paths() {
+    let f = driver_fixture(false).await;
+    let s = &f.state.storage;
+    s.create_session("target", "target", None).await.unwrap();
+    s.ensure_session_roster("target", 1).await.unwrap();
+    sqlx::query("UPDATE session_participants SET capabilities = '[\"read_channel\"]' WHERE session_id = 'target'")
+        .execute(s.pool()).await.unwrap();
+    let bridge = f.state.bridge.clone();
+    let (tx, mut inputs) = mpsc::unbounded_channel();
+    let starts = Arc::new(AtomicU64::new(0)); let count = starts.clone();
+    f.state.set_session_starter(Arc::new(move |id| {
+        let (bridge, tx, count) = (bridge.clone(), tx.clone(), count.clone());
+        Box::pin(async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            let (handle, input) = crate::core::session::stub_session_for_tests(&id, &bridge).await;
+            bridge.register_session_activity(id, Arc::downgrade(&handle.activity)).await;
+            tx.send(input).unwrap(); Ok(handle)
+        })
+    }));
+    driver_rpc(&f.state, serde_json::json!({"action":"start","session_id":"target"})).await.unwrap();
+    let _initial = inputs.recv().await.unwrap();
+    let result = driver_rpc(&f.state, serde_json::json!({"action":"close","session_id":"target","archive":true})).await.unwrap();
+    assert_eq!(result["result"]["status"], "closed");
+    assert_eq!(result["result"]["archived"], true);
+    assert!(!f.state.sessions.lock().await.contains_key("target"));
+    let result = driver_rpc(&f.state, serde_json::json!({"action":"reopen","session_id":"target"})).await.unwrap();
+    assert_eq!(result["result"]["status"], "reopened");
+    assert_eq!(result["result"]["startup"]["status"], "started");
+    let _reopened = inputs.recv().await.unwrap();
+    let row = s.get_session("target").await.unwrap().unwrap();
+    assert!(row.closed_at.is_none()); assert_eq!(row.archived, 0);
+    assert!(s.session_halt("target").await.unwrap().is_some(), "reopen must preserve a meaningful hold");
+    let result = driver_rpc(&f.state, serde_json::json!({"action":"reopen","session_id":"target"})).await.unwrap();
+    assert_eq!(result["result"]["status"], "already_open");
+    assert_eq!(result["result"]["startup"]["status"], "unchanged");
+    assert_eq!(starts.load(Ordering::SeqCst), 2);
+    let notices: Vec<(String, String)> = sqlx::query_as("SELECT origin, content FROM messages WHERE session_id = 'target'")
+        .fetch_all(s.pool()).await.unwrap();
+    assert!(notices.iter().any(|(origin,text)| origin == "system" && text.contains("closed and archived by delegated controller hands of s1")));
+    assert!(notices.iter().any(|(origin,text)| origin == "system" && text.contains("reopened by delegated controller hands of s1")));
+    assert!(!notices.iter().any(|(_,text)| text.contains("REOPENED by the user")));
+    let words: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE session_id = 'target'").fetch_one(s.pool()).await.unwrap();
+    assert_eq!(words, 0);
+    let mut handle = f.state.sessions.lock().await.remove("target").unwrap();
+    f.state.quiesce_session_handle(&mut handle).await.unwrap();
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_lifecycle_reopen_reports_startup_failure_without_reclosing() {
+    let f = driver_fixture(false).await;
+    f.state.storage.create_session("target", "target", None).await.unwrap();
+    f.state.storage.close_session("target", true).await.unwrap();
+    f.state.set_session_starter(Arc::new(|_| Box::pin(async { anyhow::bail!("fixture could not restart") })));
+    let result = driver_rpc(&f.state, serde_json::json!({"action":"reopen","session_id":"target"})).await.unwrap();
+    assert_eq!(result["result"]["status"], "reopened");
+    assert_eq!(result["result"]["startup"]["status"], "failed");
+    assert!(f.state.storage.get_session("target").await.unwrap().unwrap().closed_at.is_none());
+    assert!(f.state.storage.session_halt("target").await.unwrap().is_some());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_lifecycle_self_pause_and_close_are_audited_before_interrupt() {
+    for close in [false, true] {
+        let f = driver_fixture(false).await;
+        let (activity, atomic) = {
+            let sessions = f.state.sessions.lock().await;
+            (sessions["s1"].activity.clone(), sessions["s1"].in_atomic_tool.clone())
+        };
+        if close {
+            sqlx::query("UPDATE session_participants SET capabilities = '[\"read_channel\",\"control_bot_hq\"]' WHERE session_id = 's1'")
+                .execute(f.state.storage.pool()).await.unwrap();
+        } else { atomic.store(true, Ordering::Release); }
+        let action = if close { "close" } else { "pause" };
+        let result = driver_rpc(&f.state, serde_json::json!({"action":action,"session_id":"s1"})).await.unwrap();
+        let outcome: (String, Option<String>) = sqlx::query_as("SELECT outcome, detail FROM application_control_audit WHERE id = ?")
+            .bind(result["audit_id"].as_i64().unwrap()).fetch_one(f.state.storage.pool()).await.unwrap();
+        assert_eq!(outcome.0, "ok");
+        if close {
+            assert_eq!(result["result"]["status"], "closed");
+            assert!(outcome.1.unwrap().contains("Session row closed"));
+            assert!(f.state.storage.get_session("s1").await.unwrap().unwrap().closed_at.is_some());
+            assert!(!f.state.sessions.lock().await.contains_key("s1"));
+            for seat in &f.seats { assert!(*seat.stopped.borrow()); }
+        } else {
+            assert_eq!(result["result"]["status"], "pause_requested");
+            assert!(outcome.1.unwrap().contains("runtime interruption follows"));
+            assert!(activity.is_paused());
+            for seat in &f.seats { assert!(!*seat.stopped.borrow(), "atomic grace must precede interruption"); }
+            atomic.store(false, Ordering::Release);
+            tokio::time::timeout(Duration::from_secs(4), async {
+                while f.state.storage.list_cancel_events(Some("s1")).await.unwrap().is_empty() { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            f.end().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn driver_lifecycle_waiting_calls_lose_to_revocation_and_pause_generations() {
+    for action in ["close", "reopen", "pause"] {
+        for revoke in [false, true] {
+            let f = driver_fixture(false).await;
+            f.state.storage.create_session("target", "target", None).await.unwrap();
+            if action == "reopen" { f.state.storage.close_session("target", false).await.unwrap(); }
+            let activity = f.state.sessions.lock().await["s1"].activity.clone();
+            let lock = f.state.lifecycle_lock("target"); let lifecycle = lock.lock().await;
+            let sessions = f.state.sessions.lock().await;
+            let state = f.state.clone();
+            let request = tokio::spawn(async move { driver_rpc(&state, serde_json::json!({"action":action,"session_id":"target"})).await });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM application_control_audit WHERE operation = ? AND outcome = 'started'")
+                        .bind(action).fetch_one(f.state.storage.pool()).await.unwrap();
+                    if count > 0 { break; } tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            if revoke {
+                sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(f.rows[0].role_id)
+                    .execute(f.state.storage.pool()).await.unwrap();
+            } else { activity.set_paused(true); activity.set_paused(false); }
+            drop(sessions); drop(lifecycle);
+            assert!(request.await.unwrap().is_err(), "{action}, revoke={revoke}");
+            assert_eq!(f.state.storage.get_session("target").await.unwrap().unwrap().closed_at.is_some(), action == "reopen");
+            let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE session_id = 'target'")
+                .fetch_one(f.state.storage.pool()).await.unwrap();
+            assert_eq!(messages, 0);
+            f.end().await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn driver_create_uses_dialog_picks_and_native_start_without_human_authorship() {
     let f = driver_fixture(false).await;
     let bridge = f.state.bridge.clone();

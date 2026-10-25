@@ -13,6 +13,12 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Fixed
 
+- A failed close no longer leaves a stale close-out claim that interferes with
+  later closes. Reopen reports that close-out is still finishing while its
+  teardown owns the session, preventing an old close from killing a reopened
+  session. The claim releases after cleanup on either success or failure.
+
+
 - **A respawned reviewer drops the old process's dead status.** Its new event
   pump publishes current liveness at startup, so a healthy replacement does
   not become commit-blocking again when its last tool call is a minute old.
@@ -138,7 +144,11 @@ model side by side. Migration 0102 applies on first launch.
   overwritten, and queued creation loses to Pause or permission revocation.
   Creation also rejects unknown explicit model IDs instead of silently falling
   back, and rejects misspelled participant fields.
-  Remaining lifecycle operations and settings writes are still being connected.
+  Controllers can now pause, close/archive and reopen sessions through the normal
+  application controls. Self-pause and self-close record their outcomes before
+  interruption; reopening preserves history and phase and leaves an explicit
+  halt for the next direction. Configuration/roster administration and event
+  watches are still being connected.
 
 
 - **Agents can retrieve older records from their own session.** The

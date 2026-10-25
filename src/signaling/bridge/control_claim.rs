@@ -163,6 +163,62 @@ impl SignalingBridge {
         Ok(claim)
     }
 
+    async fn begin_session_control(
+        &self,
+        claim: &ControlClaim,
+        id: &str,
+    ) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>> {
+        anyhow::ensure!(id == claim.target_session, "lifecycle target differs from its claim");
+        let storage = self.storage_handle().await.context("storage is unavailable")?;
+        let mut tx = storage.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let actor = Storage::controller_actor_on(&mut tx, &claim.actor.session_id, &claim.actor.slug).await?;
+        anyhow::ensure!(actor == claim.actor, "controller identity changed");
+        claim.check(self)?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+            .bind(id).fetch_one(&mut *tx).await?;
+        anyhow::ensure!(exists, "target session does not exist");
+        Ok(tx)
+    }
+
+    pub(crate) async fn close_controlled_session_row(&self, claim: &ControlClaim, id: &str, archive: bool, audit: i64) -> Result<()> {
+        let mut tx = self.begin_session_control(claim, id).await?;
+        Storage::close_session_on(&mut tx, id, archive).await?;
+        if archive {
+            sqlx::query("UPDATE sessions SET archived = 1 WHERE id = ? AND closed_at IS NOT NULL")
+                .bind(id).execute(&mut *tx).await?;
+        }
+        let notice = format!("Session closed{} by delegated controller {} of {}.", if archive { " and archived" } else { "" }, claim.actor.slug, claim.actor.session_id);
+        sqlx::query("INSERT INTO messages (session_id, origin, kind, content, author, created_at) VALUES (?, 'system', 'system_notice', ?, 'user', ?)")
+            .bind(id).bind(notice).bind(crate::storage::now_utc()).execute(&mut *tx).await?;
+        // Persist the close outcome BEFORE teardown can kill a controller
+        // closing its own session. This describes the row, not cleanup success.
+        sqlx::query("UPDATE application_control_audit SET outcome = 'ok', detail = 'Session row closed; runtime cleanup follows.', finished_at = ? WHERE id = ? AND outcome = 'started'")
+            .bind(crate::storage::now_utc()).bind(audit).execute(&mut *tx).await?;
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn reopen_controlled_session_row(&self, claim: &ControlClaim, id: &str) -> Result<bool> {
+        let mut tx = self.begin_session_control(claim, id).await?;
+        let moved = Storage::reopen_session_on(&mut tx, id).await?;
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(moved)
+    }
+
+    pub(crate) async fn record_controlled_pause(&self, claim: &ControlClaim, id: &str, audit: i64) -> Result<()> {
+        let mut tx = self.begin_session_control(claim, id).await?;
+        let notice = format!("Pause requested by delegated controller {} of {}.", claim.actor.slug, claim.actor.session_id);
+        sqlx::query("INSERT INTO messages (session_id, origin, kind, content, author, created_at) VALUES (?, 'system', 'system_notice', ?, 'user', ?)")
+            .bind(id).bind(notice).bind(crate::storage::now_utc()).execute(&mut *tx).await?;
+        sqlx::query("UPDATE application_control_audit SET outcome = 'ok', detail = 'Pause requested; runtime interruption follows.', finished_at = ? WHERE id = ? AND outcome = 'started'")
+            .bind(crate::storage::now_utc()).bind(audit).execute(&mut *tx).await?;
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub(crate) async fn claim_delegated_answer(
         &self,
         storage: &Storage,

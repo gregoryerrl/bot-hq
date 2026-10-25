@@ -936,7 +936,15 @@ system-attributed creation notice with the row in the same authority-checked
 transaction. Setup holds the session lifecycle lock so a view cannot spawn a
 default roster halfway through. Native startup follows with a separate result:
 if it fails, the session still exists and the retry is `start`, not `create`.
-Other lifecycle/settings writes remain pending.
+`pause` shares the button's atomic-operation grace and interruption/escalation;
+its result means the pause was requested, not that every process has exited.
+`close` uses normal close-out/cleanup, and records the closed row and its audit
+outcome before killing a controller closing its own session. `reopen` shares the
+normal row/halt/phase-preserving transition and reports startup separately; its
+notice names the controller rather than the human. Reopen is refused while a
+close-out epilogue still owns teardown. All three recheck delegated authority at
+ownership, after waits. Remaining configuration/roster controls and event watches
+are still pending.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

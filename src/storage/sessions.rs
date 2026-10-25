@@ -349,7 +349,13 @@ impl Storage {
     /// that read like a session mid-turn (round 7).
     pub async fn close_session(&self, id: &str, archive: bool) -> Result<()> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        super::participant_mutations::settle_open_change(&mut tx, id, "Session closed").await?;
+        Self::close_session_on(&mut tx, id, archive).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn close_session_on(conn: &mut sqlx::SqliteConnection, id: &str, archive: bool) -> Result<()> {
+        super::participant_mutations::settle_open_change(conn, id, "Session closed").await?;
         sqlx::query(
             "UPDATE sessions SET closed_at = ?, archived = ?, \
                  current_turn_participant_id = NULL \
@@ -358,10 +364,9 @@ impl Storage {
         .bind(now_utc())
         .bind(if archive { 1 } else { 0 })
         .bind(id)
-        .execute(&mut *tx)
+        .execute(conn)
         .await
         .with_context(|| format!("closing session {id}"))?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -417,11 +422,17 @@ impl Storage {
     /// spawned by clicks through the Archive to copy session ids).
     pub async fn reopen_session(&self, id: &str) -> Result<bool> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let moved = Self::reopen_session_on(&mut tx, id).await?;
+        tx.commit().await?;
+        Ok(moved)
+    }
+
+    pub(crate) async fn reopen_session_on(conn: &mut sqlx::SqliteConnection, id: &str) -> Result<bool> {
         let closed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND closed_at IS NOT NULL)")
-            .bind(id).fetch_one(&mut *tx).await?;
+            .bind(id).fetch_one(&mut *conn).await?;
         if !closed { return Ok(false); }
         // Also repairs an unfinished row left by an older host before reopening.
-        super::participant_mutations::settle_open_change(&mut tx, id, "Session reopened").await?;
+        super::participant_mutations::settle_open_change(conn, id, "Session reopened").await?;
         let now = now_utc();
         let res = sqlx::query(
             "UPDATE sessions SET closed_at = NULL, archived = 0, \
@@ -434,10 +445,9 @@ impl Storage {
         .bind(&now)
         .bind(&now)
         .bind(id)
-        .execute(&mut *tx)
+        .execute(conn)
         .await
         .with_context(|| format!("reopening session {id}"))?;
-        tx.commit().await?;
         Ok(res.rows_affected() > 0)
     }
 

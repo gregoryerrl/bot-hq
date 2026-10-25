@@ -749,9 +749,24 @@ impl AppState {
     /// A row that was not closed reopens nothing and spawns nothing: the
     /// SessionView's mount respawn already covers a live session.
     pub async fn reopen_session(&self, session_id: &str) -> Result<()> {
+        let (_, startup_error) = self.reopen_session_inner(session_id, None).await?;
+        if let Some(error) = startup_error { anyhow::bail!(error); }
+        Ok(())
+    }
+
+    pub(crate) async fn reopen_session_controlled(&self, session_id: &str, claim: &crate::signaling::ControlClaim) -> Result<(bool, Option<String>)> {
+        self.reopen_session_inner(session_id, Some(claim)).await
+    }
+
+    async fn reopen_session_inner(&self, session_id: &str, claim: Option<&crate::signaling::ControlClaim>) -> Result<(bool, Option<String>)> {
         let lifecycle = self.lifecycle_lock(session_id);
         let guard = lifecycle.lock().await;
-        let moved = self.storage.reopen_session(session_id).await?;
+        anyhow::ensure!(!self.epilogue_in_flight.lock().await.contains(session_id),
+            "close-out is still finishing; retry reopening after it finishes");
+        let moved = match claim {
+            Some(claim) => self.bridge.reopen_controlled_session_row(claim, session_id).await?,
+            None => self.storage.reopen_session(session_id).await?,
+        };
         if !moved {
             // Not closed (or unknown): a second click that beat the view's
             // refetch, or a stale view of a row somebody else reopened. There
@@ -760,9 +775,9 @@ impl AppState {
             // this used to return an error, and the bar rendered the user's
             // double click as "Reopen failed: … not closed; nothing to reopen".
             tracing::debug!(session_id, "reopen: the row is not closed; nothing to do");
-            return Ok(());
+            return Ok((false, None));
         }
-        tracing::info!(session_id, "session reopened on the user's button; respawning its roster");
+        tracing::info!(session_id, delegated = claim.is_some(), "session reopened; respawning its roster");
         // 1.0.1 Batch 3 (EYES F1/F4): a crash or OOM kill destroys the close
         // EPILOGUE (the learnings nudge) — not the durable fact of a write,
         // which close_gate_flags recovers from the CL index. The reopen is the
@@ -783,7 +798,11 @@ impl AppState {
             Some(&self.bridge),
             session_id,
             crate::storage::MessageKind::SystemNotice,
-            reopen_notice(!cl_written),
+            match claim {
+                Some(claim) => format!("Session reopened by delegated controller {} of {}. The prior close and pre-close closing instructions are void. The session remains halted until a human message or explicit controller resume.{}", claim.actor.slug, claim.actor.session_id,
+                    if cl_written { "" } else { " No CL learnings delta was recorded before the close." }),
+                None => reopen_notice(!cl_written),
+            },
             None,
         )
         .await
@@ -795,13 +814,16 @@ impl AppState {
             );
         }
         drop(guard);
-        let started = self.ensure_session_started(session_id).await;
+        let started = match claim {
+            Some(claim) => self.ensure_session_started_controlled(session_id, claim).await,
+            None => self.ensure_session_started(session_id).await,
+        };
         // The row moved either way, so the frontend is told BEFORE the spawn
         // result is returned: the dashboard lists the session again, and a
         // failed spawn still surfaces — as the bar's inline error here, and as
         // the SessionView's own retry banner once its `get_session` refetches.
         self.notify_session_created(session_id);
-        started
+        Ok((true, started.err().map(|error| error.to_string())))
     }
 
     /// Force-restart a session's roster: evict the live handle (killing every
@@ -857,15 +879,21 @@ impl AppState {
     /// user message respawns each agent via `--resume`, restoring prior context.
     /// No-op (`Done`) if the session isn't live.
     pub async fn cancel_session_turn(&self, session_id: &str) -> Result<CancelOutcome> {
+        self.cancel_session_turn_inner(session_id, None).await
+    }
+
+    async fn cancel_session_turn_inner(&self, session_id: &str, control: Option<(&crate::signaling::ControlClaim, i64)>) -> Result<CancelOutcome> {
         // The pause command goes to the ring OUTSIDE the `sessions` lock (see
         // below); reaching this far past the early return is what decides it,
         // so no flag is needed (round 10 dropped a `pause_ring` that could only
         // ever be `true`).
         let deferred = {
             let mut sessions = self.sessions.lock().await;
+            if let Some((claim, _)) = control { self.bridge.authorize_control_effect(claim).await?; }
             let Some(handle) = sessions.get_mut(session_id) else {
                 return Ok(CancelOutcome::Done); // not live → no-op
             };
+            if let Some((claim, audit)) = control { self.bridge.record_controlled_pause(claim, session_id, audit).await?; }
             // Mark Cancelling FIRST → the UI shows "Cancelling…" + keeps the
             // input locked for the whole kill window (immediate or deferred).
             // Then latch the pause (that order — see set_paused's ORDERING
@@ -954,6 +982,14 @@ impl AppState {
     /// the gap between the two is precisely what a user experiences as "Stop
     /// didn't do anything".
     pub async fn cancel_and_escalate(self: &Arc<Self>, session_id: &str, pressed_at: String) -> Result<()> {
+        self.cancel_and_escalate_inner(session_id, pressed_at, None).await.map(|_| ())
+    }
+
+    pub(crate) async fn pause_session_controlled(self: &Arc<Self>, session_id: &str, claim: &crate::signaling::ControlClaim, audit: i64) -> Result<bool> {
+        self.cancel_and_escalate_inner(session_id, crate::storage::now_utc(), Some((claim, audit))).await
+    }
+
+    async fn cancel_and_escalate_inner(self: &Arc<Self>, session_id: &str, pressed_at: String, control: Option<(&crate::signaling::ControlClaim, i64)>) -> Result<bool> {
         // **What the turn was doing, read FIRST** (feedback #44(2), EYES G1):
         // the interrupt ends the turn, and ending it clears its clock and tool
         // record. Recorded on the cancel row and said in the chat.
@@ -966,7 +1002,8 @@ impl AppState {
             .await
             .get(session_id)
             .is_some_and(|h| h.booting.load(Ordering::Acquire));
-        let outcome = self.cancel_session_turn(session_id).await?;
+        let outcome = self.cancel_session_turn_inner(session_id, control).await?;
+        let paused = !matches!(outcome, CancelOutcome::Done);
         if let Some(snap) = snapshot.as_ref() {
             tracing::info!(session_id, ?snap, booting, "cancel: what the turn was doing at the press");
             crate::core::post_system_notice(
@@ -1016,7 +1053,7 @@ impl AppState {
                 });
             }
         }
-        Ok(())
+        Ok(paused)
     }
 
     /// What the turn in flight is doing right now (feedback #44(2)). The holder
@@ -1240,6 +1277,15 @@ impl AppState {
         archive: bool,
         path: close_learnings::ClosePath,
     ) -> Result<()> {
+        self.close_session_inner(id, archive, path, None).await
+    }
+
+    pub(crate) async fn close_session_controlled(self: &Arc<Self>, id: &str, archive: bool, claim: &crate::signaling::ControlClaim, audit: i64) -> Result<()> {
+        self.close_session_inner(id, archive, close_learnings::ClosePath::User, Some((claim, audit))).await
+    }
+
+    async fn close_session_inner(self: &Arc<Self>, id: &str, archive: bool, path: close_learnings::ClosePath, control: Option<(&crate::signaling::ControlClaim, i64)>) -> Result<()> {
+        if let Some((claim, _)) = control { self.bridge.authorize_control_effect(claim).await?; }
         let decision = self.close_epilogue_decision(id, path).await;
         // One short hold decides both facts: is an epilogue ALREADY in flight
         // for this session (round 11 — asked for every decision, because the
@@ -1263,9 +1309,16 @@ impl AppState {
         // has to be a compile error, not a silently inert feature.
         match close_learnings::plan(decision, claimed, in_flight) {
             close_learnings::ClosePlan::TearDownNow => {
-                self.teardown_session(id, Some(archive)).await
+                self.teardown_session(id, Some(archive), control).await
             }
             close_learnings::ClosePlan::JoinInFlight => {
+                if let Some((claim, audit)) = control {
+                    let lifecycle = self.lifecycle_lock(id);
+                    let _guard = lifecycle.lock().await;
+                    self.bridge.close_controlled_session_row(claim, id, archive, audit).await?;
+                    self.bridge.notify_session_closed(id.to_string());
+                    return Ok(());
+                }
                 // The other close owns the teardown; doing it here kills the
                 // learnings turn it just started (B2-5). The row is already
                 // closed by that path, so the user's Close has taken effect —
@@ -1293,20 +1346,31 @@ impl AppState {
             }
             close_learnings::ClosePlan::RunEpilogueFirst => {
                 // Closed and off the UI's hands from here; the turn is epilogue.
-                self.storage.close_session(id, archive).await?;
+                let closed = if let Some((claim, audit)) = control {
+                    let lifecycle = self.lifecycle_lock(id);
+                    let _guard = lifecycle.lock().await;
+                    self.bridge.close_controlled_session_row(claim, id, archive, audit).await
+                } else {
+                    self.storage.close_session(id, archive).await
+                };
+                if let Err(error) = closed {
+                    self.epilogue_in_flight.lock().await.remove(id);
+                    return Err(error);
+                }
                 self.bridge.notify_session_closed(id.to_string());
                 let this = Arc::clone(self);
                 let sid = id.to_string();
                 tokio::spawn(async move {
                     this.run_close_epilogue(&sid).await;
-                    // Release the claim BEFORE teardown, so a teardown failure
-                    // can never leave a session marked mid-epilogue forever.
-                    this.epilogue_in_flight.lock().await.remove(&sid);
                     // `archive` is already applied — the row closed before the
-                    // turn.
-                    if let Err(e) = this.teardown_session(&sid, None).await {
+                    // turn. Retain ownership through teardown: otherwise a
+                    // reopen in the gap could be killed by this old close.
+                    if let Err(e) = this.teardown_session(&sid, None, None).await {
                         tracing::warn!(?e, session_id = %sid, "close epilogue: teardown failed");
                     }
+                    // Release on both success and failure, without stranding
+                    // the session on an old close-out claim.
+                    this.epilogue_in_flight.lock().await.remove(&sid);
                 });
                 Ok(())
             }
@@ -1538,7 +1602,7 @@ impl AppState {
     /// and `None` when [`Self::close_session`]'s D15 epilogue arm already
     /// closed it — the row is closed once, before the epilogue, so the UI never
     /// waits on a learnings turn.
-    async fn teardown_session(&self, id: &str, archive: Option<bool>) -> Result<()> {
+    async fn teardown_session(&self, id: &str, archive: Option<bool>, control: Option<(&crate::signaling::ControlClaim, i64)>) -> Result<()> {
         let lifecycle = self.lifecycle_lock(id);
         let _lifecycle = lifecycle.lock().await;
         let mut retired_handle = None;
@@ -1569,6 +1633,7 @@ impl AppState {
         // (review, round 8).
         {
             let mut sessions = self.sessions.lock().await;
+            if let Some((claim, _)) = control { self.bridge.authorize_control_effect(claim).await?; }
             if !self.mark_closing(id, true) {
                 tracing::debug!(session_id = %id, "teardown already in progress; joining it");
                 return Ok(());
@@ -1584,7 +1649,11 @@ impl AppState {
             // no-op — and a FAILED row close now kills nothing, leaving the
             // session genuinely respawnable.
             if let Some(archive) = archive {
-                if let Err(e) = self.storage.close_session(id, archive).await {
+                let closed = match control {
+                    Some((claim, audit)) => self.bridge.close_controlled_session_row(claim, id, archive, audit).await,
+                    None => self.storage.close_session(id, archive).await,
+                };
+                if let Err(e) = closed {
                     // Not torn down after all: put the handle back untouched.
                     if let Some(handle) = handle {
                         sessions.insert(id.to_string(), handle);
@@ -3014,12 +3083,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let at = code
-            .find("pub async fn cancel_and_escalate(")
+            .find("async fn cancel_and_escalate_inner(")
             .expect("cancel_and_escalate exists");
         let body = &code[at..];
         let body = &body[..body[1..].find("\n    pub ").map_or(body.len(), |n| n + 1)];
         let read = body.find(".press_snapshot(").expect("the snapshot is read");
-        let cancel = body.find(".cancel_session_turn(").expect("the cancel starts");
+        let cancel = body.find(".cancel_session_turn_inner(").expect("the cancel starts");
         assert!(read < cancel, "the snapshot must be read before the cancel begins");
         assert_eq!(
             body.matches(", snapshot)").count(),
@@ -3030,6 +3099,32 @@ mod tests {
             body.contains("h.booting.load(") && body.contains("pause_notice(snap, booting)"),
             "the Pause row is worded from the session's own boot flag"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_close_releases_the_epilogue_claim_for_a_retry() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        let state = Arc::new(state);
+        storage.ensure_session_roster("s1", 1).await.unwrap();
+        let (handle, _stdin) = crate::core::session::stub_session_for_tests("s1", &state.bridge).await;
+        state.sessions.lock().await.insert("s1".into(), handle);
+        assert_eq!(state.close_epilogue_decision("s1", close_learnings::ClosePath::User).await, close_learnings::Epilogue::Run);
+        sqlx::query("CREATE TRIGGER refuse_fixture_close BEFORE UPDATE OF closed_at ON sessions WHEN NEW.closed_at IS NOT NULL BEGIN SELECT RAISE(ABORT, 'fixture close failure'); END")
+            .execute(storage.pool()).await.unwrap();
+        assert!(state.close_session("s1", false, close_learnings::ClosePath::User).await.is_err());
+        assert!(!state.epilogue_in_flight.lock().await.contains("s1"), "a failed row close must not poison all future closes");
+        assert!(storage.get_session("s1").await.unwrap().unwrap().closed_at.is_none());
+        assert!(state.sessions.lock().await.contains_key("s1"));
+    }
+
+    #[tokio::test]
+    async fn reopening_waits_for_close_out_teardown_ownership_to_end() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        storage.close_session("s1", true).await.unwrap();
+        state.epilogue_in_flight.lock().await.insert("s1".into());
+        let error = state.reopen_session("s1").await.unwrap_err();
+        assert!(error.to_string().contains("close-out is still finishing"));
+        assert!(storage.get_session("s1").await.unwrap().unwrap().closed_at.is_some());
     }
 
     #[test]
@@ -4060,7 +4155,7 @@ mod tests {
             .next()
             .expect("a split always yields a first part");
         let body = prod
-            .split("pub async fn cancel_session_turn")
+            .split("async fn cancel_session_turn_inner(")
             .nth(1)
             .expect("cancel_session_turn exists")
             .split("\n    /// ")
@@ -4257,7 +4352,7 @@ mod tests {
         assert!(prod.contains("spawn_existing_session(session_id, &self.paths"), "the shared starter must retain the native spawn wire");
 
         let reopen = prod
-            .split("pub async fn reopen_session")
+            .split("async fn reopen_session_inner(")
             .nth(1)
             .expect("reopen_session exists")
             .split("\n    pub ")
@@ -4309,7 +4404,7 @@ mod tests {
             "a not-closed row is not an error: the reopen is idempotent"
         );
         let noop = reopen
-            .find("return Ok(());")
+            .find("return Ok((false, None));")
             .expect("the not-closed row returns Ok without spawning");
         assert!(
             row_move < noop && noop < announce,
@@ -4435,6 +4530,9 @@ mod tests {
              the ring's Sender, so the turn the close just asked for could never \
              be dealt"
         );
+        let release = arm.rfind("epilogue_in_flight.lock().await.remove(")
+            .expect("the completed close releases its ownership");
+        assert!(teardown < release, "reopen must not overtake the old close's teardown");
     }
 
     /// **s-f6a441ff: the paste gate.** One 2.9 MB user paste wedged both

@@ -19,6 +19,9 @@ pub(crate) enum AppControlRequest {
     },
     Start { session_id: String },
     Resume { session_id: String },
+    Pause { session_id: String },
+    Close { session_id: String, #[serde(default)] archive: bool },
+    Reopen { session_id: String },
     Send {
         session_id: String,
         request_id: String,
@@ -75,6 +78,9 @@ impl AppControlRequest {
             Self::Create { session_id, .. } => ("create", Some(session_id)),
             Self::Start { session_id } => ("start", Some(session_id)),
             Self::Resume { session_id } => ("resume", Some(session_id)),
+            Self::Pause { session_id } => ("pause", Some(session_id)),
+            Self::Close { session_id, .. } => ("close", Some(session_id)),
+            Self::Reopen { session_id } => ("reopen", Some(session_id)),
             Self::Send { session_id, .. } => ("send", Some(session_id)),
             Self::MessageStatus { session_id, .. } => ("message_status", Some(session_id)),
             Self::Answer { .. } => ("answer", None),
@@ -141,6 +147,7 @@ impl SignalingBridge {
         // Capture the runtime/Pause ticket before even the audit INSERT can
         // queue behind another writer. A later Resume cannot renew this call.
         let claim = match &request {
+            AppControlRequest::Pause { session_id } | AppControlRequest::Close { session_id, .. } | AppControlRequest::Reopen { session_id } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Create { session_id, .. } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Start { session_id } | AppControlRequest::Resume { session_id } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Send { session_id, .. } => Some(
@@ -165,6 +172,7 @@ impl SignalingBridge {
             .start_control_audit(&actor, target.as_deref(), operation)
             .await?;
         let result = match request {
+            op @ (AppControlRequest::Pause { .. } | AppControlRequest::Close { .. } | AppControlRequest::Reopen { .. }) => self.control_lifecycle(&storage, op, claim.as_ref().unwrap(), audit).await,
             AppControlRequest::Create { session_id, title, repo_path, project, participants, use_worktree } => {
                 self.control_create(crate::tauri_cmd::sessions::SessionCreateInput {
                     id: session_id, title, repo_path, project, multi_participant: None,
@@ -226,6 +234,30 @@ impl SignalingBridge {
         result
     }
 
+    async fn control_lifecycle(&self, storage: &Storage, request: AppControlRequest, claim: &crate::signaling::ControlClaim, audit: i64) -> Result<Value> {
+        let core = self.app_state.get().and_then(Weak::upgrade)
+            .context("application control is not connected to the runtime")?;
+        match request {
+            AppControlRequest::Pause { session_id } => {
+                anyhow::ensure!(storage.get_session(&session_id).await?.is_some(), "target session does not exist");
+                let paused = core.pause_session_controlled(&session_id, claim, audit).await?;
+                Ok(json!({"session_id":session_id, "status":if paused {"pause_requested"} else {"not_running"}}))
+            }
+            AppControlRequest::Close { session_id, archive } => {
+                core.close_session_controlled(&session_id, archive, claim, audit).await?;
+                let row = storage.get_session(&session_id).await?.context("target session no longer exists")?;
+                Ok(json!({"session_id":session_id,"status":if row.closed_at.is_some() {"closed"} else {"close_requested"},"closed_at":row.closed_at,"archived":row.archived != 0}))
+            }
+            AppControlRequest::Reopen { session_id } => {
+                let (moved, startup_error) = core.reopen_session_controlled(&session_id, claim).await?;
+                Ok(json!({"session_id":session_id,"status":if moved {"reopened"} else {"already_open"},
+                    "startup": {"status":if !moved {"unchanged"} else if startup_error.is_some() {"failed"} else {"started"},
+                    "error":startup_error.map(crate::policy::secret_scan::redact_string)}}))
+            }
+            _ => anyhow::bail!("not a lifecycle operation"),
+        }
+    }
+
     async fn control_create(
         &self,
         input: crate::tauri_cmd::sessions::SessionCreateInput,
@@ -248,7 +280,7 @@ impl SignalingBridge {
         use AppControlRequest::*;
         let value = match request {
             Create { .. } => anyhow::bail!("creation is a write operation"),
-            Start { .. } | Resume { .. } => anyhow::bail!("lifecycle is a write operation"),
+            Start { .. } | Resume { .. } | Pause { .. } | Close { .. } | Reopen { .. } => anyhow::bail!("lifecycle is a write operation"),
             Send { .. } => anyhow::bail!("send is a write operation"),
             MessageStatus {
                 session_id,
