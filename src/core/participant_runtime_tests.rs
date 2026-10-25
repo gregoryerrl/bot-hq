@@ -8,6 +8,9 @@ use crate::storage::{Model, Participant, Storage};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
+#[path = "helper_native_tests.rs"]
+mod helper_native_tests;
+
 struct Seat {
     input: mpsc::Receiver<OutgoingUserMessage>,
     events: mpsc::Sender<AgentEvent>,
@@ -424,6 +427,43 @@ async fn helpers_queued_start_loses_to_pause_or_revocation() {
         assert!(f.state.storage.helper_batch("s1",f.rows[0].id,"queued").await.unwrap().is_none());
         f.end().await;
     }
+}
+
+#[tokio::test]
+async fn helper_start_survives_lost_http_reply_and_retry_then_stops_with_parent() {
+    let (f, mut spawned) = helper_fixture_with_database(true).await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    f.state.helpers.observe_claim(reached.clone());
+    let held = f.state.storage.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let request = helper_start("lost-reply");
+    let url = format!("http://{}/sessions/s1/hands/mcp", f.state.signaling_addr);
+    let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"delegate_tasks","arguments":request}});
+    let client = tokio::spawn(async move {
+        reqwest::Client::new().post(url)
+            .header("x-bot-hq-mcp-token", "token-hands")
+            .header("content-type", "application/json").body(body.to_string())
+            .timeout(Duration::from_millis(500)).send().await
+    });
+    tokio::time::timeout(Duration::from_secs(3), reached.notified()).await.unwrap();
+    assert!(client.await.unwrap().unwrap_err().is_timeout(), "the start reply must actually be lost");
+    held.rollback().await.unwrap();
+    let (_, mut seat) = tokio::time::timeout(Duration::from_secs(3), spawned.recv()).await.unwrap().unwrap();
+    let row = f.state.storage.helper_batch("s1", f.rows[0].id, "lost-reply").await.unwrap().unwrap();
+    let retried = helper_rpc(&f.state, request).await.unwrap();
+    assert_eq!(retried["batch_id"], row.id);
+    assert!(tokio::time::timeout(Duration::from_millis(50), spawned.recv()).await.is_err(), "retry launched a second helper");
+    {
+        let sessions = f.state.sessions.lock().await;
+        let parent = &sessions["s1"].participants[0];
+        parent.handle.incarnation().end_helper_epoch(parent.turn_epoch.as_ref().unwrap().load(Ordering::Acquire));
+    }
+    let status = helper_rpc(&f.state, serde_json::json!({"action":"status","request_id":"lost-reply","wait_secs":5})).await.unwrap();
+    assert_eq!(status["status"], "cancelled");
+    assert_eq!(status["result"]["helpers"][0]["cleanup_confirmed"], true);
+    if !*seat.stopped.borrow() {tokio::time::timeout(Duration::from_secs(2), seat.stopped.changed()).await.unwrap().unwrap();}
+    assert!(*seat.stopped.borrow(), "lost HTTP reply must not orphan the child");
+    f.end().await;
 }
 
 #[tokio::test]

@@ -223,6 +223,7 @@ check.
 | `src/core/helpers.rs` | managed helper start/status/cancel, owned batches, model selection and transcript/result collection; current public selection is Claude-only | M |
 | `src/core/live_participant.rs` | candidate prompt/config/pump construction, frozen-frontier/window-budgeted history excerpts with authorship and truncation, dynamic activity/watchdog/reviewer roster refresh | M |
 | `src/core/participant_runtime_tests.rs` | injected connector tests through the runtime worker, real ring, storage and close path | — |
+| `src/core/helper_native_tests.rs` | IGNORED native Claude/Codex MCP clients over a disposable turn fixture: 65-second batches and Codex-parent/Claude-helper result delivery | — |
 | `src/core/close_learnings.rs` | pure `decide`/`plan(decision, claimed, in_flight)` for the D15 close-out epilogue (in-flight decides first, round 11), `outcome_notice` | M |
 | `src/core/watchdog.rs` | `run_stall_watchdog`: stall + idle-unflagged loop → `session:attention` chip / nudge / halt escalation | L |
 | `src/core/worktree.rs` | `ensure_worktree`/`remove_worktree_if_clean` (argv-array `git`, no shell) | M |
