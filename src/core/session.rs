@@ -5326,6 +5326,8 @@ mod tests {
         let prompt = std::fs::read_to_string(&spawn_cfg.system_prompt_path).unwrap();
         assert!(prompt.starts_with("prompt"), "the composed prompt comes first");
         assert!(prompt.contains("# Runtime notes (Codex)") && prompt.contains("gpt-6-astra") && prompt.contains("co-author trailer"), "the connector's notes are appended: {prompt}");
+        assert!(prompt.contains("ALL_TOOLS") && prompt.contains("functions.exec"), "code-mode-only models need the advertised MCP calling route");
+        assert!(!prompt.contains("every bot-hq tool is available to you directly"));
         assert!(prompt.contains("Project `.claude` hooks are not automatically executed")
             && prompt.contains("manual handoff recovery")
             && prompt.contains("do not claim the hook ran"), "the actual spawn prompt must explain project hook recovery: {prompt}");

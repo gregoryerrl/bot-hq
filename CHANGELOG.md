@@ -25,6 +25,10 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- Codex models that require code mode can discover and call application tools,
+  including managed helpers. Startup no longer excludes MCP tools from that
+  route, and runtime instructions explain how to find and call them.
+
 - A failed close no longer leaves a stale close-out claim that interferes with
   later closes. Reopen reports that close-out is still finishing while its
   teardown owns the session, preventing an old close from killing a reopened

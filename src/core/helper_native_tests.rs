@@ -143,25 +143,46 @@ async fn claude_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::R
         .with_context(|| format!("Claude stderr: {errors}"))
 }
 
-async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::Result<()> {
+async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace, normal_discovery: bool) -> anyhow::Result<()> {
     let home = std::env::var("BOT_HQ_HELPER_CODEX_HOME")?;
     let model = std::env::var("BOT_HQ_HELPER_CODEX_MODEL")?;
-    let mut cmd = crate::process::tokio_command("codex");
+    let mut cmd = if normal_discovery {
+        // Take MCP exposure/auth from the actual production command so this
+        // acceptance test fails when that join regresses, not only its copy.
+        let codex = crate::agents::codex::spawn::CodexSpawn {
+            bin:None, mcp_url:format!("http://{}/sessions/s1/hands/mcp",f.state.signaling_addr),
+            mcp_token:"token-hands".into(),hook_trust:vec![],hook_exe:None,model_catalog:None,
+        };
+        let cfg = crate::agents::SpawnConfig {
+            agent_name:"hands".into(),session_id:"s1".into(),project:None,
+            config:crate::storage::AgentConfig {agent_name:"hands".into(),provider:"openai".into(),
+                model_name:model.clone(),base_url:None,auth_token:None,updated_at:String::new(),
+                context_window:None,cli_settings:None,claude_config_dir:Some(home.clone()),runtime:"codex".into()},
+            system_prompt_path:f._temp.path().join("unused-prompt"),mcp_config_path:None,
+            working_dir:Some(f._temp.path().into()),claude_bin:None,resume_session_id:None,
+            data_dir:f._temp.path().join("data"),capabilities:crate::agents::ResolvedCapabilities::Known(
+                crate::agents::CapabilitySet::from_slugs(&["read_channel","delegate_tasks"])),
+            overrides:Default::default(),blank_cli_attribution:true,account_dir:Some(home.clone()),
+            account_email:None,account_org:None,codex:Some(codex.clone()),
+        };
+        crate::agents::codex::spawn::build_codex_command(&cfg,&codex)
+    } else {
+        let mut cmd=crate::process::tokio_command("codex");
+        cmd.args(["app-server","--listen","stdio://"]);
+        for flag in crate::agents::codex::spawn::DISABLED_FEATURES {cmd.args(["--disable",flag]);}
+        cmd
+    };
     scrub(&mut cmd);
     for key in crate::agents::codex::spawn::CODEX_AUTH_ENV_SCRUB {
         cmd.env_remove(key);
     }
     cmd.env("CODEX_HOME", &home)
-        .current_dir(f._temp.path())
-        .args(["app-server", "--listen", "stdio://"]);
-    for flag in crate::agents::codex::spawn::DISABLED_FEATURES {
-        cmd.args(["--disable", flag]);
-    }
+        .env("BOT_HQ_MCP_TOKEN","token-hands")
+        .current_dir(f._temp.path());
     for config in [
         "agents.enabled=false",
         "features.hooks=false",
         "features.shell_tool=false",
-        "features.code_mode.enabled=false",
         "features.view_image=false",
         "project_doc_max_bytes=0",
         "memories.generate_memories=false",
@@ -170,6 +191,7 @@ async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::Re
     ] {
         cmd.args(["-c", config]);
     }
+    cmd.args(["-c", if normal_discovery {"features.code_mode.enabled=true"} else {"features.code_mode.enabled=false"}]);
     let mut child = cmd.spawn()?;
     let errors = drain_errors(&mut child);
     let (client, mut incoming) =
@@ -185,14 +207,14 @@ async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::Re
             for (name, value) in configured {
                 let mut disabled = value.as_object().context("invalid inherited server")?.clone();
                 disabled.retain(|_,value| !value.is_null());
-                disabled.insert("enabled".into(), json!(false));
+                if !normal_discovery || name!="bot_hq" {disabled.insert("enabled".into(), json!(false));}
                 servers.insert(name.clone(), Value::Object(disabled));
             }
         }
         // No tool_timeout_sec: measure the connector's ordinary timeout.
-        servers.insert("bot_hq".into(), json!({"url":format!("http://{}/sessions/s1/hands/mcp",f.state.signaling_addr),
+        if !normal_discovery {servers.insert("bot_hq".into(), json!({"url":format!("http://{}/sessions/s1/hands/mcp",f.state.signaling_addr),
             "http_headers":{"x-bot-hq-mcp-token":"token-hands"},"enabled":true,"required":true,
-            "default_tools_approval_mode":"approve"}));
+            "default_tools_approval_mode":"approve"}));}
         let thread = client.request("thread/start", json!({"model":model,"cwd":cwd,"ephemeral":true,
             "approvalPolicy":"never","sandbox":"read-only","baseInstructions":"Execute the MCP acceptance brief precisely. Use only the fixture MCP tools; no files, shell, network browsing or other sessions.",
             "config":{"mcp_servers":servers}})).await?;
@@ -266,7 +288,7 @@ async fn native_batch(runtime: &str, real_helper: bool) {
     let result = if runtime == "claude" {
         claude_parent(&f, &brief, &mut trace).await
     } else {
-        codex_parent(&f, &brief, &mut trace).await
+        codex_parent(&f, &brief, &mut trace, real_helper).await
     };
     if let Ok(prefix) = std::env::var("BOT_HQ_HELPER_PROBE_LOG") {
         std::fs::write(

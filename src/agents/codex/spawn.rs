@@ -118,7 +118,9 @@ pub fn config_overrides(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String> {
         "sandbox_mode=\"danger-full-access\"".to_string(),
         format!("mcp_servers.{server}.url={}", toml_str(&codex.mcp_url)),
         format!("mcp_servers.{server}.env_http_headers={{\"{}\"=\"BOT_HQ_MCP_TOKEN\"}}", crate::signaling::MCP_TOKEN_HEADER),
-        format!("mcp_servers.{server}.omit_tools_from=[\"deferred\",\"code_mode\"]"),
+        // A catalog may require code_mode_only. Excluding that route too
+        // leaves its MCP tools registered but inaccessible to the model.
+        format!("mcp_servers.{server}.omit_tools_from=[\"deferred\"]"),
         format!("mcp_servers.{server}.default_tools_approval_mode=\"approve\""),
         format!("mcp_servers.{server}.required=true"),
         "project_doc_fallback_filenames=[\"CLAUDE.md\"]".to_string(),
@@ -1149,7 +1151,7 @@ mod tests {
             "sandbox_mode=\"danger-full-access\"",
             "mcp_servers.bot_hq.url=\"http://127.0.0.1:5055/sessions/s-1/eyes/mcp\"",
             "mcp_servers.bot_hq.env_http_headers={\"x-bot-hq-mcp-token\"=\"BOT_HQ_MCP_TOKEN\"}",
-            "mcp_servers.bot_hq.omit_tools_from=[\"deferred\",\"code_mode\"]",
+            "mcp_servers.bot_hq.omit_tools_from=[\"deferred\"]",
             "mcp_servers.bot_hq.default_tools_approval_mode=\"approve\"",
             "mcp_servers.bot_hq.required=true",
             "project_doc_fallback_filenames=[\"CLAUDE.md\"]",
