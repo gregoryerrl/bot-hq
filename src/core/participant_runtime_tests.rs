@@ -401,6 +401,80 @@ async fn helpers_stop_on_parent_interrupt_retirement_and_turn_end() {
 }
 
 #[tokio::test]
+async fn codex_helper_eligibility_and_configuration_follow_the_selected_row() {
+    let (f,_) = helper_fixture().await;
+    sqlx::query("UPDATE models SET runtime='codex',provider='openai' WHERE id='old'").execute(f.state.storage.pool()).await.unwrap();
+    let models=helper_rpc(&f.state,serde_json::json!({"action":"models"})).await.unwrap();
+    let eligible=models["models"].as_array().unwrap().iter().any(|m|m["id"]=="old");
+    assert_eq!(eligible,cfg!(unix));
+    let (tx,mut seen)=mpsc::unbounded_channel();
+    f.state.helpers.set_spawner(Arc::new(move |cfg, _| {
+        let tx=tx.clone();Box::pin(async move {
+            let (handle,seat)=fake_agent(&cfg.session_id,&cfg.agent_name);
+            tx.send((cfg,seat)).unwrap();Ok(handle)
+        })
+    }));
+    let mut start=helper_start("codex-config");start["tasks"][0].as_object_mut().unwrap().remove("model_id");
+    if cfg!(unix) {
+        helper_rpc(&f.state,start).await.unwrap();
+        let (cfg,seat)=tokio::time::timeout(Duration::from_secs(3),seen.recv()).await.unwrap().unwrap();
+        assert_eq!(cfg.config.runtime,"codex");assert_eq!(cfg.config.model_name,"old");
+        assert_eq!(cfg.account_dir.as_deref(),Some(f._temp.path().join("old").to_str().unwrap()));
+        let codex=cfg.codex.expect("selected Codex connector must be configured before spawn");
+        assert!(codex.mcp_token.is_empty() && codex.mcp_url.is_empty() && codex.hook_trust.is_empty());
+        assert!(cfg.mcp_config_path.is_none() && cfg.resume_session_id.is_none());
+        drop(seat);
+        helper_rpc(&f.state,serde_json::json!({"action":"cancel","request_id":"codex-config"})).await.unwrap();
+        assert_eq!(helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"codex-config","wait_secs":5})).await.unwrap()["status"],"cancelled");
+    } else {
+        assert!(helper_rpc(&f.state,start).await.is_err());
+        assert!(seen.try_recv().is_err());
+    }
+    f.end().await;
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "spends one native Codex helper turn through real HTTP/manager; select CODEX_HOME/MODEL probe vars"]
+async fn native_codex_child_runs_through_the_real_helper_manager() {
+    let (f,_) = helper_fixture().await;
+    f.state.helpers.clear_spawner();
+    let model=std::env::var("BOT_HQ_HELPER_CODEX_MODEL").unwrap();
+    let home=std::env::var("BOT_HQ_HELPER_CODEX_HOME").unwrap();
+    sqlx::query("UPDATE models SET runtime='codex',provider='openai',model_name=?,claude_config_dir=?,context_window=NULL WHERE id='old'")
+        .bind(&model).bind(&home).execute(f.state.storage.pool()).await.unwrap();
+    std::fs::write(f._temp.path().join("source.rs"),"// CODEX_MANAGER_PELICAN\n").unwrap();
+    let mut request=helper_start("native-codex-manager");
+    request["tasks"][0]["goal"]="Read source.rs and quote line 1 with its path.".into();
+    request["timeout_secs"]=120.into();
+    let outcome=tokio::time::timeout(Duration::from_secs(140),async {
+        let first=helper_rpc(&f.state,request.clone()).await?;
+        let retry=helper_rpc(&f.state,request).await?;
+        anyhow::ensure!(first["batch_id"]==retry["batch_id"],"retry changed the native batch");
+        loop {
+            let status=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"native-codex-manager","wait_secs":45})).await?;
+            if !matches!(status["status"].as_str(),Some("starting"|"running"|"cancelling")) {break;}
+        }
+        let row=f.state.storage.helper_batch("s1",f.rows[0].id,"native-codex-manager").await?.context("native batch missing")?;
+        let result: serde_json::Value=serde_json::from_str(row.result_json.as_deref().context("native result missing")?)?;
+        if let Ok(path)=std::env::var("BOT_HQ_HELPER_PROBE_LOG") {std::fs::write(path,serde_json::to_vec_pretty(&result)?)?;}
+        anyhow::ensure!(row.status=="completed","native helper failed: {result}");
+        anyhow::ensure!(result["helpers"][0]["runtime"]=="codex","wrong helper connector");
+        anyhow::ensure!(result["helpers"][0]["cleanup_confirmed"]==true,"native cleanup unconfirmed");
+        anyhow::ensure!(result["helpers"][0]["output"].as_str().is_some_and(|s|s.contains("CODEX_MANAGER_PELICAN")),"native finding missing: {result}");
+        anyhow::ensure!(result["helpers"][0]["transcript"].as_str().is_some_and(|s|s.contains("repo_read")),"real repository tool was not used");
+        let count: i64=sqlx::query_scalar("SELECT COUNT(*) FROM session_helper_batches WHERE session_id='s1'").fetch_one(f.state.storage.pool()).await?;
+        anyhow::ensure!(count==1,"native retry created another batch");
+        let doc=f.state.storage.session_document_by_slug("s1","helpers").await?.context("helper document missing")?;
+        anyhow::ensure!(doc.body.contains("CODEX_MANAGER_PELICAN"),"native finding not retained for review");
+        Ok::<_,anyhow::Error>(())
+    }).await;
+    f.end().await;
+    outcome.expect("native manager probe timed out").expect("native manager probe failed");
+    eprintln!("native Codex child: actual HTTP claim/manager/connector/result/document; one batch, real repo_read, cleanup confirmed");
+}
+
+#[tokio::test]
 async fn helpers_enforce_grants_model_selection_and_wait_bounds() {
     let (f,mut spawned)=helper_fixture().await;
     assert!(!helper_rpc(&f.state,serde_json::json!({"action":"models"})).await.unwrap()["models"].as_array().unwrap().is_empty());

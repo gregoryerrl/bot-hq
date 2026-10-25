@@ -106,9 +106,13 @@ The read-channel tool `helper_result` pages retained batch findings and compact 
 so reviewers do not need the launch grant. Final findings are separated from tool
 commentary; bounded traces preserve the end and summarize file results. Restart
 marks unfinished batches interrupted without replay. The parent verifies
-evidence and owns integration. Either parent runtime can select a saved Claude
-helper model/account. The Codex helper connector remains unavailable through the
-tool until its remaining native-tool acceptance checks pass. Every newly started
+evidence and owns integration. Either parent runtime can select an eligible saved
+model/account: Claude-connector models (including configured gateways), or Codex
+models on Unix. Codex helpers use a private text-only catalog and host-mediated
+bounded repository reads; every MCP server must be disabled with empty tool,
+resource and template inventories. Only the two empty built-in inventory listings
+are allowed; resource reads and external MCP calls remain blocked. Windows Codex
+helpers are unavailable until an equivalent file boundary exists. Every newly started
 Claude participant loses native Agent/Workflow/Task tools, whether it can edit or
 has the helper capability. Codex native delegation remains disabled. The capability
 grants managed helpers only; already-running processes keep their startup inventory.

@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use tokio::sync::{watch, Notify};
 use crate::agents::{AgentEvent, SpawnConfig};
+use crate::agents::runtime::Runtime;
 use crate::agents::incarnation::{Incarnation, HelperTicket, HelperRegistration};
 use crate::storage::{HelperBatch, Model, Storage};
 use crate::signaling::McpTokenProof;
@@ -38,12 +39,18 @@ pub(crate) struct HelperRegistry {
 #[cfg(test)]
 impl HelperRegistry {
     pub(crate) fn set_spawner(&self, spawn: HelperSpawner){*self.spawner.lock().unwrap()=Some(spawn);}
+    #[cfg(unix)]
+    pub(crate) fn clear_spawner(&self){*self.spawner.lock().unwrap()=None;}
     pub(crate) fn observe_claim(&self, notify: Arc<Notify>){*self.claimed.lock().unwrap()=Some(notify);}
 }
 
 fn bounded(text: &str, limit: usize) -> String {
     let clean=crate::policy::secret_scan::redact_string(text.to_string());
     if clean.len()<=limit {clean} else {format!("{}\n[truncated]",&clean[..crate::text::floor_char_boundary(&clean,limit)])}
+}
+
+fn helper_runtime_supported(runtime: Runtime) -> bool {
+    match runtime {Runtime::ClaudeCode=>true,Runtime::Codex=>cfg!(unix)}
 }
 
 #[derive(Default)]
@@ -121,8 +128,8 @@ impl AppState {
         match request {
             DelegateRequest::Models => {
                 let models=self.storage.list_models().await?;
-                Ok(json!({"models":models.into_iter().filter(|m|m.runtime()==crate::agents::runtime::Runtime::ClaudeCode).take(100)
-                    .map(|m|json!({"id":m.id,"name":m.display_name,"runtime":m.runtime,"account_directory":m.claude_config_dir})).collect::<Vec<_>>(),"note":"Each helper uses the chosen model/account's usage. Codex helper selection is not enabled yet."}))
+                Ok(json!({"models":models.into_iter().filter(|m|helper_runtime_supported(m.runtime())).take(100)
+                    .map(|m|json!({"id":m.id,"name":m.display_name,"runtime":m.runtime,"account_directory":m.claude_config_dir})).collect::<Vec<_>>(),"note":"Each helper uses the selected model/account's usage. Codex helpers require Unix; choose a listed model for this platform."}))
             }
             DelegateRequest::Start {request_id,tasks,timeout_secs} => {
                 ensure!(self.helpers.recovered.load(std::sync::atomic::Ordering::Acquire),"helper recovery did not complete; no new batch can start");
@@ -169,7 +176,7 @@ impl AppState {
                     for task in &tasks {
                         let model_id=task.model_id.as_deref().or(default_model.as_deref()).context("select an eligible helper model explicitly using models")?;
                         let model=Storage::get_model_on(&mut tx,model_id).await?.context("helper model does not exist")?;
-                        ensure!(model.runtime()==crate::agents::runtime::Runtime::ClaudeCode,"select a saved Claude helper model; Codex helpers are not enabled yet");
+                        ensure!(helper_runtime_supported(model.runtime()),"choose an eligible helper model using the models action; Codex helpers require Unix");
                         models.push(model);
                     }
                     let repo: Option<String>=sqlx::query_scalar("SELECT working_repo_path FROM sessions WHERE id=?").bind(&session).fetch_one(&mut *tx).await?;
@@ -285,16 +292,24 @@ impl AppState {
         Ok(())
     }
 
-    async fn spawn_helper(&self, cfg: SpawnConfig, brief: String) -> Result<crate::agents::AgentHandle> {
+    async fn spawn_helper(&self, mut cfg: SpawnConfig, brief: String) -> Result<crate::agents::AgentHandle> {
+        let runtime=Runtime::from_column(&cfg.config.runtime);
+        ensure!(helper_runtime_supported(runtime),"helper connector is unavailable on this platform");
+        if runtime==Runtime::Codex {
+            cfg.codex=Some(crate::agents::codex::spawn::CodexSpawn {bin:None,mcp_url:String::new(),mcp_token:String::new(),hook_trust:vec![],hook_exe:None,model_catalog:None});
+        }
         #[cfg(test)] {
             let spawn=self.helpers.spawner.lock().unwrap().clone();
             if let Some(spawn)=spawn {return spawn(cfg,brief).await;}
         }
-        crate::agents::spawn::spawn_claude_helper(cfg,brief).await
+        match runtime {
+            Runtime::ClaudeCode=>crate::agents::spawn::spawn_claude_helper(cfg,brief).await,
+            Runtime::Codex=>crate::agents::codex::helpers::spawn_codex_helper(cfg,brief).await,
+        }
     }
 
     async fn run_helper(&self, id: String, owner: Arc<Incarnation>, ticket: HelperTicket, task: HelperTask, model: Model, repo: String, control: Arc<BatchControl>) -> Value {
-        let metadata=json!({"helper_id":id,"model_id":model.id,"model":model.display_name,"account_directory":model.claude_config_dir,"goal":task.goal,"files":task.files,"expected_evidence":task.expected_evidence});
+        let metadata=json!({"helper_id":id,"model_id":model.id,"model":model.display_name,"runtime":model.runtime,"account_directory":model.claude_config_dir,"goal":task.goal,"files":task.files,"expected_evidence":task.expected_evidence});
         let mut cancelled=control.cancel.subscribe();
         let outcome=async {
             ensure!(cancelled.borrow().is_none(),"batch cancelled before spawn");

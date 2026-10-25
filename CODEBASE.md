@@ -88,7 +88,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `tests/codex_live_test.rs` | IGNORED: one real gated turn through `spawn_codex_agent` against the `codex` binary and a signed-in managed home (`BOT_HQ_CODEX_LIVE_HOME`), with an in-process signaling server — the wire no fake can prove | — |
 | `src/agents/runtime.rs` | `Runtime` — the CONNECTOR a model row spawns through (`claude_code` \| `codex`, column value of `models.runtime`, 0102); `parse` refuses the unknown (Save), `from_column` reads it as claude-code (a pre-0102 row) | S |
 | `src/agents/incarnation.rs` | installed-runtime identity and host-write leases; retirement revokes new writers and drains admitted ones before replacement publication | S |
-| `src/agents/helpers.rs` | restricted Claude helper command: three read tools, strict empty MCP, no inherited instructions/plugins or parent authority; connector groundwork, not yet exposed by a role grant | S |
+| `src/agents/helpers.rs` | restricted Claude helper command: three read tools, strict empty MCP, no inherited instructions/plugins or parent authority; used by the managed-helper grant | S |
 | `src/agents/helper_reads.rs` | bounded host read/list/search tools; pinned directory descriptors reject traversal and symlink substitution; currently Unix-only | M |
 | `src/agents/codex/helpers.rs` | isolated Codex helper startup, inherited MCP disabling, dynamic repository-tool handler and owned startup/turn cleanup; no shared hook-file writes | M |
 | `tests/helper_claude_live_test.rs` | IGNORED native Claude helper inventory and outside/symlink read-boundary probe; explicit model/account selection, no live bot-hq server | — |
@@ -220,7 +220,7 @@ check.
 | `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the big glue fn); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
 | `src/core/spawn_draft_tests.rs` | async draft/publication wire tests for both connectors: close/rollback during probe, frozen input settings, staged metadata/token/notices and operation-owned publication | — |
 | `src/core/participant_runtime.rs` | host-owned live change worker: reserve/claim, retire, stage, publish or restore; cancellation and process shutdown receipts | M |
-| `src/core/helpers.rs` | managed helper start/status/cancel, owned batches, model selection and transcript/result collection; current public selection is Claude-only | M |
+| `src/core/helpers.rs` | managed helper start/status/cancel, owned batches, platform-aware Claude/Codex selection and dispatch, transcript/result collection | M |
 | `src/core/live_participant.rs` | candidate prompt/config/pump construction, frozen-frontier/window-budgeted history excerpts with authorship and truncation, dynamic activity/watchdog/reviewer roster refresh | M |
 | `src/core/participant_runtime_tests.rs` | injected connector tests through the runtime worker, real ring, storage and close path | — |
 | `src/core/helper_native_tests.rs` | IGNORED native Claude/Codex MCP clients over a disposable turn fixture: 65-second batches and Codex-parent/Claude-helper result delivery | — |

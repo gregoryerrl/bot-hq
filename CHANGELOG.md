@@ -13,13 +13,15 @@ model side by side. Migration 0102 applies on first launch.
 
 Managed sub-agent development is in verification. Roles now offers an opt-in
 **Sub-agent development** capability: up to two read-only helpers, selected by
-saved Claude model/account, usable by either parent runtime. Starts return
+saved model/account, usable by either parent runtime. Claude-connector models
+include configured gateways; Codex helpers are supported on Unix. Starts return
 immediately; bounded status waits and stable request IDs prevent duplicate
 launches after a lost reply. Helpers stop with their parent's turn and leave
 recent evidence in one bounded document; retained findings and compact traces
 remain readable by reviewers. Final findings survive long commentary and file
 results. The parent still integrates and verifies the
-work. Codex helper selection is not enabled yet. Newly started Claude participants
+work. Codex helpers require explicitly disabled MCP servers with empty inventories;
+only built-in empty listing calls are allowed. Newly started Claude participants
 no longer expose native Agent/Workflow/Task delegation, with or without the checkbox;
 the checkbox grants managed helpers only. Existing processes adopt this at restart.
 
