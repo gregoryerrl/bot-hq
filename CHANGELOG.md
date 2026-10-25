@@ -132,8 +132,13 @@ model side by side. Migration 0102 applies on first launch.
   start dormant open sessions and explicitly resume started sessions without
   interrupting a live worker. Closed sessions still require reopening; start
   does not lift Pause. Recipient guidance recognizes authenticated delegated
-  directions while keeping human attribution separate. Creation, the remaining
-  lifecycle operations and settings writes are still being connected.
+  directions while keeping human attribution separate. Controllers can also
+  create sessions with the dialog's participant and worktree choices. The result
+  distinguishes creation from startup failure; an existing ID cannot be
+  overwritten, and queued creation loses to Pause or permission revocation.
+  Creation also rejects unknown explicit model IDs instead of silently falling
+  back, and rejects misspelled participant fields.
+  Remaining lifecycle operations and settings writes are still being connected.
 
 
 - **Agents can retrieve older records from their own session.** The

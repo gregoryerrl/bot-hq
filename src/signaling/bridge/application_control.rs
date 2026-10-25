@@ -9,6 +9,14 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AppControlRequest {
+    Create {
+        session_id: String,
+        title: String,
+        repo_path: Option<String>,
+        project: Option<String>,
+        participants: Vec<crate::tauri_cmd::sessions::ParticipantPick>,
+        use_worktree: Option<bool>,
+    },
     Start { session_id: String },
     Resume { session_id: String },
     Send {
@@ -64,6 +72,7 @@ pub(crate) enum AppControlRequest {
 impl AppControlRequest {
     fn identity(&self) -> (&'static str, Option<&str>) {
         match self {
+            Self::Create { session_id, .. } => ("create", Some(session_id)),
             Self::Start { session_id } => ("start", Some(session_id)),
             Self::Resume { session_id } => ("resume", Some(session_id)),
             Self::Send { session_id, .. } => ("send", Some(session_id)),
@@ -132,6 +141,7 @@ impl SignalingBridge {
         // Capture the runtime/Pause ticket before even the audit INSERT can
         // queue behind another writer. A later Resume cannot renew this call.
         let claim = match &request {
+            AppControlRequest::Create { session_id, .. } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Start { session_id } | AppControlRequest::Resume { session_id } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Send { session_id, .. } => Some(
                 self.control_message_ticket(actor.clone(), proof, session_id.clone())
@@ -155,6 +165,15 @@ impl SignalingBridge {
             .start_control_audit(&actor, target.as_deref(), operation)
             .await?;
         let result = match request {
+            AppControlRequest::Create { session_id, title, repo_path, project, participants, use_worktree } => {
+                self.control_create(crate::tauri_cmd::sessions::SessionCreateInput {
+                    id: session_id, title, repo_path, project, multi_participant: None,
+                    slot0_model_id: None, slot1_model_id: None,
+                    options: crate::tauri_cmd::sessions::SessionCreateOptions {
+                        participants: Some(participants), use_worktree, ..Default::default()
+                    },
+                }, claim.as_ref().unwrap()).await
+            }
             AppControlRequest::Start { session_id } => {
                 self.control_start(&session_id, claim.as_ref().unwrap()).await
             }
@@ -207,9 +226,28 @@ impl SignalingBridge {
         result
     }
 
+    async fn control_create(
+        &self,
+        input: crate::tauri_cmd::sessions::SessionCreateInput,
+        claim: &crate::signaling::ControlClaim,
+    ) -> Result<Value> {
+        let core = self.app_state.get().and_then(Weak::upgrade)
+            .context("application control is not connected to the runtime")?;
+        let session = crate::tauri_cmd::sessions::create_session_record(&core, input, Some(claim)).await?;
+        let startup = match self.control_start(&session.id, claim).await {
+            Ok(result) => result,
+            Err(error) => json!({"status":"failed", "error":crate::policy::secret_scan::redact_string(error.to_string())}),
+        };
+        // Creation succeeded even if startup failed. Never invite a duplicate
+        // create retry when the right action is `start` on the existing row.
+        core.notify_session_created(&session.id);
+        Ok(json!({"status":"created", "session":session, "startup":startup}))
+    }
+
     async fn control_read(&self, storage: &Storage, request: AppControlRequest) -> Result<Value> {
         use AppControlRequest::*;
         let value = match request {
+            Create { .. } => anyhow::bail!("creation is a write operation"),
             Start { .. } | Resume { .. } => anyhow::bail!("lifecycle is a write operation"),
             Send { .. } => anyhow::bail!("send is a write operation"),
             MessageStatus {

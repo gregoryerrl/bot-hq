@@ -58,6 +58,21 @@ impl Storage {
         title: &str,
         working_repo_path: Option<&str>,
     ) -> Result<Session> {
+        let mut conn = self.pool.acquire().await?;
+        Self::insert_session_on(&mut conn, id, title, working_repo_path).await?;
+        drop(conn);
+        self.get_session(id)
+            .await?
+            .context("session row vanished immediately after insert")
+    }
+
+    /// The dialog and a delegated creation claim use the same row insert.
+    pub(crate) async fn insert_session_on(
+        conn: &mut sqlx::SqliteConnection,
+        id: &str,
+        title: &str,
+        working_repo_path: Option<&str>,
+    ) -> Result<()> {
         // Blank-but-present paths ('' from a repo-less project row) must store
         // as NULL: every consumer treats Some as "has a repo", and a phantom
         // path hard-errors action_gate / hook install. Migration 0019 repaired
@@ -75,12 +90,10 @@ impl Storage {
         .bind(title)
         .bind(working_repo_path)
         .bind(now_utc())
-        .execute(&self.pool)
+        .execute(conn)
         .await
         .with_context(|| format!("creating session {id}"))?;
-        self.get_session(id)
-            .await?
-            .context("session row vanished immediately after insert")
+        Ok(())
     }
 
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {

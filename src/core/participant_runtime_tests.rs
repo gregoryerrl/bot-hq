@@ -394,6 +394,117 @@ async fn driver_send_preserves_pause_human_stage_and_retry_tombstones() {
 }
 
 #[tokio::test]
+async fn driver_create_uses_dialog_picks_and_native_start_without_human_authorship() {
+    let f = driver_fixture(false).await;
+    let bridge = f.state.bridge.clone();
+    let starts = Arc::new(AtomicU64::new(0));
+    let count = starts.clone();
+    let (tx, mut receivers) = mpsc::unbounded_channel();
+    f.state.set_session_starter(Arc::new(move |id| {
+        let (bridge, count, tx) = (bridge.clone(), count.clone(), tx.clone());
+        Box::pin(async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            let (handle, input) = crate::core::session::stub_session_for_tests(&id, &bridge).await;
+            bridge.register_session_activity(id, Arc::downgrade(&handle.activity)).await;
+            tx.send(input).unwrap();
+            Ok(handle)
+        })
+    }));
+    let repo = f._temp.path().join("example");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    let args = serde_json::json!({"action":"create", "session_id":"created", "title":"Delegated project work",
+        "repo_path":repo, "project":"example", "use_worktree":true,
+        "participants":[{"roleId":f.rows[0].role_id,"modelId":"new","label":"Builder","effort":"high"},
+            {"roleId":f.rows[1].role_id,"modelId":"old","label":"Reviewer"}]});
+    let result = driver_rpc(&f.state, args.clone()).await.unwrap();
+    assert_eq!(result["result"]["status"], "created");
+    assert_eq!(result["result"]["startup"]["status"], "started");
+    assert_eq!(result["result"]["session"]["multi_participant"], true);
+    assert_eq!(result["result"]["session"]["base_repo_path"], repo.to_str().unwrap());
+    let working = result["result"]["session"]["working_repo_path"].as_str().unwrap();
+    assert!(working.contains("worktrees/created/example"), "{working}");
+    let _input = receivers.recv().await.unwrap();
+    let rows = f.state.storage.participants_for_session("created").await.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].model_id.as_deref(), Some("new"));
+    assert_eq!(rows[0].effort.as_deref(), Some("high"));
+    assert_eq!(rows[0].label.as_deref(), Some("Builder"));
+    assert_eq!(rows[1].role_id, f.rows[1].role_id);
+    let notice: (String, String) = sqlx::query_as("SELECT origin, content FROM messages WHERE session_id = 'created' ORDER BY id LIMIT 1")
+        .fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(notice.0, "system"); assert!(notice.1.contains("hands of s1"));
+    let human: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE session_id = 'created'")
+        .fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(human, 0);
+    assert!(driver_rpc(&f.state, args).await.is_err(), "an existing id must never be overwritten");
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let mut target = f.state.sessions.lock().await.remove("created").unwrap();
+    f.state.quiesce_session_handle(&mut target).await.unwrap();
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_create_reports_start_failure_and_rejects_invalid_picks_before_insert() {
+    let f = driver_fixture(false).await;
+    f.state.set_session_starter(Arc::new(|_| Box::pin(async { anyhow::bail!("fixture startup failure") })));
+    let base = serde_json::json!({"action":"create", "session_id":"created", "title":"Work",
+        "participants":[{"roleId":f.rows[0].role_id}]});
+    for participants in [serde_json::json!([]), serde_json::json!([{"roleId":-1}]),
+        serde_json::json!([{"roleId":f.rows[0].role_id,"modelId":"missing-model"}]),
+        serde_json::json!([{"roleId":f.rows[0].role_id,"model_id":"new"}]),
+        serde_json::Value::Array(vec![serde_json::json!({"roleId":f.rows[0].role_id});9])] {
+        let mut invalid = base.clone(); invalid["participants"] = participants;
+        assert!(driver_rpc(&f.state, invalid).await.is_err());
+        assert!(f.state.storage.get_session("created").await.unwrap().is_none());
+    }
+    let mut unsafe_id = base.clone(); unsafe_id["session_id"] = "../escape".into();
+    assert!(driver_rpc(&f.state, unsafe_id).await.is_err());
+    let result = driver_rpc(&f.state, base).await.unwrap();
+    assert_eq!(result["result"]["status"], "created");
+    assert_eq!(result["result"]["startup"]["status"], "failed");
+    assert!(result["result"]["startup"]["error"].as_str().unwrap().contains("fixture startup failure"));
+    assert!(f.state.storage.get_session("created").await.unwrap().is_some());
+    assert!(!f.state.sessions.lock().await.contains_key("created"));
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_create_rechecks_the_claim_after_waiting_for_creation_ownership() {
+    for revoked in [false, true] {
+        let f = driver_fixture(false).await;
+        f.state.set_session_starter(Arc::new(|_| Box::pin(async { panic!("a stale creation must never start") })));
+        let lock = f.state.lifecycle_lock("created");
+        let held = lock.lock().await;
+        let state = f.state.clone();
+        let role = f.rows[0].role_id;
+        let request = tokio::spawn(async move { driver_rpc(&state, serde_json::json!({"action":"create",
+            "session_id":"created", "title":"Work", "participants":[{"roleId":role}]})).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM application_control_audit WHERE operation = 'create' AND outcome = 'started'")
+                    .fetch_one(f.state.storage.pool()).await.unwrap();
+                if count > 0 { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        if revoked {
+            sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(role)
+                .execute(f.state.storage.pool()).await.unwrap();
+        } else {
+            let activity = f.state.sessions.lock().await["s1"].activity.clone();
+            activity.set_paused(true); activity.set_paused(false);
+        }
+        drop(held);
+        assert!(request.await.unwrap().is_err());
+        assert!(f.state.storage.get_session("created").await.unwrap().is_none());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE session_id = 'created'")
+            .fetch_one(f.state.storage.pool()).await.unwrap();
+        assert_eq!(count, 0);
+        f.end().await;
+    }
+}
+
+#[tokio::test]
 async fn driver_start_uses_the_native_install_path_and_resume_is_attributed() {
     let f = driver_fixture(false).await;
     f.state.storage.create_session("dormant", "dormant target", None).await.unwrap();

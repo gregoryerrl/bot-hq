@@ -127,7 +127,7 @@ pub struct SessionCreateOptions {
 /// **There is no name field, and that is rc3 D10.** The slug and the display
 /// name are derived from the role by `Storage::seed_session_roster`.
 #[derive(Debug, Clone, Deserialize, Type)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ParticipantPick {
     pub role_id: i64,
     pub model_id: Option<String>,
@@ -212,6 +212,11 @@ pub(crate) async fn resolve_participant_picks(
                 "role {} is archived",
                 role.display_name
             )));
+        }
+        if let Some(model) = &pick.model_id {
+            if storage.get_model(model).await.map_err(|e| AppError::DbError(e.to_string()))?.is_none() {
+                return Err(AppError::Validation(format!("model {model} does not exist; refresh the model choices")));
+            }
         }
         // An `on_mention` role is a legal invite as of rc3 D17: it is spawned,
         // sits out the rotation, and takes a turn when the user names it. It
@@ -690,6 +695,60 @@ pub async fn create_session(
     // Effort/ultracode/worktree picks (bundled — see SessionCreateOptions).
     options: SessionCreateOptions,
 ) -> Result<SessionInfo, AppError> {
+    let session = create_session_record(&core, SessionCreateInput {
+        id: id.clone(), title, repo_path, project, multi_participant,
+        slot0_model_id, slot1_model_id, options,
+    }, None).await?;
+    // Spawn the roster in the background so the session primes (boot,
+    // orientation) without the user having to open it. Not awaited: worktree
+    // materialization can take seconds and the create dialog shouldn't block
+    // on it. `ensure_session_started` is idempotent + spawn-gate-serialized,
+    // so the SessionView mount's `respawn_session` stays a harmless no-op and
+    // doubles as the retry path if this background spawn fails.
+    let core_bg = Arc::clone(core.inner());
+    let spawn_id = id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = core_bg.ensure_session_started(&spawn_id).await {
+            tracing::warn!(session_id = %spawn_id, error = ?e, "post-create background spawn failed");
+        }
+        // The row is committed and the handle (if the spawn succeeded) is
+        // registered: tell the frontend and, through it, plugins holding
+        // `list_sessions`. The dialog already invalidates its own list; this
+        // is for everything that was never told (round 7 — the event had no
+        // live emitter).
+        core_bg.notify_session_created(&spawn_id);
+    });
+    Ok(session.into())
+}
+
+/// Shared dialog/controller creation; startup is a separate, retryable step.
+pub(crate) struct SessionCreateInput {
+    pub id: String,
+    pub title: String,
+    pub repo_path: Option<String>,
+    pub project: Option<String>,
+    pub multi_participant: Option<bool>,
+    pub slot0_model_id: Option<String>,
+    pub slot1_model_id: Option<String>,
+    pub options: SessionCreateOptions,
+}
+
+pub(crate) async fn create_session_record(
+    core: &CoreAppState,
+    input: SessionCreateInput,
+    claim: Option<&crate::signaling::ControlClaim>,
+) -> Result<SessionInfo, AppError> {
+    let SessionCreateInput { id, title, repo_path, project, multi_participant,
+        slot0_model_id, slot1_model_id, options } = input;
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err(AppError::Validation("session id must contain 1–128 letters, digits, hyphens or underscores".into()));
+    }
+    if title.trim().is_empty() || title.len() > 1000 {
+        return Err(AppError::Validation("session title must be non-empty and at most 1000 bytes".into()));
+    }
+    // Viewing the new row cannot start a default roster halfway through setup.
+    let lifecycle = core.lifecycle_lock(&id);
+    let _guard = lifecycle.lock().await;
     let storage = &core.storage;
     // rc3: resolve the picked roster BEFORE the session row exists, so a
     // refused pick (an archived role, an on-demand one, too many rows) leaves
@@ -715,10 +774,13 @@ pub async fn create_session(
         options.use_worktree,
     )
     .await;
-    storage
-        .create_session(&id, &title, working.as_deref())
-        .await
-        .map_err(|e| AppError::DbError(e.to_string()))?;
+    if let Some(claim) = claim {
+        core.bridge.create_controlled_session_row(claim, &id, &title, working.as_deref())
+            .await.map_err(|e| AppError::Validation(e.to_string()))?;
+    } else {
+        storage.create_session(&id, &title, working.as_deref())
+            .await.map_err(|e| AppError::DbError(e.to_string()))?;
+    }
     if base.is_some() {
         storage
             .set_session_base_repo(&id, base.as_deref())
@@ -762,25 +824,6 @@ pub async fn create_session(
         .await
         .map_err(|e| AppError::DbError(e.to_string()))?
         .ok_or_else(|| AppError::DbError("session vanished after create".into()))?;
-    // Spawn the roster in the background so the session primes (boot,
-    // orientation) without the user having to open it. Not awaited: worktree
-    // materialization can take seconds and the create dialog shouldn't block
-    // on it. `ensure_session_started` is idempotent + spawn-gate-serialized,
-    // so the SessionView mount's `respawn_session` stays a harmless no-op and
-    // doubles as the retry path if this background spawn fails.
-    let core_bg = Arc::clone(core.inner());
-    let spawn_id = id.clone();
-    tokio::spawn(async move {
-        if let Err(e) = core_bg.ensure_session_started(&spawn_id).await {
-            tracing::warn!(session_id = %spawn_id, error = ?e, "post-create background spawn failed");
-        }
-        // The row is committed and the handle (if the spawn succeeded) is
-        // registered: tell the frontend and, through it, plugins holding
-        // `list_sessions`. The dialog already invalidates its own list; this
-        // is for everything that was never told (round 7 — the event had no
-        // live emitter).
-        core_bg.notify_session_created(&spawn_id);
-    });
     Ok(session.into())
 }
 
@@ -1366,7 +1409,7 @@ mod tests {
             rest[..end].to_string()
         };
         for (name, seeds) in [
-            ("create_session", &["seed_session_roster(", "seed_default_roster("][..]),
+            ("create_session_record", &["seed_session_roster(", "seed_default_roster("][..]),
             ("dispatch_session_inner", &["seed_dispatch_roster("][..]),
         ] {
             let body = body_of(name);
@@ -1892,6 +1935,8 @@ mod tests {
         // agent name; it is one select per participant ROW now, and the value
         // has to reach that row or the select changes nothing.
         let (storage, _b) = setup().await;
+        sqlx::query("INSERT OR IGNORE INTO models (id, display_name, provider, model_name) VALUES ('opus', 'Opus', 'anthropic', 'opus'), ('sonnet', 'Sonnet', 'anthropic', 'sonnet')")
+            .execute(storage.pool()).await.unwrap();
         let hands = storage.role_by_slug("hands").await.unwrap().unwrap();
         let eyes = storage.role_by_slug("eyes").await.unwrap().unwrap();
 
@@ -1943,6 +1988,8 @@ mod tests {
         // NULL would silently spawn the agent-config model instead of the one
         // the Roles tab names.
         let (storage, _b) = setup().await;
+        sqlx::query("INSERT OR IGNORE INTO models (id, display_name, provider, model_name) VALUES ('chosen', 'Chosen', 'anthropic', 'chosen')")
+            .execute(storage.pool()).await.unwrap();
         let role = storage
             .create_role(&crate::storage::RoleDraft {
                 display_name: "Reviewer".into(),

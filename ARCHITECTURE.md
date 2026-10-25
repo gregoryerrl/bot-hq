@@ -930,6 +930,12 @@ explicit, system-attributed non-preempting release; start alone does not clear
 Pause. A stale runtime replaced during resume requires a fresh state read/retry,
 so an old ticket never silently authorizes a new incarnation. Recipient guidance
 accepts authenticated delegated task directions without calling them human words.
+`create` shares the dialog's roster/placement validation and row setup. It takes
+an explicit roster and a new caller-chosen ID, refuses duplicates, and records a
+system-attributed creation notice with the row in the same authority-checked
+transaction. Setup holds the session lifecycle lock so a view cannot spawn a
+default roster halfway through. Native startup follows with a separate result:
+if it fails, the session still exists and the retry is `start`, not `create`.
 Other lifecycle/settings writes remain pending.
 
 `session_history` requires `read_channel` and fixes its scope to the

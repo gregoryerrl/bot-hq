@@ -99,6 +99,28 @@ impl SignalingBridge {
         Ok(())
     }
 
+    pub(crate) async fn create_controlled_session_row(
+        &self,
+        claim: &ControlClaim,
+        id: &str,
+        title: &str,
+        working: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(id == claim.target_session, "creation target differs from its claim");
+        let storage = self.storage_handle().await.context("storage is unavailable")?;
+        let mut tx = storage.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let actor = Storage::controller_actor_on(&mut tx, &claim.actor.session_id, &claim.actor.slug).await?;
+        anyhow::ensure!(actor == claim.actor, "controller identity changed");
+        claim.check(self)?;
+        Storage::insert_session_on(&mut tx, id, title, working).await?;
+        let notice = format!("Session created by delegated controller {} of {}.", actor.slug, actor.session_id);
+        sqlx::query("INSERT INTO messages (session_id, origin, kind, content, author, created_at) VALUES (?, 'system', 'system_notice', ?, 'user', ?)")
+            .bind(id).bind(notice).bind(crate::storage::now_utc()).execute(&mut *tx).await?;
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn control_ticket(
         &self,
         actor: ControlActor,
