@@ -88,6 +88,8 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `tests/codex_live_test.rs` | IGNORED: one real gated turn through `spawn_codex_agent` against the `codex` binary and a signed-in managed home (`BOT_HQ_CODEX_LIVE_HOME`), with an in-process signaling server — the wire no fake can prove | — |
 | `src/agents/runtime.rs` | `Runtime` — the CONNECTOR a model row spawns through (`claude_code` \| `codex`, column value of `models.runtime`, 0102); `parse` refuses the unknown (Save), `from_column` reads it as claude-code (a pre-0102 row) | S |
 | `src/agents/incarnation.rs` | installed-runtime identity and host-write leases; retirement revokes new writers and drains admitted ones before replacement publication | S |
+| `src/agents/helpers.rs` | restricted Claude helper command: three read tools, strict empty MCP, no inherited instructions/plugins or parent authority; connector groundwork, not yet exposed by a role grant | S |
+| `tests/helper_claude_live_test.rs` | IGNORED native Claude helper inventory and outside/symlink read-boundary probe; explicit model/account selection, no live bot-hq server | — |
 | `src/agents/events.rs` | stdout/stderr pumps; `translate` stream-json → `AgentEvent`; context-window arithmetic (`parse_context_usage`) | L |
 | `src/agents/protocol.rs` | stream-json wire types both directions | M |
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |

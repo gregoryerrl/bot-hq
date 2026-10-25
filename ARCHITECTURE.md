@@ -87,6 +87,16 @@ multi-thread runtime. Tauri owns the OS main thread.
 
 Every agent is a subprocess.
 
+**Managed helpers (connector groundwork, not yet exposed):**
+`spawn_claude_helper` uses the existing process cleanup and event path with a
+separate restricted command. It starts fresh with only Read/Grep/Glob, confines
+file reads to the working directory, refuses inbound peer messages, and excludes
+MCP, inherited instructions, plugins and parent bot-hq identity. Model routing
+and account authentication remain explicit; only the selected model's catalog
+mapping is copied from its arbitrary CLI-settings fragment. Helpers receive a
+separate brief outside the participant channel. The owning batch supervisor,
+Codex helper connector and role capability are still being connected.
+
 ### One agent backend
 
 `spawn_session_handle`'s per-participant loop has no branch: every participant goes through

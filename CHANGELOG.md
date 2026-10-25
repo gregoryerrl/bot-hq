@@ -11,6 +11,10 @@ A second connector is on its way in: OpenAI's Codex CLI beside claude-code,
 chosen per saved model, so one session can run a Claude model and a GPT
 model side by side. Migration 0102 applies on first launch.
 
+Managed sub-agent development is in progress. The restricted Claude helper
+connector is being verified; the role checkbox and session batch controls are
+not enabled yet.
+
 ### Fixed
 
 - A failed close no longer leaves a stale close-out claim that interferes with

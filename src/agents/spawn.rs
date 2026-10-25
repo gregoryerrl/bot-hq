@@ -1014,6 +1014,26 @@ impl Drop for AgentHandle {
 
 pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     ensure_claude_runnable(cfg.claude_bin.as_deref().unwrap_or("claude"))?;
+    let cmd = build_command(&cfg);
+    spawn_with_command(cfg, cmd).await
+}
+
+/// Helpers use the same subprocess ownership and cleanup as participants,
+/// but never inherit their MCP, permissions or resumed conversation.
+pub async fn spawn_claude_helper(cfg: SpawnConfig, brief: String) -> Result<AgentHandle> {
+    ensure_claude_runnable(cfg.claude_bin.as_deref().unwrap_or("claude"))?;
+    let cmd = super::helpers::claude_command(&cfg)?;
+    let mut handle = spawn_with_command(cfg, cmd).await?;
+    // This input belongs to a helper, outside the participant channel/ring.
+    // Its owner persists the brief in the helper ledger before calling us.
+    if handle.input_tx.relay(OutgoingUserMessage::text(brief)).await.is_err() {
+        let _ = handle.stop_and_wait(Duration::from_secs(5)).await;
+        anyhow::bail!("helper closed before receiving its brief");
+    }
+    Ok(handle)
+}
+
+async fn spawn_with_command(cfg: SpawnConfig, mut cmd: Command) -> Result<AgentHandle> {
 
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(256);
     let (input_tx, input_rx) = mpsc::channel::<OutgoingUserMessage>(64);
@@ -1021,7 +1041,6 @@ pub async fn spawn_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     let (kill_tx, kill_rx) = oneshot::channel::<()>();
     let (stopped_tx, stopped_rx) = tokio::sync::watch::channel(None);
 
-    let mut cmd = build_command(&cfg);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
