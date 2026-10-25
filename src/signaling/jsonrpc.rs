@@ -23,6 +23,7 @@ use std::sync::Arc;
 /// compares an agent name.
 #[derive(Debug, Clone)]
 pub struct CallerIdentity {
+    pub(crate) token_proof: Option<crate::signaling::bridge::McpTokenProof>,
     pub session_id: String,
     pub agent: String,
     pub capabilities: crate::agents::ResolvedCapabilities,
@@ -749,7 +750,7 @@ async fn call_tool(
     match name {
         "app_control" => {
             let request = serde_json::from_value(args).map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
-            match bridge.app_control(&caller.session_id, &caller.agent, request).await {
+            match bridge.app_control(&caller.session_id, &caller.agent, request, caller.token_proof.as_ref()).await {
                 Ok(value) => Ok(ToolCallResult::text(value.to_string())),
                 Err(error) => Ok(ToolCallResult::error(format!("{error:#}"))),
             }
@@ -2364,6 +2365,7 @@ mod tests {
     /// leaving every test in this module quietly asserting against fiction.
     fn caller() -> CallerIdentity {
         CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "hands".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
@@ -2375,6 +2377,7 @@ mod tests {
     /// An EYES caller. See [`caller`] for why the preset is trustworthy here.
     fn eyes_caller() -> CallerIdentity {
         CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "eyes".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
@@ -2579,6 +2582,7 @@ mod tests {
         // A session with NO open advisories gets a recap without the line.
         storage.create_session("s2", "t", None).await.unwrap();
         let clean_caller = CallerIdentity {
+            token_proof: None,
             session_id: "s2".into(),
             agent: "hands".into(),
             capabilities: caller().capabilities,
@@ -3179,6 +3183,7 @@ mod tests {
         storage.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
 
         let hands = CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "hands".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
@@ -5558,6 +5563,7 @@ mod tests {
 
         // Same slug, opposite grants.
         let reviewer = CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "eyes".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
@@ -5565,6 +5571,7 @@ mod tests {
             ),
         };
         let non_reviewer = CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "eyes".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
@@ -5637,6 +5644,7 @@ mod tests {
         // bare predicate this caller's every phase write would silently reroute
         // to `plan-eyes` and the primary phase docs would never be written.
         let filing_executor = CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "eyes".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(
@@ -5672,6 +5680,7 @@ mod tests {
         bridge.set_storage(storage.clone()).await;
         storage.create_session("s1", "test", None).await.unwrap();
         let reviewer = CallerIdentity {
+            token_proof: None,
             session_id: "s1".into(),
             agent: "eyes".into(),
             capabilities: crate::agents::ResolvedCapabilities::Known(

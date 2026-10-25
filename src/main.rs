@@ -305,7 +305,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                     }
                 });
             }
-            let core = Arc::new(CoreAppState::new(paths.clone(), storage, server).await);
+            let core = CoreAppState::new_shared(paths.clone(), storage, server).await;
             Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
         })?;
     // Panic capture (hashes only, gated on the opt-in atomic) chains onto the

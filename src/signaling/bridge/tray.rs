@@ -8,7 +8,7 @@
 //! biggest slice of the bridge — everything that parks a oneshot, mirrors a
 //! tray row, or sets the session's awaiting-halt flag.
 
-use super::util::{gate_verdict, oob_resolution_body, outcome_from_picked, parse_tray_ts, user_words_of_answer};
+use super::util::{gate_verdict, outcome_from_picked, parse_tray_ts, user_words_of_answer};
 use super::*;
 use crate::storage::MessageKind;
 use uuid::Uuid;
@@ -892,6 +892,15 @@ impl SignalingBridge {
         picked: String,
         confirm_stale: bool,
     ) -> Result<ResolveOutcome> {
+        self.resolve_choice_attributed(choice_id, picked, confirm_stale, None).await
+    }
+
+    pub(crate) async fn resolve_choice_attributed(
+        &self, choice_id: &str, picked: String, confirm_stale: bool,
+        claim: Option<&super::control_claim::ControlClaim>,
+    ) -> Result<ResolveOutcome> {
+        let picked = if claim.is_some() { crate::policy::secret_scan::redact_string(picked) } else { picked };
+        let actor = claim.map(|c| &c.actor);
         // SAFETY GATE: a gated command whose requesting agent has moved on
         // (client-side MCP timeout / restart) would run blind on a one-click
         // Approve, against a repo state that may have changed since it was
@@ -952,6 +961,7 @@ impl SignalingBridge {
         let flipped = {
             let storage = self.storage.lock().await.clone();
             match storage {
+                Some(storage) if claim.is_some() => self.claim_delegated_answer(&storage, choice_id, &picked, claim.unwrap()).await? == 1,
                 Some(storage) => match storage.answer_tray_entry(choice_id, &picked).await {
                     Ok(rows) => rows == 1,
                     Err(e) => {
@@ -984,7 +994,7 @@ impl SignalingBridge {
                 // its typed reasoning still arrives as the user's answer row.
                 if kind == crate::storage::QuestionKind::Close.as_str() {
                     if matches!(gate_verdict(&picked), crate::policy::ViolationOutcome::Approved) {
-                        tracing::info!(session = %session_id, %agent, "close card APPROVED by the user — closing");
+                        tracing::info!(session = %session_id, %agent, decision_actor = ?actor, "close card APPROVED — closing");
                         // Requested below, after the ring receives its quiet
                         // latch clear. The epilogue can then summon its turn.
                     } else {
@@ -996,9 +1006,8 @@ impl SignalingBridge {
                                 &session_id,
                                 crate::storage::MessageKind::SystemNotice,
                                 format!(
-                                    "[System: the user DECLINED close card {choice_id} ({picked}). The session stays \
-                                     open — treat the answer text as the next instruction, and call \
-                                     close_session again only when the user says to close.]"
+                                    "[System: {} DECLINED close card {choice_id} ({picked}). The session stays open; follow the decision's instructions.]",
+                                    actor.map(|a| format!("{} of {}", a.slug, a.session_id)).unwrap_or_else(|| "the user".into())
                                 ),
                                 None,
                             )
@@ -1023,7 +1032,7 @@ impl SignalingBridge {
                     tracing::warn!(
                         session = %session_id,
                         reason = %reason,
-                        "reviewer-down commit block override APPROVED by the user"
+                        "reviewer-down commit block override APPROVED"
                     );
                     self.reviewer_override
                         .lock()
@@ -1036,7 +1045,7 @@ impl SignalingBridge {
                 } else {
                     tracing::info!(
                         session = %session_id,
-                        "reviewer-down override request REJECTED by the user; the block stands"
+                        "reviewer-down override request REJECTED; the block stands"
                     );
                 }
             }
@@ -1061,7 +1070,10 @@ impl SignalingBridge {
                             ctx.kind,
                             ctx.action.clone(),
                             outcome,
-                            ctx.detail.clone(),
+                            match actor {
+                                Some(a) => Some(format!("Decision by {} of {}. {}", a.slug, a.session_id, ctx.detail.as_deref().unwrap_or(""))),
+                                None => ctx.detail.clone(),
+                            },
                         )
                         .await;
                 }
@@ -1073,6 +1085,13 @@ impl SignalingBridge {
                     self.prepare_gate_release(&p.choice.session_id).await;
                 } else {
                     self.clear_session_awaiting(&p.choice.session_id).await;
+                }
+                if let Some(actor) = actor {
+                    if let Some(storage) = self.storage_handle().await {
+                        crate::core::post_system_notice(&storage, Some(self), &p.choice.session_id,
+                            crate::storage::MessageKind::SystemNotice,
+                            format!("Decision {} answered by {} of {}: {}", choice_id, actor.slug, actor.session_id, picked), None).await;
+                    }
                 }
                 match p.tx.send(picked) {
                     Ok(()) => Ok(ResolveOutcome::Delivered),
@@ -1116,6 +1135,7 @@ impl SignalingBridge {
                                 flipped,
                                 asked_at,
                                 is_gate,
+                                actor,
                             )
                             .await)
                     }
@@ -1187,7 +1207,10 @@ impl SignalingBridge {
                                 kind,
                                 action,
                                 outcome,
-                                Some("resolved from the durable tray row (no live park)".to_string()),
+                                Some(match actor {
+                                    Some(a) => format!("Decision by {} of {}; resolved from the durable tray row", a.slug, a.session_id),
+                                    None => "resolved from the durable tray row (no live park)".to_string(),
+                                }),
                             )
                             .await;
                     }
@@ -1204,6 +1227,7 @@ impl SignalingBridge {
                         flipped,
                         Some(q.asked_at.clone()),
                         is_gate,
+                        actor,
                     )
                     .await)
             }
@@ -1300,6 +1324,7 @@ impl SignalingBridge {
         flipped: bool,
         asked_at: Option<String>,
         is_gate: bool,
+        actor: Option<&crate::storage::ControlActor>,
     ) -> ResolveOutcome {
         // The "approved since you asked" block decorates QUESTIONS only (round
         // 10, B5). A gate is not a premise that a later gate can overtake — and
@@ -1346,7 +1371,8 @@ impl SignalingBridge {
             .collect();
         // What the approved command's run produced, when one ran (0087).
         let mut gate_run: Option<GateRan> = None;
-        let mut body = oob_resolution_body(
+        let answerer = if actor.is_some() { "the delegated controller" } else { "the user" };
+        let mut body = super::util::oob_resolution_body_by(
             choice_id,
             &question,
             &options,
@@ -1355,7 +1381,11 @@ impl SignalingBridge {
             asked_at.as_deref(),
             command_shown.as_deref(),
             &mooting,
+            answerer,
         );
+        if let Some(actor) = actor {
+            body.insert_str(0, &format!("Delegated answer by {} of {}.\n", actor.slug, actor.session_id));
+        }
         if flipped {
             // The gate runs the command and reads the verdict RAW; only what it
             // writes is redacted — the command's output, which is how a secret
@@ -1420,9 +1450,9 @@ impl SignalingBridge {
                         // user's own answer, not a host injection, and this is
                         // what `insert_message(Author::User, ..)` resolved to
                         // before the envelope forced the direct call.
-                        "user",
+                        if actor.is_some() { "system" } else { "user" },
                         None,
-                        MessageKind::Text.as_str(),
+                        if actor.is_some() { MessageKind::SystemNotice.as_str() } else { MessageKind::Text.as_str() },
                         // Borrowed, not moved: `body` is returned to the caller
                         // too (see the outcome's field doc). One copy, exactly
                         // as the `&body` this replaced.
@@ -1437,8 +1467,10 @@ impl SignalingBridge {
                         // question it answered, built from the redacted pieces;
                         // never the body, which carries the gate's output.
                         let words = user_words_of_answer(choice_id, &question, &shown_pick, command_shown.as_deref());
-                        if let Err(e) = storage.record_user_words(&session_id, m.message_id(), &words).await {
-                            tracing::warn!(?e, %session_id, "the tray answer was not recorded as the user's words");
+                        if actor.is_none() {
+                            if let Err(e) = storage.record_user_words(&session_id, m.message_id(), &words).await {
+                                tracing::warn!(?e, %session_id, "the tray answer was not recorded as the user's words");
+                            }
                         }
                         Some(m)
                     }
@@ -1987,7 +2019,7 @@ impl SignalingBridge {
             let Some(command) = row.command_text.clone() else { continue };
             let id8: String = row.choice_id.chars().take(8).collect();
             let mut body = format!(
-                "⏱ Scheduled gate {id8} result at {} UTC — approved by the user at {} for the window {} – {}: \
+                "⏱ Scheduled gate {id8} result at {} UTC — approved at {} for the window {} – {}: \
                  `{}`\n",
                 super::action_gate::window_time(&now),
                 row.answered_at.as_deref().map(super::action_gate::window_time).unwrap_or_default(),

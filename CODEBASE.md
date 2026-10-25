@@ -478,6 +478,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/session_history.rs` | caller-scoped channel/human-ledger pages and UTF-8 byte chunks, encoded reply bounds, no cursor/receipt mutation; consumed by the `session_history` MCP dispatch | S |
 | `src/storage/application_control.rs`, `src/signaling/bridge/application_control.rs` | explicit controller authority, current-role revocation and application audit; bounded cross-session read facade (0108) | S / M |
+| `src/signaling/bridge/control_claim.rs` | delegated decision claim: HTTP credential proof, current-role check under the writer lock, source/target Pause tickets and exact choice hash (0109) | M |
 | `src/storage/gate_results.rs` | gate resolution receipts (0106), one-time MCP notices, per-participant compaction mirrors; actual delivery proof persists separately from telemetry retention | S |
 | `src/storage/user_words.rs` | `session_user_words` (0092): the user's own words, recorded by the caller that knows whose they are (`core::Authored`, the tray answer), mirrored to the words file the compaction hook prints | S |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |

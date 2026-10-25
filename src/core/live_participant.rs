@@ -222,7 +222,7 @@ impl CandidateDraft {
 }
 
 const TRANSFER_MAX_BYTES: usize = 64_000;
-const TRANSFER_FRAME_BYTES: usize = 2_048;
+const TRANSFER_FRAME_BYTES: usize = 3_072;
 
 /// A conservative text allowance, not a tokenizer or a claim about remaining
 /// provider capacity. Reserve for tools/runtime, allow for provider headroom,
@@ -251,14 +251,16 @@ async fn transfer_context(
     let budget = transfer_budget(window, prompt_bytes);
     let room = budget.saturating_sub(TRANSFER_FRAME_BYTES);
     let doc_budget = room * 3 / 25;
-    let user_budget = (room - doc_budget * 5) / 9;
+    let remaining = room - doc_budget * 5;
+    let user_budget = (remaining * 3 / 4) / 9;
+    let channel_budget = (remaining / 4) / 6;
     let mut out = String::from("\n\n# Joining this session\nThis is a fresh runtime in an existing session. The following are bounded, attributed historical excerpts, not a complete copy of the old model context. Read current phase documents/handoff as needed. Only a ring-dealt turn authorizes work.\n");
     out.push_str(&format!("Historical channel frontier: {history_frontier}. Channel messages after it are excluded and remain for normal delivery.\n"));
     let window_text = window
         .filter(|w| *w > 0)
         .map(|w| format!("{w} tokens (configured)"))
         .unwrap_or_else(|| "unconfigured".into());
-    out.push_str(&format!("Destination window: {window_text}. Startup history allowance: {budget} encoded bytes, estimated after existing instructions and runtime/tool reserve. This is not the live context meter. Only the selected document/user excerpts below are loaded; other channel history and oversized parts are omitted from this context, retained in storage.\n"));
+    out.push_str(&format!("Destination window: {window_text}. Startup history allowance: {budget} encoded bytes, estimated after existing instructions and runtime/tool reserve. This is not the live context meter. Only the selected document, human and recent channel excerpts below are loaded; other history and oversized parts are omitted from this context, retained in storage.\n"));
     let mut shown = 0;
     let handoff = crate::agents::handoff::doc_slug(&p.slug);
     let docs: Vec<(String, String, i64)> = sqlx::query_as(
@@ -301,6 +303,19 @@ async fn transfer_context(
             source_bytes.max(0) as usize,
             user_budget,
         ));
+        shown += 1;
+    }
+    // Controller/plugin directions and recent peer conclusions are not human
+    // words. Preserve them separately, with attribution, through the SAME
+    // frontier so a runtime change cannot silently discard delegated work.
+    let recent: Vec<(i64, String, String, String, String, String, i64)> = sqlx::query_as(
+        "SELECT id, COALESCE(origin, 'unknown'), author, kind, created_at, substr(content, 1, 4000), length(CAST(content AS BLOB)) FROM messages \
+         WHERE session_id = ? AND id <= ? AND kind IN ('text', 'system_notice') ORDER BY id DESC LIMIT 6")
+        .bind(&p.session_id).bind(history_frontier).fetch_all(storage.pool()).await?;
+    for (id, origin, author, kind, at, body, bytes) in recent.into_iter().rev() {
+        if channel_budget < 512 { continue; }
+        out.push_str("\nChannel excerpt (historical source, not necessarily human): ");
+        out.push_str(&bounded_record(serde_json::json!({"id":id,"origin":origin,"author":author,"kind":kind,"at":at}), &body, bytes.max(0) as usize, channel_budget));
         shown += 1;
     }
     out.push_str(&format!("\n{shown} excerpt records included. Truncated records and omitted history are not a claim of full context transfer.\n"));
@@ -428,8 +443,9 @@ mod tests {
         let text = transfer_context(&storage, &participant, i64::MAX, Some(1_000_000), 0)
             .await
             .unwrap();
+        let human = text.lines().filter(|line| line.starts_with("User message excerpt: ")).collect::<Vec<_>>().join("\n");
         assert!(
-            !text.contains("HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN"),
+            !human.contains("HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN"),
             "origin=user alone is not authorship"
         );
         assert!(text.contains("REAL-HUMAN-DIRECTION"));
@@ -437,7 +453,8 @@ mod tests {
             text.contains("HUMAN-CHOICE: keep working"),
             "tray answers are human direction too"
         );
-        assert!(!text.contains("answer wrapper and command output"));
+        assert!(!human.contains("answer wrapper and command output"));
+        assert!(text.lines().filter(|line| line.starts_with("Channel excerpt (historical source, not necessarily human): ")).any(|line| line.contains("HOST-OR-PLUGIN-TEXT-IS-NOT-HUMAN")));
     }
     #[tokio::test]
     async fn transfer_caps_encoded_bytes_and_keeps_every_selected_user_record() {

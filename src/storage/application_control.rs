@@ -27,6 +27,15 @@ impl Storage {
     /// Invite-time grant AND current role consent. Granting a role later does
     /// not upgrade existing participants; revocation takes effect immediately.
     pub async fn controller_actor(&self, session: &str, slug: &str) -> Result<ControlActor> {
+        let mut conn = self.pool.acquire().await?;
+        Self::controller_actor_on(&mut conn, session, slug).await
+    }
+
+    pub(crate) async fn controller_actor_on(
+        conn: &mut sqlx::SqliteConnection,
+        session: &str,
+        slug: &str,
+    ) -> Result<ControlActor> {
         let row: Option<(i64, String, String)> = sqlx::query_as(
             "SELECT p.id, p.capabilities, r.capabilities FROM session_participants p \
              JOIN sessions s ON s.id = p.session_id JOIN roles r ON r.id = p.role_id \
@@ -35,7 +44,7 @@ impl Storage {
         )
         .bind(session)
         .bind(slug)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
         let (participant_id, snapshot, live) =
             row.context("controller is no longer an enabled participant of an open session")?;

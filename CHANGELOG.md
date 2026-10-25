@@ -118,8 +118,18 @@ model side by side. Migration 0102 applies on first launch.
 - **Driver control groundwork (in progress).** Roles has an explicit application
   control grant, never enabled by default. Its first API reads sessions, history,
   documents, decisions and an attributed action audit across sessions. Current
-  role revocation and human Pause are checked on each call. Gate answers, session
-  creation/messages and other administrative writes are still being connected.
+  role revocation and human Pause are checked on each call. Gate/question answers
+  now share the normal claim/execution/wake path with the controller's identity;
+  a queued answer loses to Pause, revocation or replacement, and requires the
+  exact choice hash read by the controller. Delegated answers never become
+  recorded human words. Delegated messages now queue without interrupting
+  workers or replacing the human's staged text; stable request IDs prevent
+  duplicate posts, and receipt lookup reports actual delivery. Pause, gates
+  and declared halts remain holds. Fresh model contexts also carry bounded
+  recent channel excerpts with source attribution, so delivered Driver directions
+  do not disappear merely because they are not human-authored. The same history
+  cutoff keeps startup-time messages out of this snapshot. Session lifecycle/
+  settings writes are still being connected.
 
 
 - **Agents can retrieve older records from their own session.** The

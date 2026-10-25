@@ -108,6 +108,7 @@ fn legacy_name_gate_admits(tool: &str, agent: &str) -> bool {
 /// SEEDED roster produces the decisions the name gate produced.
 async fn caller(bridge: &SignalingBridge, agent: &str) -> CallerIdentity {
     CallerIdentity {
+        token_proof: None,
         capabilities: resolve_caller_capabilities(bridge, "s-parity", agent).await,
         session_id: "s-parity".into(),
         agent: agent.into(),

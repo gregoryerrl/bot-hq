@@ -113,10 +113,11 @@ async fn startup_snapshot_stops_at_its_frontier_and_later_rows_arrive_once() {
             .record_user_words("s1", old, "HISTORICAL-DIRECTION")
             .await
             .unwrap();
+        let delegated = f.state.storage.post_to_channel("s1", "system", None, "system_notice", "Delegated message from controller of driver-session: DELEGATED-DIRECTION", None).await.unwrap().message_id();
         if !adding {
             f.state
                 .storage
-                .commit_delivery(f.rows[0].id, &[(old, None)])
+                .commit_delivery(f.rows[0].id, &[(old, None), (delegated, None)])
                 .await
                 .unwrap();
             let unread = f
@@ -171,12 +172,12 @@ async fn startup_snapshot_stops_at_its_frontier_and_later_rows_arrive_once() {
         } else {
             f.rows[0].id
         };
-        assert_eq!(f.state.storage.cursor_for(target).await.unwrap(), old);
-        let old_receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM participant_deliveries WHERE participant_id = ? AND message_id = ?")
-            .bind(target).bind(old).fetch_one(f.state.storage.pool()).await.unwrap();
+        assert_eq!(f.state.storage.cursor_for(target).await.unwrap(), delegated);
+        let old_receipts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM participant_deliveries WHERE participant_id = ? AND message_id IN (?, ?)")
+            .bind(target).bind(old).bind(delegated).fetch_one(f.state.storage.pool()).await.unwrap();
         assert_eq!(
             old_receipts,
-            if adding { 0 } else { 1 },
+            if adding { 0 } else { 2 },
             "joining never manufactures delivery receipts"
         );
         let late = f
@@ -202,6 +203,8 @@ async fn startup_snapshot_stops_at_its_frontier_and_later_rows_arrive_once() {
         assert_eq!(f.done("snapshot").await.status, "applied");
         let mut fresh = spawned.recv().await.unwrap();
         assert!(fresh.prompt.contains("HISTORICAL-DIRECTION"));
+        assert!(fresh.prompt.contains("DELEGATED-DIRECTION"), "a model change must retain recent delegated instructions separately from human words");
+        assert!(fresh.prompt.contains("Channel excerpt (historical source, not necessarily human)"));
         assert!(!fresh.prompt.contains("DIRECTION-DURING-STARTUP"));
         assert!(
             !fresh.prompt.contains("UNREAD-BEFORE-SWITCH"),
@@ -234,6 +237,195 @@ struct Fixture {
     seats: Vec<Seat>,
     ring: mpsc::Sender<SequencerCommand>,
     _temp: tempfile::TempDir,
+}
+
+async fn driver_fixture(disk: bool) -> Fixture {
+    let f = Fixture::with_database(false, disk).await;
+    let activity = f.state.sessions.lock().await["s1"].activity.clone();
+    f.state.bridge.register_session_activity("s1".into(), Arc::downgrade(&activity)).await;
+    sqlx::query("UPDATE roles SET capabilities = json_insert(capabilities, '$[#]', 'control_bot_hq') WHERE id = ?")
+        .bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap();
+    sqlx::query("UPDATE session_participants SET capabilities = json_insert(capabilities, '$[#]', 'control_bot_hq') WHERE id = ?")
+        .bind(f.rows[0].id).execute(f.state.storage.pool()).await.unwrap();
+    f
+}
+
+async fn driver_rpc(state: &Arc<AppState>, args: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/sessions/s1/hands/mcp", state.signaling_addr))
+        .header("x-bot-hq-mcp-token", "token-hands")
+        .header("content-type", "application/json")
+        .body(serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{"name":"app_control","arguments":args}}).to_string())
+        .send().await?.error_for_status()?.text().await?;
+    let response: serde_json::Value = serde_json::from_str(&response)?;
+    anyhow::ensure!(response.get("error").is_none(), "{response}");
+    let text = response["result"]["content"][0]["text"].as_str().context("missing tool result")?;
+    anyhow::ensure!(response["result"]["isError"] != true, "{text}");
+    Ok(serde_json::from_str(text)?)
+}
+
+async fn decision_args(f: &Fixture, id: &str, picked: &str) -> serde_json::Value {
+    let choice = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":id})).await.unwrap();
+    serde_json::json!({"action":"answer","choice_id":id,"picked":picked,"expected_choice_sha256":choice["result"]["sha256"],"confirm_stale":true})
+}
+
+#[tokio::test]
+async fn driver_answers_through_http_without_impersonating_human_or_running_twice() {
+    let f = driver_fixture(false).await;
+    let s = &f.state.storage;
+    s.insert_tray_entry("s1", "question", "hands", crate::storage::QuestionKind::Choice, "Next step?",
+        Some(&["Wait".into(), "Continue".into()]), None, None).await.unwrap();
+    let args = decision_args(&f, "question", "Check the failing test first").await;
+    let answer = driver_rpc(&f.state, args.clone()).await.unwrap();
+    assert_eq!(answer["result"]["status"], "recorded");
+    let id = answer["result"]["message_id"].as_i64().unwrap();
+    let (origin, kind, body): (String, String, String) = sqlx::query_as("SELECT origin, kind, content FROM messages WHERE id = ?")
+        .bind(id).fetch_one(s.pool()).await.unwrap();
+    assert_eq!((origin.as_str(),kind.as_str()), ("system","system_notice"));
+    assert!(body.contains("Delegated answer by hands of s1"));
+    assert!(body.contains("the delegated controller answering"));
+    assert!(!body.contains("the user answering"));
+    let human: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE message_id = ?").bind(id).fetch_one(s.pool()).await.unwrap();
+    assert_eq!(human, 0);
+    let recorded: String = sqlx::query_scalar("SELECT decision_actor_json FROM session_tray WHERE choice_id = 'question'").fetch_one(s.pool()).await.unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&recorded).unwrap()["participant_id"], f.rows[0].id);
+    assert!(driver_rpc(&f.state, args).await.is_err());
+
+    let ran = f._temp.path().join("once.txt");
+    let command = format!("printf x >> '{}'", ran.display());
+    s.insert_tray_entry("s1", "command", "hands", crate::storage::QuestionKind::Approval, &command,
+        Some(&["Approve".into(), "Reject".into()]), None, Some(&command)).await.unwrap();
+    let args = decision_args(&f, "command", "Approve").await;
+    driver_rpc(&f.state, args.clone()).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "x");
+    assert!(driver_rpc(&f.state, args).await.is_err());
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "x");
+    // The untouched human API still records real human authorship.
+    s.insert_tray_entry("s1", "human", "hands", crate::storage::QuestionKind::Choice, "Human?", Some(&["Yes".into()]), None, None).await.unwrap();
+    f.state.resolve_choice("human", "Yes".into(), false).await.unwrap();
+    let human: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE session_id = 's1'").fetch_one(s.pool()).await.unwrap();
+    assert_eq!(human, 1);
+    s.insert_tray_entry("s1", "changed", "hands", crate::storage::QuestionKind::Choice, "Original?", Some(&["Yes".into()]), None, None).await.unwrap();
+    let stale = decision_args(&f, "changed", "Yes").await;
+    sqlx::query("UPDATE session_tray SET prompt = 'Revised question' WHERE choice_id = 'changed'").execute(s.pool()).await.unwrap();
+    assert!(driver_rpc(&f.state, stale).await.unwrap_err().to_string().contains("changed since"));
+    assert_eq!(s.get_tray_entry("changed").await.unwrap().unwrap().status, "pending");
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_live_hook_answer_records_actor_before_unblocking_the_waiter() {
+    let f = driver_fixture(false).await;
+    let bridge = f.state.bridge.clone();
+    let mut events = bridge.subscribe();
+    let waiter = tokio::spawn(async move {
+        bridge.request_approval("s1".into(), "hands".into(), "Hook decision".into(), vec!["Approve".into(), "Reject".into()], crate::signaling::ApprovalContext {
+            kind: crate::policy::ViolationKind::GenericApproval, action: "fixture decision".into(), detail: None, command: None,
+        }).await
+    });
+    let choice_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop { if let crate::signaling::SignalingEvent::PendingChoice(row) = events.recv().await.unwrap() { break row.choice_id; } }
+    }).await.unwrap();
+    let args = decision_args(&f, &choice_id, "Approve").await;
+    let result = driver_rpc(&f.state, args).await.unwrap();
+    assert_eq!(result["result"]["status"], "delivered");
+    assert_eq!(waiter.await.unwrap().unwrap(), "Approve");
+    let bodies: Vec<String> = sqlx::query_scalar("SELECT content FROM messages WHERE session_id = 's1' AND origin = 'system'")
+        .fetch_all(f.state.storage.pool()).await.unwrap();
+    assert!(bodies.iter().any(|b|b.contains("answered by hands of s1: Approve")));
+    let human: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE session_id = 's1'").fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(human, 0);
+    let actor: Option<String> = sqlx::query_scalar("SELECT decision_actor_json FROM session_tray WHERE choice_id = ?").bind(choice_id).fetch_one(f.state.storage.pool()).await.unwrap();
+    assert!(actor.is_some());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_send_waits_for_the_live_turn_and_reports_real_delivery() {
+    let mut f = driver_fixture(false).await;
+    f.state.storage.post_to_channel("s1", "user", None, "text", "Start existing work", None).await.unwrap();
+    f.ring.send(SequencerCommand::UserMessage { mentions: vec![], restarts_rotation: true }).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), f.seats[0].input.recv()).await.unwrap().unwrap();
+    let epoch = f.state.sessions.lock().await["s1"].participants[0].turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
+    let args = serde_json::json!({"action":"send","session_id":"s1","request_id":"send-once","text":"@eyes Review this after the current turn"});
+    let sent = driver_rpc(&f.state, args.clone()).await.unwrap();
+    let id = sent["result"]["message_id"].as_i64().unwrap();
+    assert_eq!(driver_rpc(&f.state, args).await.unwrap()["result"]["message_id"], id);
+    assert!(f.seats[1].input.try_recv().is_err(), "an active turn must not be preempted by a delegated message");
+    assert!(!*f.seats[0].stopped.borrow());
+    f.ring.send(SequencerCommand::TurnComplete { participant_id:f.rows[0].id, epoch, ending:crate::core::sequencer::TurnEnding::Spoke }).await.unwrap();
+    let page = tokio::time::timeout(Duration::from_secs(2), f.seats[1].input.recv()).await.unwrap().unwrap();
+    assert!(page.message.content.contains("Delegated message from hands of s1"));
+    assert!(page.message.content.contains("Review this after the current turn"));
+    let status = driver_rpc(&f.state, serde_json::json!({"action":"message_status","session_id":"s1","message_id":id})).await.unwrap();
+    assert!(status["result"]["participants"].as_array().unwrap().iter().any(|r|r["participant_id"] == f.rows[1].id && r["delivered_at"].is_string()));
+    let human: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE message_id = ?").bind(id).fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(human, 0);
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_send_preserves_pause_human_stage_and_retry_tombstones() {
+    let f = driver_fixture(false).await;
+    let s = &f.state.storage;
+    s.create_session("target", "paused target", None).await.unwrap();
+    s.ensure_session_roster("target", 1).await.unwrap();
+    let activity = crate::core::ActivityTracker::new("target", Arc::new(std::sync::atomic::AtomicBool::new(false)), f.state.bridge.clone(), vec![]);
+    activity.set_paused(true);
+    f.state.bridge.register_session_activity("target".into(), Arc::downgrade(&activity)).await;
+    f.state.stage_user_response("target", "Human draft must survive", vec![]).await.unwrap();
+    let args = serde_json::json!({"action":"send","session_id":"target","request_id":"paused-send","text":"Direction from the controller"});
+    let sent = driver_rpc(&f.state, args.clone()).await.unwrap();
+    let id = sent["result"]["message_id"].as_i64().unwrap();
+    assert!(activity.is_paused());
+    assert_eq!(sent["result"]["wake_requested"], false);
+    assert_eq!(f.state.staged_response("target").await.unwrap().0, "Human draft must survive");
+    assert_eq!(driver_rpc(&f.state, args.clone()).await.unwrap()["result"]["message_id"], id);
+    let mut changed = args.clone(); changed["text"] = "different instruction".into();
+    assert!(driver_rpc(&f.state, changed).await.unwrap_err().to_string().contains("different message"));
+    let body: (String, String) = sqlx::query_as("SELECT origin, content FROM messages WHERE id = ? AND session_id = 'target'").bind(id).fetch_one(s.pool()).await.unwrap();
+    assert_eq!(body.0, "system"); assert!(body.1.contains("hands of s1"));
+    sqlx::query("DELETE FROM messages WHERE id = ?").bind(id).execute(s.pool()).await.unwrap();
+    assert!(driver_rpc(&f.state, args).await.unwrap_err().to_string().contains("no longer retained"));
+    s.close_session("target", false).await.unwrap();
+    assert!(driver_rpc(&f.state, serde_json::json!({"action":"send","session_id":"target","request_id":"after-close","text":"Do not reopen implicitly"})).await.is_err());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_queued_writes_lose_to_pause_revocation_and_runtime_replacement() {
+    for action in ["answer", "send"] {
+    for revoke in ["pause", "role", "token", "target_pause"] {
+        let f = driver_fixture(true).await;
+        f.state.storage.create_session("target", "other project", None).await.unwrap();
+        let target_activity = crate::core::ActivityTracker::new("target", Arc::new(std::sync::atomic::AtomicBool::new(false)), f.state.bridge.clone(), vec![]);
+        f.state.bridge.register_session_activity("target".into(), Arc::downgrade(&target_activity)).await;
+        f.state.storage.insert_tray_entry("target", "race", "worker", crate::storage::QuestionKind::Choice, "Act?", Some(&["Yes".into()]), None, None).await.unwrap();
+        let args = if action == "answer" { decision_args(&f, "race", "Yes").await }
+            else { serde_json::json!({"action":"send","session_id":"target","request_id":"race-send","text":"Must not land after revocation"}) };
+        let started = Arc::new(tokio::sync::Notify::new());
+        f.state.bridge.observe_control_tickets(started.clone());
+        let mut writer = f.state.storage.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+        let state = f.state.clone();
+        let request = tokio::spawn(async move { driver_rpc(&state, args).await });
+        tokio::time::timeout(Duration::from_secs(5), started.notified()).await.unwrap();
+        assert!(!request.is_finished(), "the action must be queued behind our database writer");
+        match revoke {
+            "pause" => { let a = f.state.sessions.lock().await["s1"].activity.clone(); a.set_paused(true); a.set_paused(false); }
+            "target_pause" => { target_activity.set_paused(true); target_activity.set_paused(false); }
+            "role" => { sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(f.rows[0].role_id).execute(&mut *writer).await.unwrap(); }
+            "token" => { f.state.bridge.register_mcp_token("s1", "hands", "replacement-token"); }
+            _ => unreachable!(),
+        }
+        writer.commit().await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), request).await.unwrap().unwrap();
+        assert!(result.is_err(), "{action}/{revoke}: {result:?}");
+        assert_eq!(f.state.storage.get_tray_entry("race").await.unwrap().unwrap().status, "pending");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE session_id = 'target'").fetch_one(f.state.storage.pool()).await.unwrap();
+        assert_eq!(count, 0, "{revoke} must leave no invented answer");
+        f.end().await;
+    }
+    }
 }
 
 impl Fixture {
@@ -310,14 +502,9 @@ impl Fixture {
         let server = crate::signaling::start_signaling_server(bridge.clone())
             .await
             .unwrap();
-        let state = Arc::new(
-            AppState::new(
-                crate::paths::Paths::for_data_dir(temp.path().join("data")),
-                storage.clone(),
-                server,
-            )
-            .await,
-        );
+        let state = AppState::new_shared(
+            crate::paths::Paths::for_data_dir(temp.path().join("data")), storage.clone(), server,
+        ).await;
         let (mut handle, _) = crate::core::session::stub_session_for_tests("s1", &bridge).await;
         handle.participants.clear();
         let mut inputs = std::collections::HashMap::new();

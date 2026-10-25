@@ -9,7 +9,7 @@
 
 use crate::signaling::SignalingBridge;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Session-level activity, as surfaced to the UI.
@@ -148,6 +148,8 @@ pub struct ActivityTracker {
     /// read it (with `cancelling`, via `holds_wakes`): a tray answer's release
     /// and the idle watchdog; the sequencer reads `is_paused` at its D35 gate.
     paused: AtomicBool,
+    /// Changes even if a Pause is later released before a queued control acts.
+    pause_generation: AtomicU64,
     /// Did EVERY participant reach idle at any point since the current cancel began?
     ///
     /// This is the difference between "the interrupt was honored and the agent
@@ -199,6 +201,7 @@ impl ActivityTracker {
             }),
             awaiting,
             paused: AtomicBool::new(false),
+            pause_generation: AtomicU64::new(0),
             idled_since_cancel: AtomicBool::new(false),
             bridge,
             session_id: session_id.into(),
@@ -280,8 +283,13 @@ impl ActivityTracker {
     /// `stop_settles_to_paused_not_idle`.
     pub fn set_paused(&self, paused: bool) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if paused { self.pause_generation.fetch_add(1, Ordering::AcqRel); }
         self.paused.store(paused, Ordering::Release);
         self.recompute_locked(&mut g, false);
+    }
+
+    pub(crate) fn pause_generation(&self) -> u64 {
+        self.pause_generation.load(Ordering::Acquire)
     }
 
     /// Whether the pause latch is set. The sequencer reads it at its D35 gate;

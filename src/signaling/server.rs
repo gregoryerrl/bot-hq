@@ -273,7 +273,7 @@ async fn handle_request(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let presented = who.token.clone().or(header_token);
-    if !bridge.mcp_token_matches(&who.session_id, &who.agent, presented.as_deref()) {
+    let Some(token_proof) = bridge.mcp_token_proof(&who.session_id, &who.agent, presented.as_deref()) else {
         warn!(
             session_id = %who.session_id,
             agent = %who.agent,
@@ -283,13 +283,14 @@ async fn handle_request(
             StatusCode::FORBIDDEN,
             "this session/agent pair does not match its registered secret",
         ));
-    }
+    };
     // Resolve the caller's grants ONCE per request, here, so `jsonrpc::dispatch`
     // stays a pure function of its arguments (the reason it lives apart from
     // this module) and one request costs one roster read rather than one per
     // gate. A read failure is not fatal here — it resolves to `Unreadable`, and
     // the gate refuses every gated tool with the reason attached.
     let caller = CallerIdentity {
+        token_proof: Some(token_proof),
         capabilities: crate::signaling::jsonrpc::resolve_caller_capabilities(
             &bridge,
             &who.session_id,

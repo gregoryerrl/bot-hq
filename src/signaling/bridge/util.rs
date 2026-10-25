@@ -511,6 +511,7 @@ fn mooting_block(mooting: &[(String, String)], asked: Option<chrono::DateTime<ch
 /// agent text to redact and an unlisted one is the user's own words to keep.
 /// Every string here arrives already redacted except the user's words.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn oob_resolution_body(
     choice_id: &str,
     question: &str,
@@ -520,6 +521,14 @@ pub(super) fn oob_resolution_body(
     asked_at: Option<&str>,
     command: Option<&str>,
     mooting: &[(String, String)],
+) -> String {
+    oob_resolution_body_by(choice_id, question, options, picked, listed, asked_at, command, mooting, "the user")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn oob_resolution_body_by(
+    choice_id: &str, question: &str, options: &[String], picked: &str, listed: bool,
+    asked_at: Option<&str>, command: Option<&str>, mooting: &[(String, String)], answerer: &str,
 ) -> String {
     let id8: String = choice_id.chars().take(8).collect();
     let asked_ts = asked_at.and_then(parse_tray_ts);
@@ -564,9 +573,7 @@ pub(super) fn oob_resolution_body(
         let typed = if listed {
             String::new()
         } else {
-            "The pick is the user answering in their own words; honor the words, \
-             not the menu.\n"
-                .to_string()
+            format!("The pick is {answerer} answering in their own words; honor the words, not the menu.\n")
         };
         // A MULTI-LINE command echoes in full below the verdict line (1.0.0
         // Batch 8 T8, dissect #12): the first line alone — usually a bare
@@ -589,7 +596,7 @@ pub(super) fn oob_resolution_body(
         String::new()
     } else {
         format!(
-            "Options were: {} — the pick is the user answering in their own words; \
+            "Options were: {} — the pick is {answerer} answering in their own words; \
              honor the words, not the menu.\n",
             options.join(" | ")
         )

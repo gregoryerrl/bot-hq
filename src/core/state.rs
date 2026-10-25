@@ -500,6 +500,13 @@ async fn commit_phase_transition(
 }
 
 impl AppState {
+    /// Production and control-path fixtures use the same weak facade binding.
+    pub async fn new_shared(paths: Paths, storage: Storage, server: SignalingServer) -> Arc<Self> {
+        let state = Arc::new(Self::new(paths, storage, server).await);
+        state.bridge.bind_app_state(&state);
+        state
+    }
+
     pub async fn new(paths: Paths, storage: Storage, server: SignalingServer) -> Self {
         let bridge = Arc::clone(&server.bridge);
         let addr = server.local_addr;
@@ -2515,16 +2522,22 @@ impl AppState {
     }
 
     pub async fn resolve_choice(
-        &self,
-        choice_id: &str,
-        picked: String,
-        confirm_stale: bool,
+        &self, choice_id: &str, picked: String, confirm_stale: bool,
     ) -> Result<crate::signaling::ResolveOutcome> {
+        let outcome = self.bridge.resolve_choice_confirmable(choice_id, picked, confirm_stale).await?;
+        self.finish_choice_resolution(choice_id, outcome).await
+    }
+
+    pub(crate) async fn resolve_controlled_choice(
+        &self, choice_id: &str, picked: String, confirm_stale: bool,
+        claim: &crate::signaling::ControlClaim,
+    ) -> Result<crate::signaling::ResolveOutcome> {
+        let outcome = self.bridge.resolve_choice_attributed(choice_id, picked, confirm_stale, Some(claim)).await?;
+        self.finish_choice_resolution(choice_id, outcome).await
+    }
+
+    async fn finish_choice_resolution(&self, choice_id: &str, outcome: crate::signaling::ResolveOutcome) -> Result<crate::signaling::ResolveOutcome> {
         use crate::signaling::ResolveOutcome;
-        let outcome = self
-            .bridge
-            .resolve_choice_confirmable(choice_id, picked, confirm_stale)
-            .await?;
         // A resolved tray answer is user engagement — the same contract as a
         // typed message for the idle-unflagged watchdog: it marks the session
         // as having a task and re-arms the once-per-window nudge. The d61d277

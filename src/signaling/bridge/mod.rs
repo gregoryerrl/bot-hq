@@ -35,6 +35,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 pub(crate) mod application_control;
+pub(crate) mod control_claim;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
     GATE_HISTORY_DEFAULT,
@@ -167,6 +168,14 @@ pub enum ResolveOutcome {
         command: String,
         asked_at: Option<String>,
     },
+}
+
+/// Proof of the exact credential authenticated at HTTP ingress. It cannot be
+/// used as a bearer token, and debug output never exposes its digest.
+#[derive(Clone)]
+pub(crate) struct McpTokenProof([u8; 32]);
+impl std::fmt::Debug for McpTokenProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("McpTokenProof(..)") }
 }
 
 #[derive(Debug, Clone)]
@@ -522,6 +531,9 @@ pub struct SignalingBridge {
     /// dispatchers, which don't have CoreAppState. Set-once; `None` in tests
     /// and during the pre-setup window.
     app_handle: std::sync::OnceLock<tauri::AppHandle>,
+    app_state: std::sync::OnceLock<Weak<crate::core::AppState>>,
+    #[cfg(test)]
+    control_ticket_observer: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// The `gh` an approved publish is read back with (`readback`, feedback
     /// #57 #60 #97): unset, the gate shell's own `gh`; a test sets a fake.
     gh_program: std::sync::OnceLock<PathBuf>,
@@ -739,6 +751,9 @@ impl SignalingBridge {
             session_phase: Mutex::new(HashMap::new()),
             storage: Mutex::new(None),
             app_handle: std::sync::OnceLock::new(),
+            app_state: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            control_ticket_observer: std::sync::Mutex::new(None),
             gh_program: std::sync::OnceLock::new(),
             terminals: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),
@@ -1104,20 +1119,30 @@ impl SignalingBridge {
     /// (per-agent 0600 at minimum, or handed over a channel only that
     /// subprocess can read), which is a separate change.
     pub fn mcp_token_matches(&self, session_id: &str, agent: &str, presented: Option<&str>) -> bool {
-        use subtle::ConstantTimeEq;
-        let expected = self
-            .mcp_tokens
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&format!("{session_id}:{agent}"))
-            .cloned();
-        match (expected, presented) {
-            (Some(expected), Some(presented)) => {
-                expected.as_bytes().ct_eq(presented.as_bytes()).into()
-            }
-            _ => false,
-        }
+        self.mcp_token_proof(session_id, agent, presented).is_some()
     }
+
+    pub(crate) fn mcp_token_proof(&self, session_id: &str, agent: &str, presented: Option<&str>) -> Option<McpTokenProof> {
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+        let tokens = self.mcp_tokens.lock().unwrap_or_else(|p| p.into_inner());
+        let expected = tokens.get(&format!("{session_id}:{agent}"))?;
+        let presented = presented?;
+        bool::from(expected.as_bytes().ct_eq(presented.as_bytes()))
+            .then(|| McpTokenProof(Sha256::digest(expected.as_bytes()).into()))
+    }
+
+    pub(crate) fn token_proof_is_current(&self, session: &str, agent: &str, proof: &McpTokenProof) -> bool {
+        use sha2::{Digest, Sha256};
+        use subtle::ConstantTimeEq;
+        self.mcp_tokens.lock().unwrap_or_else(|p| p.into_inner()).get(&format!("{session}:{agent}"))
+            .is_some_and(|token| bool::from(Sha256::digest(token.as_bytes()).as_slice().ct_eq(&proof.0)))
+    }
+
+    pub fn bind_app_state(&self, state: &Arc<crate::core::AppState>) {
+        let _ = self.app_state.set(Arc::downgrade(state));
+    }
+
 
     /// Register this launch's hook secret (see the `hook_token` field). Called
     /// once from `main.rs` after the token file is written.

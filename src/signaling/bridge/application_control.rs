@@ -9,6 +9,22 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AppControlRequest {
+    Send {
+        session_id: String,
+        request_id: String,
+        text: String,
+    },
+    MessageStatus {
+        session_id: String,
+        message_id: i64,
+    },
+    Answer {
+        choice_id: String,
+        picked: String,
+        expected_choice_sha256: String,
+        #[serde(default)]
+        confirm_stale: bool,
+    },
     Sessions {
         before_id: Option<String>,
         #[serde(default)]
@@ -46,6 +62,9 @@ pub(crate) enum AppControlRequest {
 impl AppControlRequest {
     fn identity(&self) -> (&'static str, Option<&str>) {
         match self {
+            Self::Send { session_id, .. } => ("send", Some(session_id)),
+            Self::MessageStatus { session_id, .. } => ("message_status", Some(session_id)),
+            Self::Answer { .. } => ("answer", None),
             Self::Sessions { .. } => ("sessions", None),
             Self::Session { session_id } => ("session", Some(session_id)),
             Self::History { session_id, .. } => ("history", Some(session_id)),
@@ -88,6 +107,7 @@ impl SignalingBridge {
         source_session: &str,
         source_slug: &str,
         request: AppControlRequest,
+        proof: Option<&McpTokenProof>,
     ) -> Result<Value> {
         let actor = self
             .controller_authority(source_session, source_slug)
@@ -98,26 +118,71 @@ impl SignalingBridge {
             .context("storage is unavailable")?;
         let (operation, target) = request.identity();
         let target = match &request {
-            AppControlRequest::Choice { choice_id, .. } => storage
+            AppControlRequest::Choice { choice_id, .. }
+            | AppControlRequest::Answer { choice_id, .. } => storage
                 .get_tray_entry(choice_id)
                 .await?
                 .map(|r| r.session_id),
             _ => target.map(str::to_owned),
         };
+        // Capture the runtime/Pause ticket before even the audit INSERT can
+        // queue behind another writer. A later Resume cannot renew this call.
+        let claim = match &request {
+            AppControlRequest::Send { session_id, .. } => Some(
+                self.control_message_ticket(actor.clone(), proof, session_id.clone())
+                    .await?,
+            ),
+            AppControlRequest::Answer {
+                expected_choice_sha256,
+                ..
+            } => Some(
+                self.control_claim(
+                    actor.clone(),
+                    proof,
+                    target.clone().context("choice does not exist")?,
+                    expected_choice_sha256.clone(),
+                )
+                .await?,
+            ),
+            _ => None,
+        };
         let audit = storage
             .start_control_audit(&actor, target.as_deref(), operation)
             .await?;
-        let result = self
-            .control_read(&storage, request)
-            .await
-            .and_then(|value| {
-                let reply = json!({"audit_id": audit, "actor": actor, "result": value});
-                anyhow::ensure!(
-                    serde_json::to_vec(&reply)?.len() <= 49_152,
-                    "control reply exceeds 48 KiB; use narrower pages or document chunks"
-                );
-                Ok(reply)
-            });
+        let result = match request {
+            AppControlRequest::Send {
+                session_id,
+                request_id,
+                text,
+            } => {
+                self.control_send(
+                    &storage,
+                    &session_id,
+                    &request_id,
+                    &text,
+                    claim.as_ref().unwrap(),
+                )
+                .await
+            }
+            AppControlRequest::Answer {
+                choice_id,
+                picked,
+                confirm_stale,
+                ..
+            } => {
+                self.control_answer(&choice_id, picked, confirm_stale, claim.as_ref().unwrap())
+                    .await
+            }
+            read => self.control_read(&storage, read).await,
+        }
+        .and_then(|value| {
+            let reply = json!({"audit_id": audit, "actor": actor, "result": value});
+            anyhow::ensure!(
+                serde_json::to_vec(&reply)?.len() <= 49_152,
+                "control reply exceeds 48 KiB; use narrower pages or document chunks"
+            );
+            Ok(reply)
+        });
         storage
             .finish_control_audit(
                 audit,
@@ -130,6 +195,24 @@ impl SignalingBridge {
     async fn control_read(&self, storage: &Storage, request: AppControlRequest) -> Result<Value> {
         use AppControlRequest::*;
         let value = match request {
+            Send { .. } => anyhow::bail!("send is a write operation"),
+            MessageStatus {
+                session_id,
+                message_id,
+            } => {
+                let exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND session_id = ?)",
+                )
+                .bind(message_id)
+                .bind(&session_id)
+                .fetch_one(storage.pool())
+                .await?;
+                anyhow::ensure!(exists, "message does not belong to this session");
+                let rows: Vec<(i64, String, bool, Option<String>, Option<String>)> = sqlx::query_as("SELECT p.id, p.slug, p.enabled <> 0, d.delivered_at, d.withheld_reason FROM session_participants p LEFT JOIN participant_deliveries d ON d.participant_id = p.id AND d.message_id = ? WHERE p.session_id = ? AND (p.enabled <> 0 OR d.delivered_at IS NOT NULL) ORDER BY p.turn_position, p.id")
+                    .bind(message_id).bind(&session_id).fetch_all(storage.pool()).await?;
+                json!({"message_id":message_id,"session_id":session_id,"participants":rows.into_iter().map(|(id,slug,enabled,delivered_at,withheld_reason)|json!({"participant_id":id,"slug":slug,"enabled":enabled,"delivered_at":delivered_at,"withheld_reason":withheld_reason})).collect::<Vec<_>>()})
+            }
+            Answer { .. } => anyhow::bail!("answer is a write operation"),
             Sessions {
                 before_id,
                 include_closed,
@@ -227,5 +310,95 @@ impl SignalingBridge {
             "control reply exceeds 48 KB; read individual history records or document chunks"
         );
         Ok(value)
+    }
+
+    async fn control_send(
+        &self,
+        storage: &Storage,
+        session: &str,
+        request_id: &str,
+        text: &str,
+        claim: &super::control_claim::ControlClaim,
+    ) -> Result<Value> {
+        let id = self
+            .persist_controlled_message(storage, claim, request_id, text)
+            .await?;
+        self.notify_message_persisted(Arc::from(session), id);
+        // A Summon queues behind the live turn, gates, Pause and declared
+        // halts. It never replaces the human's staged text or sends an interrupt.
+        let mut recipients = Vec::new();
+        for slug in crate::core::mentions::parse_mention_slugs(text) {
+            if let Some(p) = storage
+                .participant_by_mention(session, &slug)
+                .await?
+                .filter(|p| p.enabled)
+            {
+                if !recipients.contains(&p.id) {
+                    recipients.push(p.id);
+                }
+            }
+        }
+        if recipients.is_empty() {
+            if let Some(p) = storage
+                .participants_for_session(session)
+                .await?
+                .into_iter()
+                .find(|p| p.enabled && p.participation_mode == "active")
+            {
+                recipients.push(p.id);
+            }
+        }
+        let mut wake_requested = false;
+        if let Some(ring) = self.session_ring(session).await {
+            for participant_id in recipients {
+                let unread: bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM participant_deliveries WHERE participant_id = ? AND message_id = ? AND delivered_at IS NOT NULL AND withheld_reason IS NULL)")
+                    .bind(participant_id).bind(id).fetch_one(storage.pool()).await?;
+                if unread {
+                    wake_requested |= ring
+                        .try_send(crate::core::sequencer::SequencerCommand::Summon {
+                            participant_id,
+                        })
+                        .is_ok();
+                }
+            }
+        }
+        Ok(
+            json!({"status":"queued", "message_id":id, "wake_requested":wake_requested,
+            "note":"Delivery waits behind active turns, gates, Pause and declared halts; dormant sessions must be started. Read message_status for actual receipts."}),
+        )
+    }
+
+    async fn control_answer(
+        &self,
+        choice_id: &str,
+        picked: String,
+        confirm_stale: bool,
+        claim: &super::control_claim::ControlClaim,
+    ) -> Result<Value> {
+        anyhow::ensure!(
+            !picked.trim().is_empty() && picked.len() <= 64_000,
+            "answer must be non-empty and at most 64 KB"
+        );
+        let core = self
+            .app_state
+            .get()
+            .and_then(Weak::upgrade)
+            .context("application control is not connected to the runtime")?;
+        let outcome = core
+            .resolve_controlled_choice(choice_id, picked, confirm_stale, claim)
+            .await?;
+        Ok(match outcome {
+            ResolveOutcome::Delivered => json!({"status":"delivered", "choice_id":choice_id}),
+            ResolveOutcome::DeliveredOutOfBand {
+                session_id,
+                receipt,
+                ..
+            } => {
+                json!({"status":"recorded", "choice_id":choice_id, "session_id":session_id, "message_id":receipt.map(|r|r.message_id())})
+            }
+            ResolveOutcome::StaleGateNeedsConfirm { command, asked_at } => {
+                json!({"status":"stale_gate_needs_confirmation", "choice_id":choice_id, "command":command, "asked_at":asked_at})
+            }
+        })
     }
 }

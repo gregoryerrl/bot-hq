@@ -912,7 +912,19 @@ Unchecking or archiving the role revokes new calls, as do removal, session closu
 and human Pause. Each accepted operation has a durable source/target/outcome audit
 (0108); a started record without a finish is not proof it is still running.
 The initial routes read cross-session inventory, state, history, documents, tray
-summaries/choice chunks and the audit. Administrative writes are not connected yet.
+summaries/choice chunks and the audit. `answer` uses the existing core/bridge
+resolution path. Its claim holds a database writer transaction, rereads current
+role/snapshot authority, verifies the choice hash and checks the authenticated
+credential plus source/target Pause generations. A Pause followed by Resume
+cannot renew a queued ticket. Migration0109 records its actor in the same update
+as the answer; target delivery is system-attributed and excluded from human words.
+The production shared AppState constructor binds a weak facade reference, also
+used by HTTP integration fixtures. `send` persists a redacted, system-attributed
+message with a source-scoped retry key (0110), then queues existing ring summons.
+It neither preempts a live turn nor clears Pause/halts nor overwrites human staging;
+a dormant target stays dormant. `message_status` reads actual delivery receipts.
+Retry tombstones survive message retention and refuse to recreate deleted content
+implicitly. Session lifecycle/settings writes remain pending.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit
@@ -1721,7 +1733,8 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   to a user decision when no reviewer remains. Pending user gates survive removal
   of their requester. Activity slots and the weak watchdog roster refresh together.
   Candidate prompt excerpts (phase docs, own handoff, first three/latest six
-  authored-user ledger entries, including tray choices) cap encoded bytes at64KB
+  authored-user ledger entries including tray choices, and six recent attributed
+  text/system-notice channel records) cap encoded bytes at64KB
   and never advance an existing reader cursor. Excerpts exclude channel rows
   beyond the captured frontier, so startup-time rows remain normal unread input.
   The allowance reserves provider/tool room, estimates two bytes per token,
