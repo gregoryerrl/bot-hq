@@ -150,8 +150,9 @@ model side by side. Migration 0102 applies on first launch.
   halt for the next direction. Driver administration now covers models, roles,
   app settings, policies and Tool-Gate keywords, using the desktop validation
   rules and preserving frozen session settings. Saved model tokens are kept
-  unless explicitly replaced or cleared; an endpoint change requires explicit
-  credential intent. Partial edits preserve unmentioned role instructions,
+  unless explicitly replaced or cleared; endpoint, provider, runtime and CLI
+  settings changes require explicit credential intent when a token is stored.
+  Partial edits preserve unmentioned role instructions,
   account/model fields and policy rules, and role saves can reject stale hashes.
   Audit records identify the changed role, model, setting or policy scope.
   Internal telemetry/preset state cannot be changed through the generic settings

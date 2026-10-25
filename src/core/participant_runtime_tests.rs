@@ -461,7 +461,7 @@ async fn driver_admin_partial_model_save_preserves_account_endpoint_and_window()
     assert_eq!(after.context_window, model.context_window);
     assert_eq!(after.cli_settings, model.cli_settings);
     assert_eq!(after.auth_token, model.auth_token);
-    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","context_window":null,"cli_settings":null,"claude_config_dir":null}})).await.unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","context_window":null,"cli_settings":null,"claude_config_dir":null,"auth_token":model.auth_token}})).await.unwrap();
     let cleared = f.state.storage.get_model("old").await.unwrap().unwrap();
     assert!(cleared.context_window.is_none()); assert!(cleared.cli_settings.is_none()); assert!(cleared.claude_config_dir.is_none());
     assert_eq!(cleared.base_url, model.base_url); assert_eq!(cleared.auth_token, model.auth_token);
@@ -488,6 +488,42 @@ async fn driver_admin_endpoint_changes_require_explicit_credential_intent() {
     assert_eq!(f.state.storage.get_model("old").await.unwrap().unwrap().auth_token.as_deref(), Some("explicit-new-fixture-token"));
     admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","base_url":null},"clear_auth_token":true})).await.unwrap();
     assert!(f.state.storage.get_model("old").await.unwrap().unwrap().auth_token.is_none());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_cli_settings_changes_require_explicit_credential_intent() {
+    let f = driver_fixture(false).await;
+    let mut old = f.state.storage.get_model("old").await.unwrap().unwrap();
+    old.auth_token = Some("private-original-fixture-token".into());
+    old.cli_settings = Some("{\"modelOverrides\":{\"old\":\"new\"}}".into());
+    f.state.storage.upsert_model(&old).await.unwrap();
+    for settings in [
+        serde_json::json!("{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://different.example.test\"}}"),
+        serde_json::json!("{\"apiKeyHelper\":\"fixture-helper\"}"),
+        serde_json::json!("{\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}"),
+        serde_json::Value::Null,
+    ] {
+        let error = admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","cli_settings":settings,"auth_token":null}})).await.unwrap_err();
+        assert!(error.to_string().contains("re-supplying"), "{error}");
+        let kept = f.state.storage.get_model("old").await.unwrap().unwrap();
+        assert_eq!(kept.auth_token, old.auth_token);
+        assert_eq!(kept.cli_settings, old.cli_settings);
+    }
+    // Formatting alone changes no settings and must not require a secret.
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","cli_settings":"{ \"modelOverrides\": { \"old\": \"new\" } }"}})).await.unwrap();
+    assert_eq!(f.state.storage.get_model("old").await.unwrap().unwrap().auth_token, old.auth_token);
+    let settings = "{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://different.example.test\"}}";
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","cli_settings":settings,"auth_token":"explicit-new-fixture-token"}})).await.unwrap();
+    let changed = f.state.storage.get_model("old").await.unwrap().unwrap();
+    assert_eq!(changed.cli_settings.as_deref(), Some(settings));
+    assert_eq!(changed.auth_token.as_deref(), Some("explicit-new-fixture-token"));
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","cli_settings":null},"clear_auth_token":true})).await.unwrap();
+    let cleared = f.state.storage.get_model("old").await.unwrap().unwrap();
+    assert!(cleared.auth_token.is_none()); assert!(cleared.cli_settings.is_none());
+    // The delegated editor retains full settings parity for tokenless rows.
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","cli_settings":settings}})).await.unwrap();
+    assert_eq!(f.state.storage.get_model("old").await.unwrap().unwrap().cli_settings.as_deref(), Some(settings));
     f.end().await;
 }
 

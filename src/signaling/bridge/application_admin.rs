@@ -76,6 +76,13 @@ fn overlay_present(mut stored: Value, patch: Value) -> Result<Value> {
     Ok(stored)
 }
 
+fn cli_settings_value(raw: Option<&str>) -> Result<Value> {
+    match raw.filter(|text| !text.trim().is_empty()) {
+        Some(text) => Ok(serde_json::from_str(text)?),
+        None => Ok(json!({})),
+    }
+}
+
 fn generic_setting(key: &str) -> Result<()> {
     anyhow::ensure!(matches!(key, "worktree_default" | "adherence_nudges" | "promptcodes"),
         "this setting requires its dedicated application control (such as Diagnostics or a preset installer); generic settings are worktree_default, adherence_nudges and promptcodes");
@@ -151,8 +158,11 @@ impl SignalingBridge {
                 validate_dir_against_rows(&model.id, model.runtime(), model.claude_config_dir.as_deref(), &rows)?;
                 if model.auth_token.is_none() && !clear_auth_token {
                     if let Some(old) = &before {
-                        anyhow::ensure!(old.auth_token.is_none() || (old.base_url == model.base_url && old.provider == model.provider && old.runtime() == model.runtime()),
-                            "changing the endpoint, provider or runtime requires re-supplying the token or clear_auth_token=true");
+                        // CLI settings can change routing too (env/apiKeyHelper).
+                        // Compare JSON values so whitespace/key order is harmless.
+                        anyhow::ensure!(old.auth_token.is_none() || (old.base_url == model.base_url && old.provider == model.provider && old.runtime() == model.runtime()
+                            && cli_settings_value(old.cli_settings.as_deref())? == cli_settings_value(model.cli_settings.as_deref())?),
+                            "changing the endpoint, provider, runtime or CLI settings requires re-supplying the token or clear_auth_token=true");
                         model.auth_token = old.auth_token.clone();
                     }
                 }

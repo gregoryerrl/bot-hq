@@ -956,8 +956,10 @@ the matching desktop queries. Role grants still do not widen existing snapshots.
 Delegated model/role/policy updates overlay only supplied fields on the stored
 record; explicit null clears nullable fields (the token-preservation rule is the
 exception). Role saves may supply the read hash to reject a concurrent edit.
-An endpoint/provider/runtime change cannot implicitly carry a saved token to its
-new destination. Generic setting access is limited to the three desktop KV
+An endpoint/provider/runtime or CLI-settings change cannot implicitly retain a
+saved token: the caller must supply a token or explicitly clear it. CLI settings
+are compared as JSON values, so formatting alone does not trigger this rule.
+Tokenless models retain unrestricted CLI-settings editing. Generic setting access is limited to the three desktop KV
 settings; telemetry and preset changes require their dedicated control paths.
 Audit detail and notices identify the changed object, including resulting role
 capabilities, and a cancelled delegated roster claim posts a follow-up notice.
