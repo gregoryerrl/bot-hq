@@ -470,7 +470,11 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
 /// — EYES cannot edit CL content; adds a SANCTIONED_DIVERGENCE entry citing
 /// this answer) — recommended"*. Entry and decision in one commit, the same
 /// procedure as `flag_finding`.
-const SANCTIONED_DIVERGENCE: &[&str] = &["flag_finding", "close_session", "cl_edit_file"];
+// s-ca0da1e6, user 2026-10-23T23:58Z: explicitly requested a NEW opt-in
+// full-control capability for Driver. This new tool must be denied to the
+// existing roles; adding it to their grants to appease the old oracle would
+// violate that instruction. No previously available tool changes permission.
+const SANCTIONED_DIVERGENCE: &[&str] = &["flag_finding", "close_session", "app_control", "cl_edit_file"];
 
 #[tokio::test]
 async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {

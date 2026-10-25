@@ -4012,7 +4012,7 @@ mod tests {
     /// The full migrator IS the fresh-install path (`Storage::memory()` runs
     /// it on an empty DB), so this asserts what a brand-new user actually
     /// gets: 0044 seeds hands/eyes, 0072's guarded DML deletes them (no
-    /// sessions ⇒ discriminator true), inserts `agent` with every capability
+    /// sessions ⇒ discriminator true), inserts `agent` with ordinary session capabilities
     /// and NULL prose, and stamps the offer 'pending'. The used-DB branch —
     /// the author's install, where the discriminator is false — cannot run
     /// here by construction and is verified on a COPY of the live DB before
@@ -4034,7 +4034,8 @@ mod tests {
             "the default role has NO instruction prompt — the user's literal ask"
         );
         let caps: Vec<String> = serde_json::from_str(&agent.capabilities).unwrap();
-        assert_eq!(caps.len(), 16, "the solo generalist holds every capability");
+        assert_eq!(caps.len(), 16, "the generalist holds the ordinary session capabilities");
+        assert!(!caps.contains(&"control_bot_hq".to_string()), "application administration is explicit opt-in");
         assert_eq!(
             s.get_setting("role_preset_offer").await.unwrap().as_deref(),
             Some("pending"),

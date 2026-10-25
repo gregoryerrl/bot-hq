@@ -34,6 +34,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
+pub(crate) mod application_control;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
     GATE_HISTORY_DEFAULT,

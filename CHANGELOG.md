@@ -115,6 +115,13 @@ model side by side. Migration 0102 applies on first launch.
 
 ### Added
 
+- **Driver control groundwork (in progress).** Roles has an explicit application
+  control grant, never enabled by default. Its first API reads sessions, history,
+  documents, decisions and an attributed action audit across sessions. Current
+  role revocation and human Pause are checked on each call. Gate answers, session
+  creation/messages and other administrative writes are still being connected.
+
+
 - **Agents can retrieve older records from their own session.** The
   `session_history` tool pages raw channel history or the recorded human
   instructions and tray choices separately. Long records can be read in

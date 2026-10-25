@@ -747,6 +747,13 @@ async fn call_tool(
         return Ok(refuse_gated_tool(name, caller, bridge).await);
     }
     match name {
+        "app_control" => {
+            let request = serde_json::from_value(args).map_err(|e| JsonRpcError::new(JsonRpcError::INVALID_PARAMS, e.to_string()))?;
+            match bridge.app_control(&caller.session_id, &caller.agent, request).await {
+                Ok(value) => Ok(ToolCallResult::text(value.to_string())),
+                Err(error) => Ok(ToolCallResult::error(format!("{error:#}"))),
+            }
+        }
         "ask_user_choice" => {
             let question = arg_required_str(&args, "question")?;
             let options = arg_required_str_array(&args, "options")?;
@@ -2395,6 +2402,50 @@ mod tests {
         let v = serde_json::to_value(&res).unwrap();
         assert_eq!(v["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(v["result"]["serverInfo"]["name"], "bot-hq-signaling");
+    }
+
+    #[tokio::test]
+    async fn driver_read_facade_requires_both_grants_and_preserves_authorship() {
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let (bridge, storage) = two_role_session().await;
+        storage.create_session("target", "project work", None).await.unwrap();
+        let msg = storage.post_to_channel("target", "user", None, "text", "original human words", None).await.unwrap().message_id();
+        storage.record_user_words("target", msg, "original human words").await.unwrap();
+        let args = json!({"action":"history", "session_id":"target"});
+        assert!(tool(&bridge, caller(), "app_control", args.clone()).await.unwrap().contains("refused"));
+        let mut driver = caller();
+        driver.capabilities = ResolvedCapabilities::Known(CapabilitySet::from_slugs(&["control_bot_hq"]));
+        // Passing an apparent grant to the dispatcher is insufficient: the
+        // facade itself reads current persisted authority, including the role.
+        assert!(tool(&bridge, driver.clone(), "app_control", args.clone()).await.unwrap().contains("not granted"));
+        sqlx::query("UPDATE roles SET capabilities = '[\"control_bot_hq\"]' WHERE slug = 'hands'").execute(storage.pool()).await.unwrap();
+        assert!(tool(&bridge, driver.clone(), "app_control", args.clone()).await.unwrap().contains("not granted"), "a role edit must not elevate an existing participant");
+        sqlx::query("UPDATE session_participants SET capabilities = '[\"control_bot_hq\"]' WHERE session_id = 's1' AND slug = 'hands'").execute(storage.pool()).await.unwrap();
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words").fetch_one(storage.pool()).await.unwrap();
+        let reply = parsed(&tool(&bridge, driver.clone(), "app_control", args.clone()).await.unwrap());
+        assert_eq!(reply["actor"]["session_id"], "s1");
+        assert_eq!(reply["result"]["records"][0]["body"], "original human words");
+        let audit = storage.control_audit_page(Some("target"), None).await.unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].source_session, "s1");
+        assert_eq!(audit[0].target_session.as_deref(), Some("target"));
+        assert_eq!(audit[0].outcome, "ok");
+        let after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words").fetch_one(storage.pool()).await.unwrap();
+        assert_eq!(before, after);
+        assert!(tool(&bridge, driver.clone(), "app_control", json!({"action":"sessions","source_session":"forged"})).await.is_err());
+        let failed = tool(&bridge, driver.clone(), "app_control", json!({"action":"document","session_id":"target","slug":"absent"})).await.unwrap();
+        assert!(failed.contains("does not exist"));
+        assert_eq!(storage.control_audit_page(Some("target"), None).await.unwrap()[0].outcome, "failed");
+        let tracker = crate::core::activity::ActivityTracker::new("s1", Arc::new(std::sync::atomic::AtomicBool::new(false)), bridge.clone(), vec!["hands".into()]);
+        bridge.register_session_activity("s1".into(), Arc::downgrade(&tracker)).await;
+        tracker.set_paused(true);
+        assert!(tool(&bridge, driver.clone(), "app_control", args.clone()).await.unwrap().contains("paused"));
+        tracker.set_paused(false);
+        sqlx::query("UPDATE roles SET capabilities = '[]' WHERE slug = 'hands'").execute(storage.pool()).await.unwrap();
+        assert!(tool(&bridge, driver.clone(), "app_control", args).await.unwrap().contains("revoked"));
+        assert!(!crate::signaling::protocol::ALWAYS_LOADED_TOOLS.contains(&"app_control"));
+        assert!(!CapabilitySet::preset_hands().allows_tool("app_control"));
+        assert!(!CapabilitySet::preset_eyes().allows_tool("app_control"));
     }
 
     #[tokio::test]

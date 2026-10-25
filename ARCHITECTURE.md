@@ -20,8 +20,8 @@ through an agent harness — N role-playing participants — with policy enforce
 session spawns participants the user picks from their ROLES:
 
 - A role holds a set of **capabilities** (ticked in Settings → Roles) and its own
-  instruction prose. A FRESH install seeds one neutral role — `agent`, every
-  capability, no prose (migration 0072) — plus a one-time Roles-tab offer to
+  instruction prose. A FRESH install seeds one neutral role — `agent`, ordinary session
+  capabilities, no prose (migration 0072) — plus a one-time Roles-tab offer to
   install the example pair, **HANDS** (executes) + **EYES** (adversarial
   reviewer); declined, the offer never returns, and an upgrading install never
   sees it. The author's own install keeps its HANDS/EYES rows — they are that
@@ -890,7 +890,7 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (48)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (49)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
@@ -899,12 +899,20 @@ since D37 — see "The phase-advance vote"),
 `disposition_finding`, `check_open_findings`, `get_finding`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_edit`, `session_doc_search`,
-`session_doc_read`, `session_history`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
+`session_doc_read`, `session_history`, `app_control`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
 `cl_write_file`, `cl_edit_file`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`,
 `terminal_exec`, `terminal_read`,
 `webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
+
+`app_control` requires the explicit `control_bot_hq` grant in BOTH the participant's
+invite snapshot and its current role. It is not granted to default/example roles.
+Unchecking or archiving the role revokes new calls, as do removal, session closure
+and human Pause. Each accepted operation has a durable source/target/outcome audit
+(0108); a started record without a finish is not proof it is still running.
+The initial routes read cross-session inventory, state, history, documents, tray
+summaries/choice chunks and the audit. Administrative writes are not connected yet.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

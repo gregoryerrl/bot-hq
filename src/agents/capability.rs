@@ -45,6 +45,8 @@ pub enum Capability {
     RunTerminal,
     // ---- knowledge ----
     WriteContextLibrary,
+    // Explicit application-wide delegation; never part of a preset.
+    ControlBotHq,
 }
 
 impl Capability {
@@ -67,7 +69,7 @@ impl Capability {
     /// below. `all_lists_every_variant_exactly_once` and `capability_prompt`'s
     /// `all_covers_every_capability_the_presets_and_the_tool_map_name` then
     /// cross-check this array against three independent sources.
-    pub const ALL: [Capability; 16] = {
+    pub const ALL: [Capability; 17] = {
         use Capability::*;
         [
             ReadChannel,
@@ -86,6 +88,7 @@ impl Capability {
             GatedBash,
             RunTerminal,
             WriteContextLibrary,
+            ControlBotHq,
         ]
     };
 
@@ -101,6 +104,7 @@ impl Capability {
             FileFinding | ApproveFinding | DispositionFinding | OverrideReviewerBlock => "Review",
             EditFiles | RunBash | GatedBash | RunTerminal => "Execution",
             WriteContextLibrary => "Knowledge",
+            ControlBotHq => "Application control",
         }
     }
 
@@ -124,6 +128,7 @@ impl Capability {
             GatedBash => "Route a gated command",
             RunTerminal => "Run the terminal",
             WriteContextLibrary => "Write the Context Library",
+            ControlBotHq => "Full control of bot-hq",
         }
     }
 
@@ -148,6 +153,7 @@ impl Capability {
             GatedBash => "Send a gated command to the user for approval — needs `run_bash`.",
             RunTerminal => "Drive the session's terminal (`terminal_exec`).",
             WriteContextLibrary => "Add to or edit the Context Library.",
+            ControlBotHq => "Delegate user-level application control across projects and sessions, including approving its own commands and changing enforcement settings. New participants only; unchecking revokes existing controllers immediately. Grant only to a role you intend to drive bot-hq.",
         }
     }
 
@@ -170,6 +176,7 @@ impl Capability {
             GatedBash => "gated_bash",
             RunTerminal => "run_terminal",
             WriteContextLibrary => "write_context_library",
+            ControlBotHq => "control_bot_hq",
         }
     }
 
@@ -192,6 +199,7 @@ impl Capability {
             "gated_bash" => GatedBash,
             "run_terminal" => RunTerminal,
             "write_context_library" => WriteContextLibrary,
+            "control_bot_hq" => ControlBotHq,
             _ => return None,
         })
     }
@@ -220,6 +228,7 @@ pub fn required_for(tool: &str) -> Option<Capability> {
     use Capability::*;
     Some(match tool {
         "session_history" => ReadChannel,
+        "app_control" => ControlBotHq,
         "ask_user_choice" => AskUser,
         "mark_awaiting_user" | "halt" => Halt,
         "request_approval" => ParkApproval,
@@ -633,15 +642,14 @@ mod tests {
                 ReadChannel | PostChannel | AskUser | ParkApproval | SupersedeQuestion | Halt
                 | CloseSession | FileFinding | ApproveFinding
                 | DispositionFinding | OverrideReviewerBlock | EditFiles | RunBash | GatedBash
-                | RunTerminal | WriteContextLibrary => {}
+                | RunTerminal | WriteContextLibrary | ControlBotHq => {}
             }
             assert!(seen.insert(cap), "{} is listed twice in ALL", cap.slug());
         }
         assert_eq!(
             seen.len(),
-            16,
-            "a capability is missing from `Capability::ALL` (16 since \
-             declare_working retired, 2026-08-15: working = holding a turn)"
+            17,
+            "a capability is missing from `Capability::ALL`"
         );
     }
 

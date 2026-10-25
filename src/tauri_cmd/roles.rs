@@ -370,6 +370,10 @@ mod tests {
         // grant no role can be given, silently.
         let rows = list_capabilities();
         assert_eq!(rows.len(), Capability::ALL.len());
+        let controller = rows.iter().find(|r| r.slug == "control_bot_hq").expect("Roles must expose the explicit Driver grant");
+        assert_eq!(controller.label, "Full control of bot-hq");
+        assert!(controller.description.contains("own commands"));
+        assert!(controller.description.contains("enforcement settings"));
         for row in &rows {
             assert!(
                 Capability::parse(&row.slug).is_some(),

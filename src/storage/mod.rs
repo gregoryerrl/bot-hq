@@ -25,6 +25,8 @@ use std::sync::LazyLock;
 pub mod row_types;
 
 mod account_marks;
+mod application_control;
+pub use application_control::{ControlActor, ControlAudit};
 mod codex_hook_trust;
 mod activity_events;
 mod agent_config;

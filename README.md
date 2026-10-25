@@ -40,8 +40,8 @@ didn't want touched. bot-hq is built around three ideas that fix that:
 
 ## The roles you orchestrate
 
-A session spawns participants from roles you configure. Two roles ship seeded, and
-they are a starting point rather than the product:
+A session spawns participants from roles you configure. A fresh install starts
+with a neutral Agent role and offers this optional example pair:
 
 |                    | **HANDS**                                       | **EYES**                                          |
 | ------------------ | ----------------------------------------------- | ------------------------------------------------- |
@@ -49,11 +49,11 @@ they are a starting point rather than the product:
 | Can edit files?    | Yes                                              | No — the capability is unticked                   |
 | Think of it as     | Your pair-programmer                             | Your reviewer / second opinion                    |
 
-Both are ordinary rows in **Settings → Roles**: rename them, rewrite their
-instructions, retick their capabilities, or add roles of your own. Capabilities
-are enforced at the tool gate, so unticking one takes the ability away rather than
-merely asking the agent not to use it. A participant is shown as `ROLE · Model`,
-never as a persona.
+Both examples are ordinary rows in **Settings → Roles**: rename them, rewrite
+their instructions, retick their capabilities, or add roles of your own. Ordinary
+participant grants are snapshotted at invitation and govern MCP tools and spawn
+permissions. Driver control also checks the current role: unchecking it revokes
+new control calls. A participant is shown as `ROLE · Model`, never as a persona.
 
 **Change agents during a session.** Open the session's Settings gear to add a saved
 role/model, remove an agent, or change its model/provider/account. Requests wait for
@@ -325,6 +325,7 @@ action-taking tools — that role boundary is enforced server-side, not by conve
 | `session_doc_search(query?, phase?)` | List this session's scratch docs, bodies within a 48 KB budget (a larger doc is listed with its size and headings); `phase` filter for cross-phase retrieval. |
 | `session_doc_read(slug, heading?, lines?, grep?)` | Read a session doc by slug — whole, or one section, a line range, or the matching lines. |
 | `session_history(source?, record_id?, message_id?, before_id?, offset_bytes?, limit?)` | Read your own session's raw channel or recorded human words under `read_channel`; bounded pages and long-body offsets, without advancing delivery cursors. |
+| `app_control(action, …)` | Explicitly delegated cross-session reads with current-role revocation and an attributed audit. Administrative writes are being connected; ordinary roles cannot use it. |
 | `web_search(query, engine?)` | Search the web via a headless webview, so non-first-party models without a server-side search tool can fetch live results. |
 | `terminal_exec(command, wait_ms?, block?, to_job?)` | Run one command in the session's Terminal subtab PTY (user-visible). Blocking by default: waits until the shell is back at its prompt and the output is quiet, and returns the captured tail (a command still holding the terminal at `wait_ms` is named); `block:false` for long-running processes. While another program holds the terminal (a pager, a server, a REPL) the command is refused naming it, unless `to_job:true` says to type into that program; a password prompt (`sudo`, `ssh`…) is never typed into. Gate-matched commands are refused (route via `action_gate`). |
 | `terminal_read(lines?, raw?)` | Tail of the session terminal's scrollback as plain text, as the screen shows it — escape sequences removed, `\r` and backspace redraws applied (default 100 lines, max 500; `raw:true` for the bytes) — evidence agents can paste into chat or IPAV docs. `terminal_exec`'s output is rendered the same way. |

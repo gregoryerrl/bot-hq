@@ -121,6 +121,11 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             deny: "close the session — `close_session` is refused for you",
             peer: "closes the session",
         },
+        ControlBotHq => Phrasing {
+            grant: "act as the user's delegated controller through `app_control`; actions across sessions are attributed to you. The grant includes your own session's decisions and enforcement settings. Use it only for the user's actual task; never claim your messages or decisions were written by the human. Revocation and human Pause still apply",
+            deny: "control bot-hq or other sessions as the user — `app_control` is refused for you",
+            peer: "holds delegated user-level control of bot-hq",
+        },
         FileFinding => Phrasing {
             grant: "file a review finding with `eyes_flag(severity, summary)` — a `blocking` \
                     one mechanically gates commit and push until it is dispositioned",

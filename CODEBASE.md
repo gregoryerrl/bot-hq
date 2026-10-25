@@ -477,6 +477,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/findings.rs` | EYES findings CRUD + `count_open_blocking_findings` | M |
 | `src/storage/session_docs.rs` | per-session IPAV docs + archives | M |
 | `src/storage/session_history.rs` | caller-scoped channel/human-ledger pages and UTF-8 byte chunks, encoded reply bounds, no cursor/receipt mutation; consumed by the `session_history` MCP dispatch | S |
+| `src/storage/application_control.rs`, `src/signaling/bridge/application_control.rs` | explicit controller authority, current-role revocation and application audit; bounded cross-session read facade (0108) | S / M |
 | `src/storage/gate_results.rs` | gate resolution receipts (0106), one-time MCP notices, per-participant compaction mirrors; actual delivery proof persists separately from telemetry retention | S |
 | `src/storage/user_words.rs` | `session_user_words` (0092): the user's own words, recorded by the caller that knows whose they are (`core::Authored`, the tray answer), mirrored to the words file the compaction hook prints | S |
 | `src/storage/activity_events.rs` | activity transition ledger (read only by tests + boot sweep) | S |
@@ -494,7 +495,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
-| `migrations/` | 0001…0089 (0056 absent) — append-only | — |
+| `migrations/` | ordered append-only SQL migrations (0056 absent) | — |
 | `tests/storage_test.rs` | cross-cutting smoke: empty-DB migration, tray scoping, message since-id, session close/list, config round-trips | M |
 
 **Entry points.** `Storage::open` · `now_utc` · `next_active_participant` ·
