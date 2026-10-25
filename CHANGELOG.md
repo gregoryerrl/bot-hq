@@ -128,8 +128,12 @@ model side by side. Migration 0102 applies on first launch.
   and declared halts remain holds. Fresh model contexts also carry bounded
   recent channel excerpts with source attribution, so delivered Driver directions
   do not disappear merely because they are not human-authored. The same history
-  cutoff keeps startup-time messages out of this snapshot. Session lifecycle/
-  settings writes are still being connected.
+  cutoff keeps startup-time messages out of this snapshot. Controllers can now
+  start dormant open sessions and explicitly resume started sessions without
+  interrupting a live worker. Closed sessions still require reopening; start
+  does not lift Pause. Recipient guidance recognizes authenticated delegated
+  directions while keeping human attribution separate. Creation, the remaining
+  lifecycle operations and settings writes are still being connected.
 
 
 - **Agents can retrieve older records from their own session.** The

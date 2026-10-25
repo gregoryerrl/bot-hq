@@ -924,7 +924,13 @@ message with a source-scoped retry key (0110), then queues existing ring summons
 It neither preempts a live turn nor clears Pause/halts nor overwrites human staging;
 a dormant target stays dormant. `message_status` reads actual delivery receipts.
 Retry tombstones survive message retention and refuse to recreate deleted content
-implicitly. Session lifecycle/settings writes remain pending.
+implicitly. `start` uses the native spawn/install path and rechecks authority after
+its startup/lifecycle locks; it never opens a closed session. `resume` is an
+explicit, system-attributed non-preempting release; start alone does not clear
+Pause. A stale runtime replaced during resume requires a fresh state read/retry,
+so an old ticket never silently authorizes a new incarnation. Recipient guidance
+accepts authenticated delegated task directions without calling them human words.
+Other lifecycle/settings writes remain pending.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

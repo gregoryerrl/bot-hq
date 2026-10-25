@@ -7446,6 +7446,7 @@ mod tests {
         .unwrap();
         // The single consolidated file reaches BOTH agents' prompts.
         let hands = read_system_prompt(&paths, None, None, None, None, None).unwrap();
+        assert!(hands.contains("host-attributed `app_control` message") && hands.contains("the controller spoke or answered, not the human"), "the composed recipient prompt must recognize delegated authority without inventing human authorship");
         assert!(hands.contains("SHARED_CUSTOM_PREFS_X9Q"));
         let eyes = read_system_prompt(&paths, None, None, None, None, None).unwrap();
         assert!(eyes.contains("SHARED_CUSTOM_PREFS_X9Q"));

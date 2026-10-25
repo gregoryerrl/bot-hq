@@ -82,6 +82,8 @@ pub enum Authored {
     /// A plugin sent it (`plugin_session_send`, or the prompt of a session a
     /// plugin created). Not recorded.
     ByPlugin,
+    /// Authenticated application controller; system attribution, never human words.
+    ByController,
 }
 
 impl Authored {
@@ -129,12 +131,15 @@ pub async fn broadcast_user_message(
     // **The verbatim door (F10):** this is what the user typed, the one text
     // the user's pick `7e3308f1` keeps as written — they may be handing an
     // agent a token on purpose. Every other row is redacted at the store.
+    let controller_text = (authored == Authored::ByController)
+        .then(|| crate::policy::secret_scan::redact_string(text.to_string()));
+    let text = controller_text.as_deref().unwrap_or(text);
     let persisted = storage
         .post_to_channel_verbatim(
             session_id,
-            "user",
+            if authored == Authored::ByController { "system" } else { "user" },
             None,
-            MessageKind::Text.as_str(),
+            if authored == Authored::ByController { MessageKind::SystemNotice.as_str() } else { MessageKind::Text.as_str() },
             text,
             Some(envelope),
         )

@@ -87,6 +87,18 @@ impl SignalingBridge {
         self.control_ticket(actor, proof, target, None, true).await
     }
 
+    /// Admission point for a synchronous application operation. Async workers
+    /// must additionally validate when they take ownership (as startup does).
+    pub(crate) async fn authorize_control_effect(&self, claim: &ControlClaim) -> Result<()> {
+        let storage = self.storage_handle().await.context("storage is unavailable")?;
+        let mut tx = storage.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let current = Storage::controller_actor_on(&mut tx, &claim.actor.session_id, &claim.actor.slug).await?;
+        anyhow::ensure!(current == claim.actor, "controller identity changed");
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn control_ticket(
         &self,
         actor: ControlActor,

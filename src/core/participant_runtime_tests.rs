@@ -351,6 +351,7 @@ async fn driver_send_waits_for_the_live_turn_and_reports_real_delivery() {
     let sent = driver_rpc(&f.state, args.clone()).await.unwrap();
     let id = sent["result"]["message_id"].as_i64().unwrap();
     assert_eq!(driver_rpc(&f.state, args).await.unwrap()["result"]["message_id"], id);
+    driver_rpc(&f.state, serde_json::json!({"action":"resume","session_id":"s1"})).await.unwrap();
     assert!(f.seats[1].input.try_recv().is_err(), "an active turn must not be preempted by a delegated message");
     assert!(!*f.seats[0].stopped.borrow());
     f.ring.send(SequencerCommand::TurnComplete { participant_id:f.rows[0].id, epoch, ending:crate::core::sequencer::TurnEnding::Spoke }).await.unwrap();
@@ -389,6 +390,68 @@ async fn driver_send_preserves_pause_human_stage_and_retry_tombstones() {
     assert!(driver_rpc(&f.state, args).await.unwrap_err().to_string().contains("no longer retained"));
     s.close_session("target", false).await.unwrap();
     assert!(driver_rpc(&f.state, serde_json::json!({"action":"send","session_id":"target","request_id":"after-close","text":"Do not reopen implicitly"})).await.is_err());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_start_uses_the_native_install_path_and_resume_is_attributed() {
+    let f = driver_fixture(false).await;
+    f.state.storage.create_session("dormant", "dormant target", None).await.unwrap();
+    f.state.storage.ensure_session_roster("dormant", 1).await.unwrap();
+    let bridge = f.state.bridge.clone();
+    let starts = Arc::new(AtomicU64::new(0));
+    let count = starts.clone();
+    let (tx, mut receivers) = mpsc::unbounded_channel();
+    f.state.set_session_starter(Arc::new(move |id| {
+        let (bridge, count, tx) = (bridge.clone(), count.clone(), tx.clone());
+        Box::pin(async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            let (handle, input) = crate::core::session::stub_session_for_tests(&id, &bridge).await;
+            bridge.register_session_activity(id, Arc::downgrade(&handle.activity)).await;
+            tx.send(input).unwrap();
+            Ok(handle)
+        })
+    }));
+    let result = driver_rpc(&f.state, serde_json::json!({"action":"start","session_id":"dormant"})).await.unwrap();
+    assert_eq!(result["result"]["status"], "started");
+    let _input = receivers.recv().await.unwrap();
+    driver_rpc(&f.state, serde_json::json!({"action":"start","session_id":"dormant"})).await.unwrap();
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let activity = f.state.sessions.lock().await["dormant"].activity.clone();
+    activity.set_paused(true);
+    driver_rpc(&f.state, serde_json::json!({"action":"start","session_id":"dormant"})).await.unwrap();
+    assert!(activity.is_paused(), "start must not silently resume a healthy paused target");
+    driver_rpc(&f.state, serde_json::json!({"action":"resume","session_id":"dormant"})).await.unwrap();
+    assert!(!activity.is_paused());
+    let message: (String, String) = sqlx::query_as("SELECT origin, content FROM messages WHERE session_id = 'dormant' ORDER BY id DESC LIMIT 1").fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(message.0, "system"); assert!(message.1.contains("hands of s1"));
+    let human: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE session_id = 'dormant'").fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(human, 0);
+    f.state.storage.create_session("closed", "closed target", None).await.unwrap();
+    f.state.storage.close_session("closed", false).await.unwrap();
+    assert!(driver_rpc(&f.state, serde_json::json!({"action":"start","session_id":"closed"})).await.is_err());
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let mut target = f.state.sessions.lock().await.remove("dormant").unwrap();
+    f.state.quiesce_session_handle(&mut target).await.unwrap();
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_start_rechecks_authority_after_waiting_for_the_lifecycle_lock() {
+    let f = driver_fixture(false).await;
+    f.state.storage.create_session("dormant", "target", None).await.unwrap();
+    f.state.set_session_starter(Arc::new(|_|Box::pin(async { panic!("revoked controller must never reach spawn") })));
+    let lock = f.state.lifecycle_lock("dormant");
+    let held = lock.lock().await;
+    let state = f.state.clone();
+    let request = tokio::spawn(async move { driver_rpc(&state, serde_json::json!({"action":"start","session_id":"dormant"})).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !f.state.start_gate_is_held() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap();
+    drop(held);
+    assert!(request.await.unwrap().unwrap_err().to_string().contains("revoked"));
+    assert!(!f.state.sessions.lock().await.contains_key("dormant"));
     f.end().await;
 }
 

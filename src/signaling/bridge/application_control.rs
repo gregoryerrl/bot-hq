@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AppControlRequest {
+    Start { session_id: String },
+    Resume { session_id: String },
     Send {
         session_id: String,
         request_id: String,
@@ -62,6 +64,8 @@ pub(crate) enum AppControlRequest {
 impl AppControlRequest {
     fn identity(&self) -> (&'static str, Option<&str>) {
         match self {
+            Self::Start { session_id } => ("start", Some(session_id)),
+            Self::Resume { session_id } => ("resume", Some(session_id)),
             Self::Send { session_id, .. } => ("send", Some(session_id)),
             Self::MessageStatus { session_id, .. } => ("message_status", Some(session_id)),
             Self::Answer { .. } => ("answer", None),
@@ -128,6 +132,7 @@ impl SignalingBridge {
         // Capture the runtime/Pause ticket before even the audit INSERT can
         // queue behind another writer. A later Resume cannot renew this call.
         let claim = match &request {
+            AppControlRequest::Start { session_id } | AppControlRequest::Resume { session_id } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Send { session_id, .. } => Some(
                 self.control_message_ticket(actor.clone(), proof, session_id.clone())
                     .await?,
@@ -150,6 +155,16 @@ impl SignalingBridge {
             .start_control_audit(&actor, target.as_deref(), operation)
             .await?;
         let result = match request {
+            AppControlRequest::Start { session_id } => {
+                self.control_start(&session_id, claim.as_ref().unwrap()).await
+            }
+            AppControlRequest::Resume { session_id } => {
+                let core = self.app_state.get().and_then(Weak::upgrade);
+                match core {
+                    Some(core) => core.resume_session_controlled(&session_id, claim.as_ref().unwrap()).await.map(|_|json!({"status":"resume_requested", "session_id":session_id})),
+                    None => Err(anyhow::anyhow!("application control is not connected to the runtime")),
+                }
+            }
             AppControlRequest::Send {
                 session_id,
                 request_id,
@@ -195,6 +210,7 @@ impl SignalingBridge {
     async fn control_read(&self, storage: &Storage, request: AppControlRequest) -> Result<Value> {
         use AppControlRequest::*;
         let value = match request {
+            Start { .. } | Resume { .. } => anyhow::bail!("lifecycle is a write operation"),
             Send { .. } => anyhow::bail!("send is a write operation"),
             MessageStatus {
                 session_id,
@@ -237,7 +253,9 @@ impl SignalingBridge {
                     .context("session does not exist")?;
                 let participants =
                     crate::tauri_cmd::sessions::participant_views(storage, &session_id).await?;
-                json!({"session": crate::tauri_cmd::sessions::SessionInfo::from(session), "participants": participants,
+                let runtime = self.session_activity.lock().await.get(&session_id).and_then(Weak::upgrade)
+                    .map(|a|json!({"activity":a.current().as_str(),"paused":a.is_paused()}));
+                json!({"session": crate::tauri_cmd::sessions::SessionInfo::from(session), "participants": participants, "runtime":runtime,
                     "halt": storage.session_halt(&session_id).await?, "controls": crate::tauri_cmd::participant_changes::controls(storage, &session_id).await?})
             }
             History { session_id, query } => {
@@ -366,6 +384,14 @@ impl SignalingBridge {
             json!({"status":"queued", "message_id":id, "wake_requested":wake_requested,
             "note":"Delivery waits behind active turns, gates, Pause and declared halts; dormant sessions must be started. Read message_status for actual receipts."}),
         )
+    }
+
+    async fn control_start(&self, session_id: &str, claim: &super::control_claim::ControlClaim) -> Result<Value> {
+        let core = self.app_state.get().and_then(Weak::upgrade).context("application control is not connected to the runtime")?;
+        core.ensure_session_started_controlled(session_id, claim).await?;
+        core.notify_session_created(session_id);
+        Ok(json!({"status":"started", "session_id":session_id,
+            "note":"Agents are available or orienting. Send after start (retry the same message request_id if it was queued while dormant). Resume explicitly to release Pause or a declared halt."}))
     }
 
     async fn control_answer(

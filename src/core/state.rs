@@ -298,6 +298,8 @@ pub struct AppState {
     /// so close_session can't reap them). Only the spawn path takes this; the
     /// fast already-running check short-circuits before acquiring it.
     spawn_gate: Mutex<()>,
+    #[cfg(test)]
+    session_starter: std::sync::Mutex<Option<Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, Result<SessionHandle>> + Send + Sync>>>,
     lifecycle_locks: std::sync::Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>>,
     /// Populated from Tauri's `setup()` once the AppHandle exists. The
     /// signaling MCP server starts BEFORE Tauri setup (see main.rs ordering), so
@@ -518,6 +520,8 @@ impl AppState {
             signaling_server: Mutex::new(Some(server)),
             sessions: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
+            #[cfg(test)]
+            session_starter: std::sync::Mutex::new(None),
             lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
             app_handle: std::sync::OnceLock::new(),
             fs_watcher: std::sync::OnceLock::new(),
@@ -590,6 +594,32 @@ impl AppState {
     /// Idempotent — safe to call repeatedly.
     /// Logs and returns Err if spawn fails, but does NOT poison the AppState.
     pub async fn ensure_session_started(&self, session_id: &str) -> Result<()> {
+        self.ensure_session_started_inner(session_id, None, false).await
+    }
+
+    async fn spawn_existing_for_start(&self, session_id: &str) -> Result<SessionHandle> {
+        #[cfg(test)]
+        {
+            let starter = self.session_starter.lock().unwrap().clone();
+            if let Some(starter) = starter { return starter(session_id.to_string()).await; }
+        }
+        spawn_existing_session(session_id, &self.paths, self.storage.clone(), self.bridge.clone(), self.signaling_addr).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_session_starter(&self, starter: Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, Result<SessionHandle>> + Send + Sync>) {
+        *self.session_starter.lock().unwrap() = Some(starter);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_gate_is_held(&self) -> bool { self.spawn_gate.try_lock().is_err() }
+
+    pub(crate) async fn ensure_session_started_controlled(&self, session_id: &str, claim: &crate::signaling::ControlClaim) -> Result<()> {
+        self.ensure_session_started_inner(session_id, Some(claim), false).await
+    }
+
+    async fn ensure_session_started_inner(&self, session_id: &str, claim: Option<&crate::signaling::ControlClaim>, allow_paused_restart: bool) -> Result<()> {
+        if let Some(claim) = claim { self.bridge.authorize_control_effect(claim).await?; }
         // Fast path: already running AND healthy. A handle whose supervisor has
         // terminated (permanent API error / exhausted retry budget) lingers in
         // the map but is stale — fall through to evict + re-spawn so the
@@ -606,6 +636,8 @@ impl AppState {
         let _gate = self.spawn_gate.lock().await;
         let lifecycle = self.lifecycle_lock(session_id);
         let _lifecycle = lifecycle.lock().await;
+        // A controller may have waited behind another startup/lifecycle action.
+        if let Some(claim) = claim { self.bridge.authorize_control_effect(claim).await?; }
         let mut retired_handle = None;
         {
             let mut sessions = self.sessions.lock().await;
@@ -622,6 +654,7 @@ impl AppState {
                 if !handle.is_stale() {
                     return Ok(());
                 }
+                anyhow::ensure!(claim.is_none() || allow_paused_restart || !handle.activity.is_paused(), "paused runtime needs an explicit resume; start will not clear Pause");
                 // Evict the stale (crashed) handle before re-spawning. Killing
                 // already-dead agents is a no-op.
                 if let Some(mut stale) = sessions.remove(session_id) {
@@ -652,20 +685,14 @@ impl AppState {
         // Read here rather than in the Tauri command so the auto-heal in
         // `broadcast_as` and `restart_session` inherit the refusal — a plugin
         // broadcast into a closed session must not revive it either.
-        if let Ok(Some(row)) = self.storage.get_session(session_id).await {
-            refuse_closed(session_id, row.closed_at.as_deref())?
-        }
+        let row = self.storage.get_session(session_id).await?
+            .ok_or_else(|| anyhow::anyhow!("session {session_id} does not exist"))?;
+        refuse_closed(session_id, row.closed_at.as_deref())?;
+        anyhow::ensure!(row.archived == 0, "reopen the archived session before starting it");
         // The roster seed moved into `spawn_session_handle` (B4b.2) — it is the
         // choke point every creation path shares, and this one was not: the
         // external driver's `open_session` (deleted 2026-08-17) never reached here.
-        let mut handle = spawn_existing_session(
-            session_id,
-            &self.paths,
-            self.storage.clone(),
-            Arc::clone(&self.bridge),
-            self.signaling_addr,
-        )
-        .await?;
+        let mut handle = self.spawn_existing_for_start(session_id).await?;
         {
             let mut sessions = self.sessions.lock().await;
             // The spawn above ran outside the map lock (it takes seconds). A
@@ -893,6 +920,12 @@ impl AppState {
     /// participant's next batch (nothing is held or flushed since rc3 D19).
     /// Auto-heals a SIGKILLed (stale) session via broadcast's respawn loop.
     /// No-op when the session isn't live or isn't paused (stale click).
+    pub(crate) async fn resume_session_controlled(&self, session_id: &str, claim: &crate::signaling::ControlClaim) -> Result<()> {
+        self.bridge.authorize_control_effect(claim).await?;
+        let text = format!("Session resumed by delegated controller {} of {}. Continue the recorded task and queued directions.", claim.actor.slug, claim.actor.session_id);
+        self.broadcast_as_inner(session_id, &text, UserSend::Staged, Authored::ByController, Some(claim)).await
+    }
+
     pub async fn resume_session(&self, session_id: &str) -> Result<()> {
         {
             let sessions = self.sessions.lock().await;
@@ -1845,6 +1878,11 @@ impl AppState {
         send: UserSend,
         authored: Authored,
     ) -> Result<()> {
+        self.broadcast_as_inner(session_id, text, send, authored, None).await
+    }
+
+    async fn broadcast_as_inner(&self, session_id: &str, text: &str, send: UserSend, authored: Authored,
+        claim: Option<&crate::signaling::ControlClaim>) -> Result<()> {
         // The paste gate, FIRST — before any respawn work is spent on a
         // message that will be refused. s-f6a441ff: a 2,977,078-byte paste of
         // prod logs was accepted, delivered, and lodged in both participants'
@@ -1897,13 +1935,14 @@ impl AppState {
                         attempt = attempts,
                         "session stale on broadcast; respawning before delivery"
                     );
-                    self.ensure_session_started(session_id).await?;
+                    self.ensure_session_started_inner(session_id, claim, true).await?;
                 }
             }
         };
         let handle = sessions
             .get(session_id)
             .ok_or_else(|| anyhow::anyhow!("no live session {session_id}"))?;
+        if let Some(claim) = claim { claim.check(&self.bridge)?; }
         // Clear the awaiting flag BEFORE posting the user's reply so the
         // activity state leaves `AwaitingUser`.
         self.clear_awaiting(handle, session_id).await;
@@ -1978,7 +2017,7 @@ impl AppState {
         // to drain. Reversing these two hands out a turn over an empty backlog
         // and the message lands a turn late. Both halves of "the user responded"
         // ride this one call (rc3 D28).
-        self.user_responded(session_id, mentions, true, true).await;
+        self.user_responded(session_id, mentions, true, authored != Authored::ByController).await;
         // A user prompt re-arms the idle-unflagged watchdog's once-per-window
         // nudge (and its >0 count marks the session as having a task at all).
         handle
@@ -3771,7 +3810,8 @@ mod tests {
 
         // ensure_session_started: read inside the re-check, under the sessions
         // lock taken beneath the spawn gate.
-        let es = body_of("ensure_session_started");
+        assert!(body_of("ensure_session_started").contains("self.ensure_session_started_inner(session_id, None, false)"), "the human entry must use the shared guarded body");
+        let es = body_of("ensure_session_started_inner");
         let gate = es
             .find("self.spawn_gate.lock().await")
             .expect("ensure_session_started takes the spawn gate");
@@ -4123,7 +4163,7 @@ mod tests {
              the one spawn path is `ensure_session_started`"
         );
         let started = prod
-            .split("pub async fn ensure_session_started")
+            .split("async fn ensure_session_started_inner")
             .nth(1)
             .expect("ensure_session_started exists");
         assert!(
@@ -4201,9 +4241,9 @@ mod tests {
             .next()
             .expect("a split always yields a first part");
         let started = prod
-            .split("pub async fn ensure_session_started")
+            .split("async fn ensure_session_started_inner(")
             .nth(1)
-            .expect("ensure_session_started exists")
+            .expect("ensure_session_started_inner exists")
             .split("\n    pub ")
             .next()
             .expect("a split always yields a first part");
@@ -4211,9 +4251,10 @@ mod tests {
             .find("refuse_closed(")
             .expect("the spawn path applies the closed-row refusal");
         let spawn = started
-            .find("spawn_existing_session(")
+            .find("spawn_existing_for_start(")
             .expect("the spawn path still spawns");
         assert!(refuse < spawn, "the refusal is read BEFORE anything is spawned");
+        assert!(prod.contains("spawn_existing_session(session_id, &self.paths"), "the shared starter must retain the native spawn wire");
 
         let reopen = prod
             .split("pub async fn reopen_session")
