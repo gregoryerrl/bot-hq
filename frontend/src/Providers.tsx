@@ -110,6 +110,11 @@ const FINDINGS_KEYS = ["list_session_findings"] as const;
 // session. The spawn's first observable event is the agent's health flip, so
 // the roster refetches on `session:agent_health` and on the resync sweep.
 const ROSTER_KEYS = ["list_session_participants", "get_session_participant_controls"] as const;
+const CONFIGURATION_KEYS = [
+  ...MODEL_KEYS, ...ROSTER_KEYS, "list_roles", "get_app_setting",
+  "get_general_policy", "get_project_policy", "get_session_policy",
+  "get_tool_gate_keywords", "get_session_tool_gate",
+] as const;
 // Plugin registry: install / enable / disable / uninstall / crash all change
 // `list_installed_plugins`, which the tab row (Shell) and the manager panel
 // share as one cache entry. Round 8: the two components each carried their own
@@ -276,6 +281,9 @@ function GlobalEventSync() {
     useContextStore.setState({ bySession: {} });
     invalidate(RESYNC_KEYS);
   }, [invalidate]);
+  const onConfiguration = useCallback(() => {
+    invalidate(CONFIGURATION_KEYS);
+  }, [invalidate]);
 
   // A staged message DELIVERED clears that session's persisted composer draft
   // — for ANY session, mounted or not. `SessionView` clears the live box and
@@ -322,6 +330,7 @@ function GlobalEventSync() {
   useTauriEvent("project:changed", onProject, [onProject]);
   useTauriEvent("session:created", onSessionCreated, [onSessionCreated]);
   useTauriEvent("model:changed", onModel, [onModel]);
+  useTauriEvent("configuration:changed", onConfiguration, [onConfiguration]);
   useTauriEvent("session:closed", onClose, [onClose]);
   useTauriEvent("session:agent_health", onHealth, [onHealth]);
   useTauriEvent("session:agent_context", onAgentContext, [onAgentContext]);

@@ -9,6 +9,9 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AppControlRequest {
+    Admin { request: super::application_admin::AdminRequest },
+    ChangeParticipant { session_id: String, request_id: String, revision: i64, request: crate::storage::ParticipantChangeRequest },
+    CancelParticipantChange { session_id: String, request_id: String },
     Create {
         session_id: String,
         title: String,
@@ -75,6 +78,9 @@ pub(crate) enum AppControlRequest {
 impl AppControlRequest {
     fn identity(&self) -> (&'static str, Option<&str>) {
         match self {
+            Self::Admin { request } => { let (op, target, _) = request.identity(); (op, target) },
+            Self::ChangeParticipant { session_id, .. } => ("change_participant", Some(session_id)),
+            Self::CancelParticipantChange { session_id, .. } => ("cancel_participant_change", Some(session_id)),
             Self::Create { session_id, .. } => ("create", Some(session_id)),
             Self::Start { session_id } => ("start", Some(session_id)),
             Self::Resume { session_id } => ("resume", Some(session_id)),
@@ -147,6 +153,8 @@ impl SignalingBridge {
         // Capture the runtime/Pause ticket before even the audit INSERT can
         // queue behind another writer. A later Resume cannot renew this call.
         let claim = match &request {
+            AppControlRequest::ChangeParticipant { session_id, .. } | AppControlRequest::CancelParticipantChange { session_id, .. } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
+            AppControlRequest::Admin { request } if request.identity().2 => Some(self.control_message_ticket(actor.clone(), proof, request.identity().1.unwrap_or(source_session).to_string()).await?),
             AppControlRequest::Pause { session_id } | AppControlRequest::Close { session_id, .. } | AppControlRequest::Reopen { session_id } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Create { session_id, .. } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
             AppControlRequest::Start { session_id } | AppControlRequest::Resume { session_id } => Some(self.control_message_ticket(actor.clone(), proof, session_id.clone()).await?),
@@ -172,6 +180,8 @@ impl SignalingBridge {
             .start_control_audit(&actor, target.as_deref(), operation)
             .await?;
         let result = match request {
+            op @ (AppControlRequest::ChangeParticipant { .. } | AppControlRequest::CancelParticipantChange { .. }) => self.control_participants(op, claim.as_ref().unwrap()).await,
+            AppControlRequest::Admin { request } => self.control_admin(&storage, request, claim.as_ref(), audit).await,
             op @ (AppControlRequest::Pause { .. } | AppControlRequest::Close { .. } | AppControlRequest::Reopen { .. }) => self.control_lifecycle(&storage, op, claim.as_ref().unwrap(), audit).await,
             AppControlRequest::Create { session_id, title, repo_path, project, participants, use_worktree } => {
                 self.control_create(crate::tauri_cmd::sessions::SessionCreateInput {
@@ -234,6 +244,18 @@ impl SignalingBridge {
         result
     }
 
+    async fn control_participants(&self, request: AppControlRequest, claim: &crate::signaling::ControlClaim) -> Result<Value> {
+        let core = self.app_state.get().and_then(Weak::upgrade).context("application control is not connected to the runtime")?;
+        match request {
+            AppControlRequest::ChangeParticipant { session_id, request_id, revision, request } => {
+                let row = core.change_participant_controlled(&session_id, &request_id, revision, request, claim.clone()).await?;
+                serde_json::to_value(crate::tauri_cmd::participant_changes::ParticipantChangeView::try_from(row)?).map_err(Into::into)
+            }
+            AppControlRequest::CancelParticipantChange { session_id, request_id } => Ok(json!({"cancelled":core.cancel_participant_change_controlled(&session_id, &request_id, claim).await?})),
+            _ => anyhow::bail!("not a participant operation"),
+        }
+    }
+
     async fn control_lifecycle(&self, storage: &Storage, request: AppControlRequest, claim: &crate::signaling::ControlClaim, audit: i64) -> Result<Value> {
         let core = self.app_state.get().and_then(Weak::upgrade)
             .context("application control is not connected to the runtime")?;
@@ -279,6 +301,8 @@ impl SignalingBridge {
     async fn control_read(&self, storage: &Storage, request: AppControlRequest) -> Result<Value> {
         use AppControlRequest::*;
         let value = match request {
+            ChangeParticipant { .. } | CancelParticipantChange { .. } => anyhow::bail!("participant changes are write operations"),
+            Admin { .. } => anyhow::bail!("admin requests use the configuration facade"),
             Create { .. } => anyhow::bail!("creation is a write operation"),
             Start { .. } | Resume { .. } | Pause { .. } | Close { .. } | Reopen { .. } => anyhow::bail!("lifecycle is a write operation"),
             Send { .. } => anyhow::bail!("send is a write operation"),

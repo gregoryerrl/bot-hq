@@ -104,6 +104,18 @@ describe("Providers — the slot-shaped runtime wire", () => {
     expect(client!.getQueryState(key)?.isInvalidated).toBe(true);
   });
 
+  it("refreshes configuration queries after a delegated settings change", async () => {
+    let client: import("@tanstack/react-query").QueryClient | undefined;
+    function Probe() { client = useQueryClient(); return null; }
+    render(<Providers><Probe /></Providers>);
+    await waitFor(() => expect(handlers.has("configuration:changed")).toBe(true));
+    client!.setQueryData(["list_roles"], [{ id: 1 }]);
+    client!.setQueryData(["get_session_policy", "s1"], { push_gate: "ask" });
+    emit("configuration:changed", {});
+    expect(client!.getQueryState(["list_roles"])?.isInvalidated).toBe(true);
+    expect(client!.getQueryState(["get_session_policy", "s1"])?.isInvalidated).toBe(true);
+  });
+
   // issues.md #3: the composer's persisted draft is cleared by SessionView's
   // handler ONLY for the session on screen. A staged message delivered to any
   // other session left `bothq:draft:<sid>` holding the sent text, and the box

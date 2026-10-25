@@ -175,6 +175,7 @@ pub fn get_role_default_prose(slug: String) -> Option<String> {
 
 /// What the Roles tab submits, for both create and edit.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RoleDraftInput {
     pub display_name: String,
     /// `None` on create derives the slug from `display_name`; `None` on update
@@ -251,7 +252,7 @@ fn validated_capabilities(slugs: &[String]) -> Result<(), AppError> {
 /// a field highlight; the identical refusal reaching the user from storage
 /// arrives as the `DbError` these command bodies map anyhow errors to, which is
 /// a toast carrying an anyhow chain.
-fn validated_draft(input: &RoleDraftInput) -> Result<(), AppError> {
+pub(crate) fn validated_draft(input: &RoleDraftInput) -> Result<(), AppError> {
     if input.display_name.trim().is_empty() {
         return Err(AppError::Validation("a role needs a display name".into()));
     }
@@ -274,7 +275,7 @@ fn validated_draft(input: &RoleDraftInput) -> Result<(), AppError> {
 /// them and never the bodies — a convention, not a rule. The branch this holds
 /// is worth stepping outside it for: read the flag backwards and the role picker
 /// offers roles the user removed, which looks like the archive silently failing.
-async fn load_roles(storage: &Storage, include_archived: bool) -> Result<Vec<RoleView>, AppError> {
+pub(crate) async fn load_roles(storage: &Storage, include_archived: bool) -> Result<Vec<RoleView>, AppError> {
     let roles = if include_archived {
         storage.list_roles_including_archived().await
     } else {

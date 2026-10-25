@@ -55,21 +55,31 @@ impl Storage {
 
     /// All saved models, ordered by display name.
     pub async fn list_models(&self) -> Result<Vec<Model>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::list_models_on(&mut conn).await
+    }
+
+    pub(crate) async fn list_models_on(conn: &mut sqlx::SqliteConnection) -> Result<Vec<Model>> {
         let rows = sqlx::query_as::<_, Model>(&format!(
             "SELECT {MODEL_COLUMNS} FROM models ORDER BY display_name COLLATE NOCASE ASC"
         ))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *conn)
         .await
         .context("listing models")?;
         Ok(rows)
     }
 
     pub async fn get_model(&self, id: &str) -> Result<Option<Model>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::get_model_on(&mut conn, id).await
+    }
+
+    pub(crate) async fn get_model_on(conn: &mut sqlx::SqliteConnection, id: &str) -> Result<Option<Model>> {
         let row = sqlx::query_as::<_, Model>(&format!(
             "SELECT {MODEL_COLUMNS} FROM models WHERE id = ?"
         ))
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *conn)
         .await?;
         Ok(row)
     }
@@ -77,6 +87,11 @@ impl Storage {
     /// Insert or update a saved model by id. `created_at` is preserved on
     /// conflict; only `updated_at` advances.
     pub async fn upsert_model(&self, m: &Model) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        Self::upsert_model_on(&mut conn, m).await
+    }
+
+    pub(crate) async fn upsert_model_on(conn: &mut sqlx::SqliteConnection, m: &Model) -> Result<()> {
         let now = now_utc();
         sqlx::query(
             "INSERT INTO models \
@@ -110,7 +125,7 @@ impl Storage {
         // set it) is the pre-0102 meaning, claude-code, written out in full so
         // the column never holds an empty string.
         .bind(m.runtime().as_str())
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .with_context(|| format!("upserting model {}", m.id))?;
         Ok(())
@@ -141,9 +156,14 @@ impl Storage {
     }
 
     pub async fn delete_model(&self, id: &str) -> Result<u64> {
+        let mut conn = self.pool.acquire().await?;
+        Self::delete_model_on(&mut conn, id).await
+    }
+
+    pub(crate) async fn delete_model_on(conn: &mut sqlx::SqliteConnection, id: &str) -> Result<u64> {
         let res = sqlx::query("DELETE FROM models WHERE id = ?")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .with_context(|| format!("deleting model {id}"))?;
         Ok(res.rows_affected())
@@ -188,13 +208,18 @@ impl Storage {
     }
 
     pub async fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let mut conn = self.pool.acquire().await?;
+        Self::set_setting_on(&mut conn, key, value).await
+    }
+
+    pub(crate) async fn set_setting_on(conn: &mut sqlx::SqliteConnection, key: &str, value: &str) -> Result<()> {
         sqlx::query(
             "INSERT INTO app_settings (key, value) VALUES (?, ?) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
         .bind(key)
         .bind(value)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .with_context(|| format!("setting app_setting {key}"))?;
         Ok(())

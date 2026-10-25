@@ -186,6 +186,17 @@ impl AppState {
 
     pub async fn cancel_participant_change(&self, session: &str, id: &str) -> Result<bool> {
         let cancelled = self.storage.cancel_participant_change(session, id).await?;
+        self.signal_participant_change_cancelled(session, id, cancelled).await;
+        Ok(cancelled)
+    }
+
+    pub(crate) async fn cancel_participant_change_controlled(&self, session: &str, id: &str, claim: &crate::signaling::ControlClaim) -> Result<bool> {
+        let cancelled = self.bridge.cancel_controlled_participant_change(claim, session, id).await?;
+        self.signal_participant_change_cancelled(session, id, cancelled).await;
+        Ok(cancelled)
+    }
+
+    async fn signal_participant_change_cancelled(&self, session: &str, id: &str, cancelled: bool) {
         if cancelled {
             let sessions = self.sessions.lock().await;
             if let Some(run) = sessions
@@ -196,7 +207,6 @@ impl AppState {
                 run.cancel();
             }
         }
-        Ok(cancelled)
     }
 
     pub(crate) async fn start_participant_change(
@@ -207,6 +217,14 @@ impl AppState {
         request: ParticipantChangeRequest,
         services: SpawnServices,
     ) -> Result<ParticipantChange> {
+        self.start_participant_change_inner(session, id, revision, request, services, None).await
+    }
+
+    pub(crate) async fn change_participant_controlled(self: &Arc<Self>, session: &str, id: &str, revision: i64, request: ParticipantChangeRequest, claim: crate::signaling::ControlClaim) -> Result<ParticipantChange> {
+        self.start_participant_change_inner(session, id, revision, request, SpawnServices::native(), Some(Arc::new(claim))).await
+    }
+
+    async fn start_participant_change_inner(self: &Arc<Self>, session: &str, id: &str, revision: i64, request: ParticipantChangeRequest, services: SpawnServices, control: Option<Arc<crate::signaling::ControlClaim>>) -> Result<ParticipantChange> {
         let _lifecycle = self.lifecycle_lock(session).lock_owned().await;
         let duplicate = {
             let sessions = self.sessions.lock().await;
@@ -225,18 +243,17 @@ impl AppState {
         };
         // A duplicate ID still validates the exact request; the DB call does
         // not occupy the global map while it waits for a writer.
-        let row = self
-            .storage
-            .request_participant_change(
-                session,
-                id,
-                revision,
-                request,
-                ParticipantChangeOrigin::User,
-            )
-            .await?;
+        let row = match control.as_deref() {
+            Some(claim) => self.bridge.request_controlled_participant_change(claim, session, id, revision, request).await?,
+            None => self.storage.request_participant_change(session, id, revision, request, ParticipantChangeOrigin::User).await?,
+        };
         if duplicate || row.status != "pending" {
             return Ok(row);
+        }
+        if let Some(claim) = control.as_deref() {
+            crate::core::post_system_notice(&self.storage, Some(self.bridge.as_ref()), session,
+                crate::storage::MessageKind::SystemNotice,
+                format!("Participant change {} requested by delegated controller {} of {}. It will apply at a safe turn boundary.", row.id, claim.actor.slug, claim.actor.session_id), None).await;
         }
         let ring = self
             .bridge
@@ -255,7 +272,7 @@ impl AppState {
         tokio::spawn(async move {
             let _completion = completion;
             if let Err(error) = this
-                .run_participant_change(&row_for_worker, &run, &context, &services)
+                .run_participant_change(&row_for_worker, &run, &context, &services, control.as_deref())
                 .await
             {
                 // Raw provider errors may include configuration/credentials.
@@ -364,6 +381,7 @@ impl AppState {
         run: &ChangeRun,
         context: &LiveContext,
         services: &SpawnServices,
+        control: Option<&crate::signaling::ControlClaim>,
     ) -> Result<()> {
         let boundary = tokio::select! {
             biased;
@@ -396,12 +414,25 @@ impl AppState {
         }
         let authority = self.bridge.participant_control_lock(&row.session_id).await;
         let _authority = authority.lock().await;
-        if self
-            .storage
-            .claim_participant_change(&row.session_id, &row.id)
-            .await?
-            .is_none()
-        {
+        let claimed = match control {
+            Some(claim) => self.bridge.claim_controlled_participant_change(claim, &row.session_id, &row.id).await,
+            None => self.storage.claim_participant_change(&row.session_id, &row.id).await,
+        };
+        let claimed = match claimed {
+            Ok(row) => row,
+            Err(error) => {
+                self.storage.cancel_participant_change(&row.session_id, &row.id).await?;
+                let error = crate::policy::secret_scan::redact_string(error.to_string());
+                sqlx::query("UPDATE session_participant_changes SET error = ? WHERE id = ? AND status = 'cancelled'")
+                    .bind(&error).bind(&row.id).execute(self.storage.pool()).await?;
+                crate::core::post_system_notice(&self.storage, Some(self.bridge.as_ref()), &row.session_id,
+                    crate::storage::MessageKind::SystemNotice,
+                    format!("Participant change {} was cancelled before applying: {error}", row.id), None).await;
+                boundary.release().await.map_err(anyhow::Error::msg)?;
+                return Err(anyhow::anyhow!(error));
+            }
+        };
+        if claimed.is_none() {
             boundary.release().await.map_err(anyhow::Error::msg)?;
             return Ok(());
         }

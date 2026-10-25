@@ -79,7 +79,7 @@ impl Storage {
     pub async fn finish_control_audit(&self, id: i64, error: Option<&str>) -> Result<()> {
         let detail = error.map(|s| crate::policy::secret_scan::redact_string(s.to_string()));
         let detail = detail.map(|s| s[..crate::text::floor_char_boundary(&s, 2000)].to_string());
-        sqlx::query("UPDATE application_control_audit SET outcome = ?, detail = ?, finished_at = ? WHERE id = ? AND outcome = 'started'")
+        sqlx::query("UPDATE application_control_audit SET outcome = ?, detail = COALESCE(?, detail), finished_at = ? WHERE id = ? AND outcome = 'started'")
             .bind(if error.is_some() { "failed" } else { "ok" }).bind(detail).bind(now_utc()).bind(id)
             .execute(&self.pool).await?;
         Ok(())

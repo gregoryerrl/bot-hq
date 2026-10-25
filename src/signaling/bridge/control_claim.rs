@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::ControlActor;
 use anyhow::Context;
 
+#[derive(Clone)]
 pub(crate) struct ControlClaim {
     pub actor: ControlActor,
     proof: McpTokenProof,
@@ -163,7 +164,7 @@ impl SignalingBridge {
         Ok(claim)
     }
 
-    async fn begin_session_control(
+    pub(super) async fn begin_session_control(
         &self,
         claim: &ControlClaim,
         id: &str,
@@ -217,6 +218,34 @@ impl SignalingBridge {
         claim.check(self)?;
         tx.commit().await?;
         Ok(())
+    }
+
+    pub(crate) async fn request_controlled_participant_change(&self, claim: &ControlClaim, session: &str, id: &str, revision: i64, request: crate::storage::ParticipantChangeRequest) -> Result<crate::storage::ParticipantChange> {
+        let mut tx = self.begin_session_control(claim, session).await?;
+        let origin = crate::storage::ParticipantChangeOrigin::Agent { session_id: claim.actor.session_id.clone(), participant_id: claim.actor.participant_id };
+        let row = Storage::request_participant_change_on(&mut tx, session, id, revision, request, origin).await?;
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    pub(crate) async fn claim_controlled_participant_change(&self, claim: &ControlClaim, session: &str, id: &str) -> Result<Option<crate::storage::ParticipantChange>> {
+        let mut tx = self.begin_session_control(claim, session).await?;
+        let row = Storage::claim_participant_change_on(&mut tx, session, id).await?;
+        if let Some(row) = &row {
+            anyhow::ensure!(row.origin()? == crate::storage::ParticipantChangeOrigin::Agent { session_id: claim.actor.session_id.clone(), participant_id: claim.actor.participant_id }, "participant change belongs to another caller");
+        }
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    pub(crate) async fn cancel_controlled_participant_change(&self, claim: &ControlClaim, session: &str, id: &str) -> Result<bool> {
+        let mut tx = self.begin_session_control(claim, session).await?;
+        let cancelled = Storage::cancel_participant_change_on(&mut tx, session, id).await?;
+        claim.check(self)?;
+        tx.commit().await?;
+        Ok(cancelled)
     }
 
     pub(crate) async fn claim_delegated_answer(

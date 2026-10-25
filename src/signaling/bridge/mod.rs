@@ -35,6 +35,7 @@ use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
 pub(crate) mod application_control;
+pub(crate) mod application_admin;
 pub(crate) mod control_claim;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
@@ -180,6 +181,8 @@ impl std::fmt::Debug for McpTokenProof {
 
 #[derive(Debug, Clone)]
 pub enum SignalingEvent {
+    /// Configuration saved outside the desktop editor.
+    ConfigurationChanged,
     PendingChoice(PendingChoice),
     AwaitingUser {
         session_id: String,

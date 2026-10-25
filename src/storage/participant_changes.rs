@@ -171,10 +171,14 @@ impl Storage {
 
     /// Persist intent only. BEGIN IMMEDIATE makes validation and the one-open
     /// request invariant atomic across independent callers/connections.
-    pub async fn request_participant_change(
-        &self, session_id: &str, id: &str, expected_revision: i64,
-        mut request: ParticipantChangeRequest, origin: ParticipantChangeOrigin,
-    ) -> Result<ParticipantChange> {
+    pub async fn request_participant_change(&self, session_id: &str, id: &str, expected_revision: i64, request: ParticipantChangeRequest, origin: ParticipantChangeOrigin) -> Result<ParticipantChange> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = Self::request_participant_change_on(&mut tx, session_id, id, expected_revision, request, origin).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn request_participant_change_on(conn: &mut SqliteConnection, session_id: &str, id: &str, expected_revision: i64, mut request: ParticipantChangeRequest, origin: ParticipantChangeOrigin) -> Result<ParticipantChange> {
         if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
             anyhow::bail!("invalid participant change request ID");
         }
@@ -183,26 +187,23 @@ impl Storage {
         }
         let request_json = serde_json::to_string(&request)?;
         let origin_json = serde_json::to_string(&origin)?;
-        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        if let Some(existing) = read_change(&mut tx, id).await? {
+        if let Some(existing) = read_change(conn, id).await? {
             if existing.session_id != session_id || existing.expected_revision != expected_revision
                 || existing.request_json != request_json || existing.origin_json != origin_json {
                 anyhow::bail!("request ID already belongs to a different participant change");
             }
-            tx.commit().await?;
             return Ok(existing);
         }
-        validate_request(&mut tx, session_id, expected_revision, &request).await?;
-        let fingerprint = selection_fingerprint(&mut tx, &request).await?;
+        validate_request(conn, session_id, expected_revision, &request).await?;
+        let fingerprint = selection_fingerprint(conn, &request).await?;
         let busy: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM session_participant_changes WHERE session_id = ? AND status IN ('pending', 'applying'))",
-        ).bind(session_id).fetch_one(&mut *tx).await?;
+        ).bind(session_id).fetch_one(&mut *conn).await?;
         if busy { anyhow::bail!("this session already has a pending participant change; finish or cancel it first"); }
         sqlx::query("INSERT INTO session_participant_changes (id, session_id, expected_revision, selection_fingerprint, request_json, origin_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
             .bind(id).bind(session_id).bind(expected_revision).bind(fingerprint).bind(request_json).bind(origin_json).bind(now_utc())
-            .execute(&mut *tx).await?;
-        let row = read_change(&mut tx, id).await?.context("participant change disappeared")?;
-        tx.commit().await?;
+            .execute(&mut *conn).await?;
+        let row = read_change(conn, id).await?.context("participant change disappeared")?;
         Ok(row)
     }
 
@@ -220,33 +221,44 @@ impl Storage {
     /// one claimant wins; a request invalidated while waiting becomes failed.
     pub async fn claim_participant_change(&self, session_id: &str, id: &str) -> Result<Option<ParticipantChange>> {
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let Some(row) = read_change(&mut tx, id).await?.filter(|row| row.session_id == session_id && row.status == "pending") else {
+        let result = Self::claim_participant_change_on(&mut tx, session_id, id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn claim_participant_change_on(conn: &mut SqliteConnection, session_id: &str, id: &str) -> Result<Option<ParticipantChange>> {
+        let Some(row) = read_change(conn, id).await?.filter(|row| row.session_id == session_id && row.status == "pending") else {
             return Ok(None);
         };
         let request = row.request()?;
         let validation = async {
-            validate_request(&mut tx, session_id, row.expected_revision, &request).await?;
-            if selection_fingerprint(&mut tx, &request).await? != row.selection_fingerprint {
+            validate_request(conn, session_id, row.expected_revision, &request).await?;
+            if selection_fingerprint(conn, &request).await? != row.selection_fingerprint {
                 anyhow::bail!("the selected role or model settings changed; refresh and try again");
             }
             Ok::<(), anyhow::Error>(())
         }.await;
         if let Err(error) = validation {
             sqlx::query("UPDATE session_participant_changes SET status = 'failed', error = ?, finished_at = ? WHERE id = ?")
-                .bind(error.to_string()).bind(now_utc()).bind(id).execute(&mut *tx).await?;
-            tx.commit().await?;
+                .bind(error.to_string()).bind(now_utc()).bind(id).execute(&mut *conn).await?;
             return Ok(None);
         }
         sqlx::query("UPDATE session_participant_changes SET status = 'applying', started_at = ? WHERE id = ?")
-            .bind(now_utc()).bind(id).execute(&mut *tx).await?;
-        let row = read_change(&mut tx, id).await?;
-        tx.commit().await?;
+            .bind(now_utc()).bind(id).execute(&mut *conn).await?;
+        let row = read_change(conn, id).await?;
         Ok(row)
     }
 
     pub async fn cancel_participant_change(&self, session_id: &str, id: &str) -> Result<bool> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = Self::cancel_participant_change_on(&mut tx, session_id, id).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn cancel_participant_change_on(conn: &mut SqliteConnection, session_id: &str, id: &str) -> Result<bool> {
         Ok(sqlx::query("UPDATE session_participant_changes SET status = 'cancelled', finished_at = ? WHERE id = ? AND session_id = ? AND status = 'pending'")
-            .bind(now_utc()).bind(id).bind(session_id).execute(&self.pool).await?.rows_affected() == 1)
+            .bind(now_utc()).bind(id).bind(session_id).execute(&mut *conn).await?.rows_affected() == 1)
     }
 
     /// None = commit a prepared configuration; Some = atomically restore its

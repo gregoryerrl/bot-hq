@@ -147,8 +147,19 @@ model side by side. Migration 0102 applies on first launch.
   Controllers can now pause, close/archive and reopen sessions through the normal
   application controls. Self-pause and self-close record their outcomes before
   interruption; reopening preserves history and phase and leaves an explicit
-  halt for the next direction. Configuration/roster administration and event
-  watches are still being connected.
+  halt for the next direction. Driver administration now covers models, roles,
+  app settings, policies and Tool-Gate keywords, using the desktop validation
+  rules and preserving frozen session settings. Saved model tokens are kept
+  unless explicitly replaced or cleared; an endpoint change requires explicit
+  credential intent. Partial edits preserve unmentioned role instructions,
+  account/model fields and policy rules, and role saves can reject stale hashes.
+  Audit records identify the changed role, model, setting or policy scope.
+  Internal telemetry/preset state cannot be changed through the generic settings
+  endpoint. Roster changes use the same safe
+  boundary as the Session Settings controls; revocation while queued cancels
+  them before a process is replaced and posts a cancellation follow-up.
+  Configuration changes refresh the desktop.
+  Event watches, relay and shared-webview controls are still being connected.
 
 
 - **Agents can retrieve older records from their own session.** The

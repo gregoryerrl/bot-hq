@@ -394,6 +394,245 @@ async fn driver_send_preserves_pause_human_stage_and_retry_tombstones() {
 }
 
 #[tokio::test]
+async fn driver_admin_partial_policy_save_preserves_unmentioned_rules() {
+    let f = driver_fixture(false).await;
+    let scope = serde_json::json!({"kind":"global"});
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":scope,"policy":{"push_gate":"ask","forbidden_in_commits":["retain-this-rule"]}})).await.unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":scope,"policy":{"push_gate":"auto"}})).await.unwrap();
+    let policy = admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":scope})).await.unwrap();
+    assert_eq!(policy["forbidden_in_commits"], serde_json::json!(["retain-this-rule"]));
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":scope,"policy":{"forbidden_in_commits":[]}})).await.unwrap();
+    let cleared = admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":scope})).await.unwrap();
+    assert_eq!(cleared["forbidden_in_commits"], serde_json::json!([]));
+    assert_eq!(cleared["push_gate"], "auto");
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_partial_role_save_preserves_prose_and_default_model() {
+    let f = driver_fixture(false).await;
+    let role = f.state.storage.create_role(&crate::storage::RoleDraft {
+        display_name: "Keep my instructions".into(), description_prompt: Some("User-authored instructions must survive".into()),
+        default_model_id: Some("old".into()), capabilities: "[\"read_channel\"]".into(), participation_mode: "active".into(), ..Default::default()
+    }).await.unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_role","id":role.id,"draft":{
+        "display_name":role.display_name,"capabilities":["read_channel","post_channel"],"participation_mode":"active"
+    }})).await.unwrap();
+    let after = f.state.storage.role_by_id(role.id).await.unwrap().unwrap();
+    assert_eq!(after.description_prompt, role.description_prompt);
+    assert_eq!(after.default_model_id, role.default_model_id);
+    let read = admin_rpc(&f.state, serde_json::json!({"operation":"role","id":role.id})).await.unwrap();
+    sqlx::query("UPDATE roles SET description_prompt = 'New desktop edit' WHERE id = ?").bind(role.id).execute(f.state.storage.pool()).await.unwrap();
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"save_role","id":role.id,"expected_sha256":read["sha256"],"draft":{"display_name":"Stale save"}})).await.unwrap_err().to_string().contains("changed since"));
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_role","id":role.id,"draft":{"description_prompt":null,"default_model_id":null}})).await.unwrap();
+    let cleared = f.state.storage.role_by_id(role.id).await.unwrap().unwrap();
+    assert!(cleared.description_prompt.is_none()); assert!(cleared.default_model_id.is_none());
+    assert_eq!(cleared.display_name, role.display_name);
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_partial_model_save_preserves_account_endpoint_and_window() {
+    let f = driver_fixture(false).await;
+    let mut model = f.state.storage.get_model("old").await.unwrap().unwrap();
+    model.base_url = Some("https://original.example.test".into());
+    model.auth_token = Some("stored-fixture-secret".into());
+    model.claude_config_dir = Some(f._temp.path().join("account-slot").to_string_lossy().to_string());
+    model.context_window = Some(1_050_000);
+    model.cli_settings = Some("{\"modelOverrides\":{\"old\":\"new\"}}".into());
+    f.state.storage.upsert_model(&model).await.unwrap();
+    let mut patch = serde_json::to_value(crate::tauri_cmd::models::ModelView::from(model.clone())).unwrap();
+    for key in ["base_url","auth_token","claude_config_dir","context_window","cli_settings"] { patch.as_object_mut().unwrap().remove(key); }
+    patch["display_name"] = "Rename only".into();
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":patch})).await.unwrap();
+    let after = f.state.storage.get_model("old").await.unwrap().unwrap();
+    assert_eq!(after.base_url, model.base_url);
+    assert_eq!(after.claude_config_dir, model.claude_config_dir);
+    assert_eq!(after.context_window, model.context_window);
+    assert_eq!(after.cli_settings, model.cli_settings);
+    assert_eq!(after.auth_token, model.auth_token);
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","context_window":null,"cli_settings":null,"claude_config_dir":null}})).await.unwrap();
+    let cleared = f.state.storage.get_model("old").await.unwrap().unwrap();
+    assert!(cleared.context_window.is_none()); assert!(cleared.cli_settings.is_none()); assert!(cleared.claude_config_dir.is_none());
+    assert_eq!(cleared.base_url, model.base_url); assert_eq!(cleared.auth_token, model.auth_token);
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_endpoint_changes_require_explicit_credential_intent() {
+    let f = driver_fixture(false).await;
+    let mut old = f.state.storage.get_model("old").await.unwrap().unwrap();
+    old.auth_token = Some("private-original-fixture-token".into());
+    old.base_url = Some("https://original.example.test".into());
+    f.state.storage.upsert_model(&old).await.unwrap();
+    for patch in [serde_json::json!({"id":"old","base_url":"https://different.example.test"}),
+        serde_json::json!({"id":"old","base_url":"https://different.example.test","auth_token":null}),
+        serde_json::json!({"id":"old","provider":"different-provider"}),
+        serde_json::json!({"id":"old","runtime":"codex","claude_config_dir":f._temp.path().join("codex-slot")})] {
+        let error = admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":patch})).await.unwrap_err();
+        assert!(error.to_string().contains("re-supplying"), "{error}");
+        let kept = f.state.storage.get_model("old").await.unwrap().unwrap();
+        assert_eq!(kept.auth_token, old.auth_token); assert_eq!(kept.base_url, old.base_url);
+    }
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","base_url":"https://different.example.test","auth_token":"explicit-new-fixture-token"}})).await.unwrap();
+    assert_eq!(f.state.storage.get_model("old").await.unwrap().unwrap().auth_token.as_deref(), Some("explicit-new-fixture-token"));
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"old","base_url":null},"clear_auth_token":true})).await.unwrap();
+    assert!(f.state.storage.get_model("old").await.unwrap().unwrap().auth_token.is_none());
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_rejects_internal_settings_and_records_the_changed_object() {
+    let f = driver_fixture(false).await;
+    for key in ["telemetry_enabled","telemetry_endpoint","telemetry_install_id","role_preset_offer","policy_preset_offer","tool_gate_preset_offer"] {
+        let before = f.state.storage.get_setting(key).await.unwrap();
+        let error = admin_rpc(&f.state, serde_json::json!({"operation":"set_setting","key":key,"value":"0"})).await.unwrap_err();
+        assert!(error.to_string().contains("dedicated application control"));
+        assert_eq!(f.state.storage.get_setting(key).await.unwrap(), before);
+        assert!(admin_rpc(&f.state, serde_json::json!({"operation":"setting","key":key})).await.is_err());
+    }
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"set_setting","key":"adherence_nudges","value":"false"})).await.is_err());
+    let result = driver_rpc(&f.state, serde_json::json!({"action":"admin","request":{"operation":"save_role","draft":{"display_name":"Audited controller","capabilities":["read_channel","control_bot_hq"],"participation_mode":"active"}}})).await.unwrap();
+    let detail: String = sqlx::query_scalar("SELECT detail FROM application_control_audit WHERE id = ?").bind(result["audit_id"].as_i64().unwrap()).fetch_one(f.state.storage.pool()).await.unwrap();
+    let target: serde_json::Value = serde_json::from_str(&detail).unwrap();
+    assert_eq!(target["resource"], "role"); assert_eq!(target["id"], result["result"]["id"]);
+    assert_eq!(target["slug"], result["result"]["slug"]);
+    assert!(target["capabilities"].as_array().unwrap().iter().any(|v|v == "control_bot_hq"));
+    let notice: String = sqlx::query_scalar("SELECT content FROM messages WHERE session_id = 's1' AND content LIKE 'Configuration action save_role%' ORDER BY id DESC LIMIT 1").fetch_one(f.state.storage.pool()).await.unwrap();
+    assert!(notice.contains(&detail));
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_validates_edits_preserves_credentials_and_can_revoke_itself() {
+    let f = driver_fixture(false).await;
+    let s = &f.state.storage;
+    for request in [serde_json::json!({"operation":"models"}), serde_json::json!({"operation":"roles"}), serde_json::json!({"operation":"capabilities"}), serde_json::json!({"operation":"role","id":f.rows[0].role_id})] {
+        admin_rpc(&f.state, request).await.unwrap();
+    }
+    sqlx::query("UPDATE models SET auth_token = 'fixture-credential' WHERE id = 'old'").execute(s.pool()).await.unwrap();
+    let read = admin_rpc(&f.state, serde_json::json!({"operation":"model","id":"old"})).await.unwrap();
+    assert_eq!(read["auth_configured"], true); assert!(read["model"]["auth_token"].is_null());
+    let mut model = read["model"].clone(); model["display_name"] = "Renamed".into();
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":model})).await.unwrap();
+    assert_eq!(s.get_model("old").await.unwrap().unwrap().auth_token.as_deref(), Some("fixture-credential"));
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":model,"clear_auth_token":true})).await.unwrap();
+    assert!(s.get_model("old").await.unwrap().unwrap().auth_token.is_none());
+    let mut bad = model.clone(); bad["runtime"] = "mistyped".into();
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":bad})).await.is_err());
+    let mut bad = model; bad["claude_config_dir"] = "relative/slot".into();
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":bad})).await.is_err());
+    let draft = serde_json::json!({"display_name":"Support", "capabilities":["read_channel"],"participation_mode":"active"});
+    let saved = admin_rpc(&f.state, serde_json::json!({"operation":"save_role","draft":draft})).await.unwrap();
+    let id = saved["id"].as_i64().unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"archive_role","id":id,"archived":true})).await.unwrap();
+    assert!(s.role_by_id(id).await.unwrap().unwrap().archived);
+    let mut bad = draft; bad["capabilities"] = serde_json::json!(["invented_capability"]);
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"save_role","draft":bad})).await.is_err());
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_setting","key":"worktree_default","value":"0"})).await.unwrap();
+    assert_eq!(admin_rpc(&f.state, serde_json::json!({"operation":"setting","key":"worktree_default"})).await.unwrap()["value"], "0");
+    let role = s.role_by_id(f.rows[0].role_id.unwrap()).await.unwrap().unwrap();
+    let draft = serde_json::json!({"display_name":role.display_name,"slug":role.slug,"description_prompt":role.description_prompt,"capabilities":["read_channel"],"participation_mode":role.participation_mode,"default_model_id":role.default_model_id});
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_role","id":role.id,"draft":draft})).await.unwrap();
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"models"})).await.is_err(), "current-role revocation must affect the next call");
+    f.end().await;
+}
+
+async fn admin_rpc(state: &Arc<AppState>, request: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    driver_rpc(state, serde_json::json!({"action":"admin","request":request})).await.map(|r|r["result"].clone())
+}
+
+#[tokio::test]
+async fn driver_admin_policy_and_tool_gate_preserve_each_other_and_frozen_sessions() {
+    let f = driver_fixture(false).await;
+    let global = serde_json::json!({"kind":"global"});
+    let session = serde_json::json!({"kind":"session","session_id":"s1"});
+    let keywords = serde_json::json!([{"keyword":"gh","mode":"gate"}]);
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":session,"policy":{"pushgate":"auto"}})).await.is_err());
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_tool_gate","scope":global,"keywords":keywords})).await.unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":session,"policy":{"push_gate":"ask","force_push":"blocked"}})).await.unwrap();
+    assert_eq!(admin_rpc(&f.state, serde_json::json!({"operation":"tool_gate","scope":session})).await.unwrap(), keywords);
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_tool_gate","scope":session,"keywords":[{"keyword":"curl","mode":"auto_allow"}]})).await.unwrap();
+    assert_eq!(admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":session})).await.unwrap()["push_gate"], "ask");
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":global,"policy":{"push_gate":"auto"}})).await.unwrap();
+    assert_eq!(admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":session})).await.unwrap()["push_gate"], "ask");
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":{"kind":"project","project":"../escape"},"policy":{}})).await.is_err());
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"tool_gate","scope":{"kind":"session","session_id":"../escape"}})).await.is_err());
+    let notices: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE session_id = 's1' AND origin = 'system' AND content LIKE 'Configuration action %delegated controller hands of s1%'").fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(notices, 4);
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_admin_queued_sql_and_file_writes_lose_to_pause_and_revocation() {
+    for file in [false, true] {
+        for revoke in [false, true] {
+            let f = driver_fixture(true).await;
+            let policy_path = crate::policy::general_policy_path(&f.state.paths.data_dir);
+            let before = std::fs::read(&policy_path).ok();
+            let setting_before = f.state.storage.get_setting("worktree_default").await.unwrap();
+            let reached = Arc::new(tokio::sync::Notify::new());
+            f.state.bridge.observe_control_tickets(reached.clone());
+            let mut held = f.state.storage.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+            let state = f.state.clone();
+            let request = tokio::spawn(async move { admin_rpc(&state, if file {
+                serde_json::json!({"operation":"set_policy","scope":{"kind":"global"},"policy":{"push_gate":"auto"}})
+            } else { serde_json::json!({"operation":"set_setting","key":"worktree_default","value":"0"}) }).await });
+            tokio::time::timeout(Duration::from_secs(2), reached.notified()).await.unwrap();
+            if revoke {
+                sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(f.rows[0].role_id).execute(&mut *held).await.unwrap();
+            } else {
+                let activity = f.state.sessions.lock().await["s1"].activity.clone();
+                activity.set_paused(true); activity.set_paused(false);
+            }
+            held.commit().await.unwrap();
+            assert!(request.await.unwrap().is_err());
+            assert_eq!(f.state.storage.get_setting("worktree_default").await.unwrap(), setting_before);
+            assert_eq!(std::fs::read(&policy_path).ok(), before);
+            f.end().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn driver_roster_changes_keep_provenance_and_recheck_the_reserved_boundary() {
+    for mode in ["apply", "revoke", "cancel"] {
+        let revoke = mode == "revoke";
+        let mut f = driver_fixture(false).await;
+        f.state.storage.post_to_channel("s1", "user", None, "text", "Existing task", None).await.unwrap();
+        f.ring.send(SequencerCommand::UserMessage { mentions:vec![], restarts_rotation:true }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), f.seats[0].input.recv()).await.unwrap().unwrap();
+        let epoch = f.state.sessions.lock().await["s1"].participants[0].turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
+        let revision = f.state.storage.roster_revision("s1").await.unwrap();
+        let args = serde_json::json!({"action":"change_participant","session_id":"s1","request_id":"delegated-remove","revision":revision,"request":{"kind":"remove","participant_id":f.rows[1].id}});
+        let response = driver_rpc(&f.state, args.clone()).await.unwrap();
+        assert_eq!(response["result"]["status"], "pending");
+        assert_eq!(driver_rpc(&f.state, args).await.unwrap()["result"]["id"], "delegated-remove");
+        assert!(!*f.seats[1].stopped.borrow());
+        let row = f.state.storage.participant_change("s1", "delegated-remove").await.unwrap().unwrap();
+        assert_eq!(row.origin().unwrap(), ParticipantChangeOrigin::Agent { session_id:"s1".into(),participant_id:f.rows[0].id });
+        if mode == "cancel" {
+            assert_eq!(driver_rpc(&f.state, serde_json::json!({"action":"cancel_participant_change","session_id":"s1","request_id":"delegated-remove"})).await.unwrap()["result"]["cancelled"], true);
+        }
+        if revoke { sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap(); }
+        f.ring.send(SequencerCommand::TurnComplete { participant_id:f.rows[0].id, epoch, ending:crate::core::sequencer::TurnEnding::Spoke }).await.unwrap();
+        let result = f.done("delegated-remove").await;
+        assert_eq!(result.status, if mode == "apply" {"applied"} else {"cancelled"});
+        assert_eq!(*f.seats[1].stopped.borrow(), mode == "apply");
+        if revoke {
+            assert!(result.error.unwrap().contains("revoked"));
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let found: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 's1' AND content LIKE 'Participant change delegated-remove was cancelled before applying:%revoked%')").fetch_one(f.state.storage.pool()).await.unwrap();
+                    if found { break; } tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+        }
+        f.end().await;
+    }
+}
+
+#[tokio::test]
 async fn driver_lifecycle_closes_archives_and_reopens_through_native_paths() {
     let f = driver_fixture(false).await;
     let s = &f.state.storage;

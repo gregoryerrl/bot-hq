@@ -671,9 +671,14 @@ impl Storage {
     /// third one. `role_id` is the participant's own answer to "which role am
     /// I", so it stays right under both.
     pub async fn role_by_id(&self, id: i64) -> Result<Option<Role>> {
+        let mut conn = self.pool.acquire().await?;
+        Self::role_by_id_on(&mut conn, id).await
+    }
+
+    pub(crate) async fn role_by_id_on(conn: &mut sqlx::SqliteConnection, id: i64) -> Result<Option<Role>> {
         let row = sqlx::query(&format!("SELECT {ROLE_COLUMNS} FROM roles WHERE id = ?"))
             .bind(id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await
             .with_context(|| format!("loading role id {id}"))?;
         Ok(row.as_ref().map(role_from_row))
@@ -685,11 +690,11 @@ impl Storage {
     /// `exclude_id` is what makes a rename idempotent: without it, saving the
     /// `hands` role with `slug: Some("hands")` would find `hands` taken — by
     /// itself — and rename it to `hands-2` on every save.
-    async fn taken_slugs(&self, exclude_id: Option<i64>) -> Result<HashSet<String>> {
+    async fn taken_slugs_on(conn: &mut sqlx::SqliteConnection, exclude_id: Option<i64>) -> Result<HashSet<String>> {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT slug FROM roles WHERE ?1 IS NULL OR id <> ?1")
                 .bind(exclude_id)
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *conn)
                 .await
                 .context("reading taken role slugs")?;
         Ok(rows.into_iter().map(|(slug,)| slug).collect())
@@ -758,18 +763,19 @@ impl Storage {
         Ok(inserted)
     }
 
-    /// are two statements.** Two creates racing on the same base name can both
-    /// read the same taken-set and pick the same suffix; the second INSERT then
-    /// fails on `roles.slug`'s UNIQUE index and this returns that error with the
-    /// slug named in the context. That is the backstop working, not the window
-    /// being closed — a caller that must not see it needs its own serialisation.
-    /// Left as-is because the only caller is a desktop tab where the two writers
-    /// would have to be two clicks in the same millisecond, and because a
-    /// constraint error is a loud, correct failure rather than a wrong row.
+    /// Role allocation and insertion share a writer transaction, including
+    /// the delegated path, so concurrent saves cannot choose the same suffix.
     pub async fn create_role(&self, draft: &RoleDraft) -> Result<Role> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = Self::create_role_on(&mut tx, draft).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn create_role_on(conn: &mut sqlx::SqliteConnection, draft: &RoleDraft) -> Result<Role> {
         let capabilities = validated_draft_capabilities(draft)?;
         let base = slugify(draft.slug.as_deref().unwrap_or(&draft.display_name));
-        let slug = first_free_slug(&base, &self.taken_slugs(None).await?);
+        let slug = first_free_slug(&base, &Self::taken_slugs_on(conn, None).await?);
         // `now_utc()` (RFC3339-Z), not the column's `datetime('now')` DEFAULT.
         // That default is what 0044 seeded `hands` and `eyes` with, so this
         // column now holds two spellings — a fact, not a claim that it does not
@@ -792,11 +798,11 @@ impl Storage {
         .bind(draft.default_model_id.as_deref())
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .with_context(|| format!("creating role {slug}"))?
         .last_insert_rowid();
-        self.role_by_id(id)
+        Self::role_by_id_on(conn, id)
             .await?
             .with_context(|| format!("role {id} vanished between insert and read"))
     }
@@ -820,13 +826,20 @@ impl Storage {
     /// window had just archived-and-recreated would report success and change
     /// nothing.
     pub async fn update_role(&self, id: i64, draft: &RoleDraft) -> Result<Role> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = Self::update_role_on(&mut tx, id, draft).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn update_role_on(conn: &mut sqlx::SqliteConnection, id: i64, draft: &RoleDraft) -> Result<Role> {
         let capabilities = validated_draft_capabilities(draft)?;
         // `None` leaves the slug alone — see `RoleDraft::slug` for why a rename
         // has to be explicit rather than derived from the display name.
         let slug = match draft.slug.as_deref() {
             Some(requested) => {
                 let base = slugify(requested);
-                Some(first_free_slug(&base, &self.taken_slugs(Some(id)).await?))
+                Some(first_free_slug(&base, &Self::taken_slugs_on(conn, Some(id)).await?))
             }
             None => None,
         };
@@ -849,14 +862,14 @@ impl Storage {
         .bind(draft.default_model_id.as_deref())
         .bind(now_utc())
         .bind(id)
-        .execute(&self.pool)
+        .execute(&mut *conn)
         .await
         .with_context(|| format!("updating role {id}"))?
         .rows_affected();
         if changed == 0 {
             anyhow::bail!("role {id} does not exist");
         }
-        self.role_by_id(id)
+        Self::role_by_id_on(conn, id)
             .await?
             .with_context(|| format!("role {id} vanished between update and read"))
     }
@@ -873,11 +886,18 @@ impl Storage {
     /// SQLite, and "the role you archived is still in the list" is exactly the
     /// bug that would produce.
     pub async fn set_role_archived(&self, id: i64, archived: bool) -> Result<()> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result = Self::set_role_archived_on(&mut tx, id, archived).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    pub(crate) async fn set_role_archived_on(conn: &mut sqlx::SqliteConnection, id: i64, archived: bool) -> Result<()> {
         let changed = sqlx::query("UPDATE roles SET archived = ?, updated_at = ? WHERE id = ?")
             .bind(i64::from(archived))
             .bind(now_utc())
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *conn)
             .await
             .with_context(|| format!("archiving role {id}"))?
             .rows_affected();

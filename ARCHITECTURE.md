@@ -943,8 +943,30 @@ outcome before killing a controller closing its own session. `reopen` shares the
 normal row/halt/phase-preserving transition and reports startup separately; its
 notice names the controller rather than the human. Reopen is refused while a
 close-out epilogue still owns teardown. All three recheck delegated authority at
-ownership, after waits. Remaining configuration/roster controls and event watches
-are still pending.
+ownership, after waits.
+`admin` exposes paged model/role inventory, chunked role prose, capability
+metadata, model and role edits/archival, app settings, global/project/session
+policy and global/session Tool-Gate lists. It shares the desktop validators and
+connection-based storage writers. SQL edits recheck authority in the writer
+transaction; file edits check it immediately before the atomic write while role
+writes remain serialized. Policy and keyword edits preserve each other's frozen
+session fields. Model reads omit the stored auth token; saving without a token
+preserves it unless `clear_auth_token` is explicit. Configuration events refresh
+the matching desktop queries. Role grants still do not widen existing snapshots.
+Delegated model/role/policy updates overlay only supplied fields on the stored
+record; explicit null clears nullable fields (the token-preservation rule is the
+exception). Role saves may supply the read hash to reject a concurrent edit.
+An endpoint/provider/runtime change cannot implicitly carry a saved token to its
+new destination. Generic setting access is limited to the three desktop KV
+settings; telemetry and preset changes require their dedicated control paths.
+Audit detail and notices identify the changed object, including resulting role
+capabilities, and a cancelled delegated roster claim posts a follow-up notice.
+`change_participant` and `cancel_participant_change` use the existing roster
+worker. The authenticated source is persisted as Agent provenance, and its
+original ticket/current grant is rechecked when the reserved boundary is claimed.
+A revocation while queued cancels intent before any runtime is retired. Dormant
+targets must be started and reread before submitting their current revision.
+Event watches, relay and shared-webview control remain pending.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

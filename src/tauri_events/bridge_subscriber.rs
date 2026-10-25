@@ -70,6 +70,10 @@ pub fn spawn_subscriber<EM, EB>(
 
 fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_event: &EB) {
     match ev {
+        SignalingEvent::ConfigurationChanged => {
+            emit_event(crate::tauri_events::types::MODEL_CHANGED, Value::Null);
+            emit_event("configuration:changed", Value::Null);
+        }
         SignalingEvent::MessagePersisted { session_id, message_id } => {
             emitter.touch(session_id, message_id);
         }

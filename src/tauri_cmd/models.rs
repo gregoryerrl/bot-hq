@@ -12,6 +12,7 @@ use tauri::Emitter;
 /// Frontend-facing shape of a saved model. `auth_token` is exposed (the desktop
 /// UI is local + trusted, like the AgentCard token field).
 #[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ModelView {
     pub id: String,
     pub display_name: String,
@@ -259,15 +260,8 @@ pub async fn upsert_model(
     app: tauri::AppHandle,
     model: ModelView,
 ) -> Result<(), AppError> {
-    let mut m: Model = model.into();
-    let runtime = validate_runtime(&m.runtime)?;
-    m.runtime = runtime.as_str().to_string();
-    m.cli_settings = validate_cli_settings(m.cli_settings.take())?;
-    m.claude_config_dir = validate_config_dir(
-        m.claude_config_dir.as_deref(),
-        crate::paths::home_dir().ok().as_deref(),
-        runtime,
-    )?;
+    let m = normalize_model(model.into())?;
+    let runtime = m.runtime();
     let rows = storage
         .list_models()
         .await
@@ -279,6 +273,19 @@ pub async fn upsert_model(
         .map_err(|e| AppError::DbError(e.to_string()))?;
     let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
     Ok(())
+}
+
+/// Validation shared by the desktop editor and delegated administration.
+pub(crate) fn normalize_model(mut m: Model) -> Result<Model, AppError> {
+    let runtime = validate_runtime(&m.runtime)?;
+    m.runtime = runtime.as_str().to_string();
+    m.cli_settings = validate_cli_settings(m.cli_settings.take())?;
+    m.claude_config_dir = validate_config_dir(
+        m.claude_config_dir.as_deref(),
+        crate::paths::home_dir().ok().as_deref(),
+        runtime,
+    )?;
+    Ok(m)
 }
 
 /// The Model dialog's one-time commands for a second account's config dir, in
