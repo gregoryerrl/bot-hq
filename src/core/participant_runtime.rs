@@ -193,6 +193,11 @@ impl AppState {
     pub(crate) async fn cancel_participant_change_controlled(&self, session: &str, id: &str, claim: &crate::signaling::ControlClaim) -> Result<bool> {
         let cancelled = self.bridge.cancel_controlled_participant_change(claim, session, id).await?;
         self.signal_participant_change_cancelled(session, id, cancelled).await;
+        if cancelled {
+            crate::core::post_system_notice(&self.storage, Some(self.bridge.as_ref()), session,
+                crate::storage::MessageKind::SystemNotice,
+                format!("Participant change {id} was cancelled by delegated controller {} of {} before applying.", claim.actor.slug, claim.actor.session_id), None).await;
+        }
         Ok(cancelled)
     }
 

@@ -405,6 +405,14 @@ async fn driver_admin_partial_policy_save_preserves_unmentioned_rules() {
     let cleared = admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":scope})).await.unwrap();
     assert_eq!(cleared["forbidden_in_commits"], serde_json::json!([]));
     assert_eq!(cleared["push_gate"], "auto");
+    let connection = serde_json::json!({"engine":"postgres","host":"old.example.test","database":"reports","user":"reader","sslmode":"verify-full","password_var":"FIXTURE_DB_PASSWORD"});
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":scope,"policy":{"prod_read":connection}})).await.unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":scope,"policy":{"prod_read":{"host":"new.example.test"}}})).await.unwrap();
+    let current = admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":scope})).await.unwrap();
+    for field in ["database","user","sslmode","password_var"] { assert_eq!(current["prod_read"][field], connection[field]); }
+    assert_eq!(current["prod_read"]["host"], "new.example.test");
+    admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":scope,"policy":{"prod_read":null}})).await.unwrap();
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"policy","scope":scope})).await.unwrap()["prod_read"].is_null());
     f.end().await;
 }
 
@@ -421,6 +429,8 @@ async fn driver_admin_partial_role_save_preserves_prose_and_default_model() {
     let after = f.state.storage.role_by_id(role.id).await.unwrap().unwrap();
     assert_eq!(after.description_prompt, role.description_prompt);
     assert_eq!(after.default_model_id, role.default_model_id);
+    let read = admin_rpc(&f.state, serde_json::json!({"operation":"role","id":role.id})).await.unwrap();
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_role","id":role.id,"expected_sha256":read["sha256"],"draft":{}})).await.unwrap();
     let read = admin_rpc(&f.state, serde_json::json!({"operation":"role","id":role.id})).await.unwrap();
     sqlx::query("UPDATE roles SET description_prompt = 'New desktop edit' WHERE id = ?").bind(role.id).execute(f.state.storage.pool()).await.unwrap();
     assert!(admin_rpc(&f.state, serde_json::json!({"operation":"save_role","id":role.id,"expected_sha256":read["sha256"],"draft":{"display_name":"Stale save"}})).await.unwrap_err().to_string().contains("changed since"));
@@ -549,6 +559,7 @@ async fn driver_admin_policy_and_tool_gate_preserve_each_other_and_frozen_sessio
     let session = serde_json::json!({"kind":"session","session_id":"s1"});
     let keywords = serde_json::json!([{"keyword":"gh","mode":"gate"}]);
     assert!(admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":session,"policy":{"pushgate":"auto"}})).await.is_err());
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":session,"policy":{"tool_blocklist":["ignored-before"]}})).await.unwrap_err().to_string().contains("retired"));
     admin_rpc(&f.state, serde_json::json!({"operation":"set_tool_gate","scope":global,"keywords":keywords})).await.unwrap();
     admin_rpc(&f.state, serde_json::json!({"operation":"set_policy","scope":session,"policy":{"push_gate":"ask","force_push":"blocked"}})).await.unwrap();
     assert_eq!(admin_rpc(&f.state, serde_json::json!({"operation":"tool_gate","scope":session})).await.unwrap(), keywords);
@@ -613,6 +624,8 @@ async fn driver_roster_changes_keep_provenance_and_recheck_the_reserved_boundary
         assert_eq!(row.origin().unwrap(), ParticipantChangeOrigin::Agent { session_id:"s1".into(),participant_id:f.rows[0].id });
         if mode == "cancel" {
             assert_eq!(driver_rpc(&f.state, serde_json::json!({"action":"cancel_participant_change","session_id":"s1","request_id":"delegated-remove"})).await.unwrap()["result"]["cancelled"], true);
+            let found: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = 's1' AND content LIKE 'Participant change delegated-remove was cancelled by delegated controller hands of s1%')").fetch_one(f.state.storage.pool()).await.unwrap();
+            assert!(found);
         }
         if revoke { sqlx::query("UPDATE roles SET capabilities = '[]' WHERE id = ?").bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap(); }
         f.ring.send(SequencerCommand::TurnComplete { participant_id:f.rows[0].id, epoch, ending:crate::core::sequencer::TurnEnding::Spoke }).await.unwrap();

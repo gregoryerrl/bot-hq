@@ -52,6 +52,9 @@ fn strict_policy<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::resu
     let value = Value::deserialize(deserializer)?;
     let object = value.as_object().ok_or_else(||D::Error::custom("policy must be an object"))?;
     for key in object.keys() {
+        if key == "tool_blocklist" {
+            return Err(D::Error::custom("tool_blocklist is retired; use set_tool_gate"));
+        }
         if !policy::POLICY_KNOWN_KEYS.contains(&key.as_str()) {
             return Err(D::Error::custom(format!("unknown policy field {key}")));
         }
@@ -62,7 +65,14 @@ fn strict_policy<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::resu
 fn overlay_present(mut stored: Value, patch: Value) -> Result<Value> {
     let patch = patch.as_object().context("saved fields must be an object")?;
     let fields = stored.as_object_mut().context("stored fields must be an object")?;
-    for (key, value) in patch { fields.insert(key.clone(), value.clone()); }
+    for (key, value) in patch {
+        if value.is_object() && fields.get(key).is_some_and(Value::is_object) {
+            let nested = fields.remove(key).unwrap();
+            fields.insert(key.clone(), overlay_present(nested, value.clone())?);
+        } else {
+            fields.insert(key.clone(), value.clone());
+        }
+    }
     Ok(stored)
 }
 
@@ -155,7 +165,7 @@ impl SignalingBridge {
                     Some(id) => {
                         let old = Storage::role_by_id_on(&mut tx, id).await?.context("role does not exist")?;
                         if let Some(expected) = &expected_sha256 { anyhow::ensure!(*expected == role_hash(&old)?, "role changed since it was read; read it again before saving"); }
-                        json!({"display_name":old.display_name,"slug":old.slug,"description_prompt":old.description_prompt,
+                        json!({"display_name":old.display_name,"slug":null,"description_prompt":old.description_prompt,
                             "capabilities":serde_json::from_str::<Value>(&old.capabilities)?,"participation_mode":old.participation_mode,"default_model_id":old.default_model_id})
                     }
                     None => { anyhow::ensure!(expected_sha256.is_none(), "expected_sha256 requires an existing role id"); json!({}) }
