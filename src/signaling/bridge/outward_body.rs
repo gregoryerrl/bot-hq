@@ -39,6 +39,9 @@ struct Word {
     /// or glob the result (`$x` can become `-X POST`). False for a word whose
     /// every expansion was inside `"…"`, which stays one argument.
     unquoted_dynamic: bool,
+    /// Unquoted glob/brace syntax can expand into extra option words. Keep
+    /// this separate from value substitutions for read/publish classification.
+    unquoted_pattern: bool,
     /// The literal text before the first expansion (`repos/o/r/pulls/` for
     /// `"repos/o/r/pulls/$n"`); the whole text when the word is not dynamic.
     literal_prefix: String,
@@ -80,6 +83,7 @@ fn segments(command: &str) -> Vec<Segment> {
     struct WordState {
         dynamic: bool,
         unquoted: bool,
+        pattern: bool,
         prefix: Option<String>,
     }
     impl WordState {
@@ -100,6 +104,7 @@ fn segments(command: &str) -> Vec<Segment> {
                 dynamic: word.dynamic,
                 op: false,
                 unquoted_dynamic: word.unquoted,
+                unquoted_pattern: word.pattern,
                 literal_prefix,
             });
         }
@@ -247,7 +252,7 @@ fn segments(command: &str) -> Vec<Segment> {
                     op.push('-');
                     i += 1;
                 }
-                seg.words.push(Word { text: op.clone(), dynamic: false, op: true, unquoted_dynamic: false, literal_prefix: op });
+                seg.words.push(Word { text: op.clone(), dynamic: false, op: true, unquoted_dynamic: false, unquoted_pattern: false, literal_prefix: op });
                 if heredoc {
                     // The delimiter word follows (quotes around it are removed).
                     while i < chars.len() && matches!(chars[i], ' ' | '\t') {
@@ -260,7 +265,7 @@ fn segments(command: &str) -> Vec<Segment> {
                         }
                         i += 1;
                     }
-                    seg.words.push(Word { text: delim.clone(), dynamic: false, op: false, unquoted_dynamic: false, literal_prefix: delim.clone() });
+                    seg.words.push(Word { text: delim.clone(), dynamic: false, op: false, unquoted_dynamic: false, unquoted_pattern: false, literal_prefix: delim.clone() });
                     pending_heredocs.push((delim, strip_tabs, segs.len()));
                 }
             }
@@ -316,6 +321,12 @@ fn segments(command: &str) -> Vec<Segment> {
                 started = true;
                 word.expansion(&cur, false);
                 i = consume_expansion(&chars, i, &mut cur);
+            }
+            '*' | '?' | '[' | ']' | '{' | '}' | '^' | '~' | '#' => {
+                started = true;
+                word.pattern = true;
+                cur.push(c);
+                i += 1;
             }
             other => {
                 started = true;
@@ -445,6 +456,7 @@ const MAX_NESTING: usize = 4;
 #[derive(Debug, Clone)]
 struct Cmd {
     tool: String,
+    path_qualified: bool,
     args: Vec<Word>,
     opaque: bool,
     /// The segment's words before this command's own (assignments like
@@ -532,7 +544,7 @@ fn simple_commands(command: &str, depth: usize) -> Vec<Cmd> {
                 }
             }
             let prefix = words[..k].iter().filter(|w| !w.op).map(|w| w.text.clone()).collect();
-            out.push(Cmd { tool, args, opaque, prefix });
+            out.push(Cmd { tool, path_qualified: words[k].text.contains('/'), args, opaque, prefix });
         }
     }
     out
@@ -652,7 +664,7 @@ pub(crate) fn is_outward(command: &str) -> bool {
 /// so does any expansion in a flag's value. The endpoint is a URL path, never
 /// a body: nothing the variable holds leaves the machine as content.
 fn is_gh_api_get(c: &Cmd) -> bool {
-    if c.tool != "gh" || c.opaque {
+    if c.tool != "gh" || c.path_qualified || c.opaque {
         return false;
     }
     let args: Vec<&Word> = c.args.iter().filter(|w| !w.op).collect();
@@ -660,6 +672,11 @@ fn is_gh_api_get(c: &Cmd) -> bool {
         return false;
     }
     let args = &args[1..];
+    // A wildcard/brace word can become --method/--field after this check.
+    // This predicate also decides publication review outside read_gate.
+    if args.iter().any(|w| w.unquoted_pattern) {
+        return false;
+    }
     let dynamic: Vec<usize> = (0..args.len()).filter(|&i| args[i].dynamic).collect();
     let dynamic_index = match dynamic.as_slice() {
         [] => None,
@@ -864,17 +881,17 @@ pub(crate) fn executed_scripts_split(command: &str) -> (Vec<String>, Vec<String>
 
 /// Is `command` a pure `gh api` READ (feedback #83, the user's standing
 /// decision of 2026-10-12): ONE `gh api` GET, piped at most into the
-/// read-only filters `read_gate` allows — no continuation, no redirection, no
+/// read-only filters, including agent-shell rg — no continuation, no redirection, no
 /// shell, nothing the shell computes? Such a command runs without approval
 /// whatever the Tool Gate keyword list says (`tool_gate::match_keyword`).
 pub(crate) fn is_gh_api_read(command: &str) -> bool {
-    if single_read_command(command).is_err() {
+    if single_read_command_in(command, true).is_err() {
         return false;
     }
     let cmds = simple_commands(command, 0);
     let Some(first) = cmds.first() else { return false };
     is_gh_api_get(first)
-        && cmds[1..].iter().all(|c| READ_FILTERS.contains(&c.tool.as_str()) && !c.opaque)
+        && cmds[1..].iter().all(|c| !c.path_qualified && READ_FILTERS.contains(&c.tool.as_str()) && !c.opaque)
 }
 
 /// The file `command` writes TEXT into without running anything (feedback
@@ -1493,10 +1510,68 @@ pub(crate) fn commands_run(command: &str) -> Vec<RunCommand> {
         .collect()
 }
 
-/// The filters `read_gate` lets a read pipe into: none of them writes a file
-/// or runs a command. `sort -o FILE` and `uniq IN OUT` write, so neither is
-/// here (EYES, s-3158eb35).
-const READ_FILTERS: &[&str] = &["head", "tail", "jq", "grep", "wc", "cut"];
+/// Filter names shared by the read validators; host-run `read_gate` excludes
+/// agent-shell rg. `sort -o FILE` and `uniq IN OUT` write, so neither is here
+/// (EYES, s-3158eb35).
+// rg additionally passes the option parser below; its executable alone is
+// not a read-only guarantee (--pre/--hostname-bin launch programs).
+const READ_FILTERS: &[&str] = &["head", "tail", "jq", "grep", "rg", "wc", "cut"];
+
+/// A bounded rg filter, independent of the caller's config file. Require the
+/// disabling flag FIRST so it cannot actually be a regexp/option value.
+/// Unknown options fail closed, including future command-launching flags.
+fn validate_rg_filter(args: &[Word]) -> Result<(), String> {
+    if args.first().map(|w| w.text.as_str()) != Some("--no-config") {
+        return Err("an rg filter must begin `rg --no-config` (config files can launch programs)".into());
+    }
+    let mut rest = args[1..].iter();
+    while let Some(word) = rest.next() {
+        let arg = word.text.as_str();
+        if arg == "--" { break; } // remaining words are patterns/paths, never options
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = long.split_once('=').map_or((long, None), |(n, v)| (n, Some(v)));
+            match name {
+                "no-config" | "line-number" | "no-line-number" | "ignore-case" |
+                "case-sensitive" | "smart-case" | "fixed-strings" | "word-regexp" |
+                "line-regexp" | "invert-match" | "only-matching" | "count" |
+                "count-matches" | "quiet" | "no-messages" | "with-filename" |
+                "no-filename" | "heading" | "no-heading" | "column" | "byte-offset" |
+                "json" | "null" | "null-data" | "text" | "crlf" | "multiline" |
+                "multiline-dotall" | "pcre2" | "stats" | "passthru" | "trim" |
+                "no-trim" | "line-buffered" | "block-buffered" | "no-ignore" |
+                "hidden" | "files-with-matches" | "files-without-match" => {
+                    if value.is_some() { return Err(format!("rg filter option `--{name}` takes no value")); }
+                }
+                "regexp" | "file" | "max-count" | "after-context" | "before-context" |
+                "context" | "glob" | "iglob" | "type" | "type-not" | "replace" |
+                "threads" | "max-columns" | "encoding" | "color" | "colors" |
+                "context-separator" | "field-match-separator" | "field-context-separator" |
+                "sort" | "sortr" | "engine" | "path-separator" | "regex-size-limit" |
+                "dfa-size-limit" | "max-depth" | "max-filesize" => {
+                    if value.is_none() && rest.next().is_none() {
+                        return Err(format!("rg filter option `--{name}` needs a value"));
+                    }
+                }
+                _ => return Err(format!("unsupported rg filter option `--{name}`")),
+            }
+        } else if let Some(shorts) = arg.strip_prefix('-').filter(|s| !s.is_empty()) {
+            for (at, flag) in shorts.char_indices() {
+                if "efmABCgrtTjME".contains(flag) {
+                    // A value consumes the rest of its cluster, or the next
+                    // word. A regexp containing -z/--pre is data, not a flag.
+                    if at + flag.len_utf8() == shorts.len() && rest.next().is_none() {
+                        return Err(format!("rg filter option `-{flag}` needs a value"));
+                    }
+                    break;
+                }
+                if !"nNiIsSvFwxocqlLaUbHPu0".contains(flag) {
+                    return Err(format!("unsupported rg filter option `-{flag}`"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Whether `command` is ONE simple command, optionally piped into
 /// [`READ_FILTERS`] — the only shape the reviewer's `read_gate` takes (group
@@ -1505,6 +1580,11 @@ const READ_FILTERS: &[&str] = &["head", "tail", "jq", "grep", "wc", "cut"];
 /// Approve as "the reviewer's read"). No `;`, `&&`, `||`, `&`, redirection,
 /// heredoc, value the shell computes, wrapper or shell. `Err` says which.
 pub(crate) fn single_read_command(command: &str) -> Result<(), String> {
+    single_read_command_in(command, false)
+}
+
+// rg may be supplied by the agent runtime, not the host executing read_gate.
+fn single_read_command_in(command: &str, agent_shell: bool) -> Result<(), String> {
     if command.contains('\n') {
         return Err("more than one line".to_string());
     }
@@ -1529,13 +1609,22 @@ pub(crate) fn single_read_command(command: &str) -> Result<(), String> {
             if !seg.piped_from_prev {
                 return Err("more than one command (`;`, `&&`, `||` or `&`)".to_string());
             }
-            let tool = basename(&head.text);
+            let tool = head.text.as_str();
             if !READ_FILTERS.contains(&tool) {
                 return Err(format!(
                     "a pipe into `{tool}`, which is not one of the read-only filters (head, tail, \
-                     jq, grep, wc, cut)"
+                     jq, grep, rg --no-config, wc, cut)"
                 ));
             }
+            if tool == "rg" {
+                if !agent_shell {
+                    return Err("an agent-shell-only rg filter; use grep for host-run read_gate commands".into());
+                }
+                validate_rg_filter(&seg.words[1..])?;
+            }
+        }
+        if seg.words.iter().any(|w| w.unquoted_pattern) {
+            return Err("a value the shell computes (unquoted glob, brace or tilde syntax)".into());
         }
     }
     let lead = &first.words[0].text;
@@ -2323,6 +2412,78 @@ mod tests {
     }
 
     // --- read_gate's shape (group K) -----------------------------------------
+
+    #[test]
+    fn read_filters_require_bare_program_names() {
+        for filter in ["./rg --no-config x", "/tmp/x/head -1", "../grep x", "/usr/bin/jq ."] {
+            assert!(!is_gh_api_read(&format!("gh api repos/o/r | {filter}")), "{filter}");
+            assert!(single_read_command(&format!("gcloud logging read x | {filter}")).is_err(), "{filter}");
+        }
+        assert!(is_gh_api_read("gh api repos/o/r | head -1 | rg --no-config x"));
+        assert!(!is_gh_api_read("./gh api repos/o/r"));
+        assert!(is_outward("./gh api repos/o/r"), "a local executable is not proof of a GitHub read");
+    }
+
+    #[test]
+    fn rg_read_filters_accept_search_options_but_not_program_launchers() {
+        for filter in [
+            "rg --no-config -n '^(async )?(def|class) '",
+            "rg --no-config -ni -A2 --before-context 1 -e update",
+            "rg --no-config --json --regexp='--pre=literal'",
+            "rg --no-config -ne--hostname-bin=literal",
+            "rg --no-config -e --no-config --color never",
+            "rg --no-config -- --pre",
+            "rg --no-config -g '*.rs' -e 'a{1,2}[a-z]*'",
+            "rg --no-config -e '^a#'",
+            "rg --no-config -e \\*",
+        ] {
+            let get = format!("gh api repos/o/r/contents/a.py | {filter}");
+            assert!(is_gh_api_read(&get), "safe GET filter: {get}");
+            let listed = format!("gcloud logging read x | {filter} | head -5");
+            assert!(single_read_command(&listed).unwrap_err().contains("use grep"), "{listed}");
+        }
+        assert!(is_gh_api_read("gh api 'repos/{owner}/{repo}/issues?state=open' | rg --no-config -n open"));
+        for command in ["gh api *", "gh api {repos/o/r,--method=POST}"] {
+            assert!(!is_gh_api_read(command));
+            assert!(is_outward(command), "expanded options may publish: {command}");
+        }
+        for filter in [
+            "rg -n pattern",
+            "rg -e --no-config pattern",
+            "rg -- --no-config",
+            "rg --no-config --pre script pattern file",
+            "rg --no-config --pre=script pattern file",
+            "rg --no-config --hostname-bin script pattern",
+            "rg --no-config --hostname-bin=script --hyperlink-format=default pattern",
+            "rg --no-config -z pattern file.gz",
+            "rg --no-config -niz pattern file.gz",
+            "rg --no-config --search-zip pattern file.gz",
+            "rg --no-config --future-exec=script pattern",
+            "rg --no-config -e -- --pre=script pattern file",
+            "rg --no-config --color",
+            "rg --no-config *",
+            "rg --no-config {--pre=script,pattern}",
+            "rg --no-config [a-z]*",
+            "rg --no-config ^excluded",
+            "rg --no-config a#",
+            "rg --no-config ~",
+        ] {
+            let get = format!("gh api repos/o/r | {filter}");
+            assert!(!is_gh_api_read(&get), "not exempt: {get}");
+            assert!(single_read_command(&format!("gcloud logging read x | {filter}")).is_err(), "{filter}");
+        }
+        for get in [
+            "gh api repos/o/r | rg --no-config -n '$PATTERN' > out",
+            "gh api repos/o/r | rg --no-config \"$PATTERN\"",
+            "gh api repos/o/r | rg --no-config $(echo pattern)",
+            "gh api repos/o/r | rg --no-config x && echo done",
+            "gh api repos/o/r -X POST | rg --no-config x",
+            "gh api repos/o/r * | rg --no-config x",
+            "gh api repos/o/r {--method=POST,x} | rg --no-config x",
+        ] {
+            assert!(!is_gh_api_read(get), "shell/write restrictions remain: {get}");
+        }
+    }
 
     #[test]
     fn read_gate_takes_one_command_and_pure_filters_only() {

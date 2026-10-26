@@ -27,6 +27,16 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- Plain `gh api` GETs can pipe into `rg --no-config` with supported search and
+  output flags in agent shells without an extra approval. Host-run `read_gate`
+  refuses rg before parking and points to grep, since agent-bundled tools may
+  not exist on the host. The flag must come first;
+  config-driven execution, program-launching options and unknown flags are not
+  included in this exemption.
+  Read pipelines also refuse unquoted glob/brace expansion, which can insert
+  extra options; quote regexes and GitHub placeholder/query paths.
+  The exemption requires bare gh/filter names, so an arbitrary executable
+  such as ./rg or /tmp/head cannot impersonate a read-only tool.
 - Messages sent to agents quote bracket-led body lines at visual line starts, including untimed and
   phase-like tags, fullwidth brackets, Unicode line separators, and invisible
   prefix formatting. Stored content stays unchanged, and the escaped view

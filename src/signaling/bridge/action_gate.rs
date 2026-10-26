@@ -767,7 +767,7 @@ impl SignalingBridge {
         }
         if let Err(why) = super::outward_body::single_read_command(&command) {
             anyhow::bail!(
-                "read_gate takes ONE command, piped at most into head, tail, jq, grep, wc or cut — \
+                "read_gate takes ONE command, piped into bare head, tail, jq, grep, wc or cut — \
                  this one has {why}. Split it, or ask the executor to route it through action_gate."
             );
         }
@@ -6889,6 +6889,22 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
     /// straight for the user, its card marked as the reviewer's — and
     /// `read_gate` refuses a compound command, an unlisted one and a write.
     #[tokio::test]
+    async fn read_gate_refuses_agent_only_rg_without_parking() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        list_reads(data.path());
+        let (bridge, storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let before = storage.tray_entries_for_session("s1").await.unwrap().len();
+        let error = bridge.read_gate("s1".into(), "eyes".into(),
+            "gcloud logging read x | rg --no-config -n ERROR".into(), None
+        ).await.expect_err("host read_gate must not assume an agent's bundled rg exists");
+        assert!(error.to_string().contains("use grep"), "{error}");
+        assert_eq!(storage.tray_entries_for_session("s1").await.unwrap().len(), before,
+            "refusal happens before any approval card");
+    }
+
+    #[tokio::test]
     async fn the_reviewers_read_gate_parks_its_own_read_and_refuses_the_rest() {
         let data = tempdir().unwrap();
         let repo = tempdir().unwrap();
@@ -6896,7 +6912,7 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         let (bridge, storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
         let _ring = ring_for(&bridge).await;
         let out = bridge
-            .read_gate("s1".into(), "eyes".into(), "gcloud logging read 'severity>=ERROR' | head -5".into(), None)
+            .read_gate("s1".into(), "eyes".into(), "gcloud logging read 'severity>=ERROR' | grep ERROR | head -5".into(), None)
             .await
             .unwrap();
         assert!(out.to_lowercase().contains("parked"), "straight for the user: {out}");
@@ -6907,6 +6923,8 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
             row.prompt
         );
         for (command, why) in [
+            ("gcloud logging read x | rg --no-config --pre=script x file", "ONE command"),
+            ("gcloud logging read x | rg -n x", "ONE command"),
             ("gcloud logging read x; rm -rf ~/d", "ONE command"),
             ("gcloud logging read x | sort -o ~/.zshrc", "ONE command"),
             ("gcloud auth list", "matches none"),

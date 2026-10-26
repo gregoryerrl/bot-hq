@@ -126,6 +126,21 @@ fn the_tool_gate_hook_passes_a_keyword_quoted_to_grep() {
     // hook even with the `gh api` keyword gated; a write beside it does not.
     let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r/issues --paginate | jq '.[].title'");
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a GET read runs unapproved");
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r | rg --no-config -n 'def|class'");
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "safe rg filter reaches the built hook");
+    for command in [
+        "gh api repos/o/r | rg -n x",
+        "gh api repos/o/r | rg --no-config --pre=script x file",
+        "gh api repos/o/r | rg --no-config -nz x file.gz",
+        "gh api repos/o/r | rg --no-config *",
+        "gh api repos/o/r * | rg --no-config x",
+        "gh api repos/o/r | ./rg --no-config x",
+        "gh api repos/o/r | /tmp/x/head -1",
+        "./gh api repos/o/r",
+    ] {
+        let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", command);
+        assert_eq!(code, 2, "unsafe/configurable rg stays gated: {command}: {err}");
+    }
     let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r && gh issue comment 5 -b x");
     assert_eq!(code, 2, "a write on the same line keeps the stop: {err}");
     let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "grep -rn 'gh api' src | head -5");

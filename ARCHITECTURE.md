@@ -1417,8 +1417,15 @@ unless overridden). The card names the matched entry and the executor's
 `approve_after`.
 
 The reviewer has its own path, `read_gate` (tray `ef8fe5de`). It takes ONE
-command that runs a listed entry, piped at most into head, tail, jq, grep, wc
-or cut. It refuses `;`, `&&`, redirection, `$(…)`, wrappers
+command that runs a listed entry, piped at most into bare head, tail, jq, grep,
+wc or cut. Host-run `read_gate` refuses rg before parking and points to grep;
+the host need not have the agent runtime's bundled ripgrep.
+The agent-shell plain `gh api` GET exemption additionally allows bare
+`rg --no-config` with supported search/output flags. The flag must come first;
+unknown options and program launchers (`--pre`, `--hostname-bin`, compressed
+search) remain outside that exemption. The leading gh and all filters must
+be bare program names, not arbitrary executable paths.
+It refuses `;`, `&&`, redirection, `$(…)`, unquoted glob/brace expansion, wrappers
 (`outward_body::single_read_command`) and write verbs (`write_word`), because
 one list both gates the executor and limits the reviewer. It also refuses a
 database client (`database_client`: `psql`, `mysql`, `sqlite3`…, whose own

@@ -833,6 +833,20 @@ mod tests {
     }
 
     #[test]
+    fn rg_read_filter_reaches_the_keyword_exemption_only_in_its_safe_form() {
+        let kws = [kw("gh api", GateMode::Gate), kw("gh", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "gh api repos/o/r | rg --no-config -n 'def|class'", &kws), None);
+        for command in [
+            "gh api repos/o/r | rg -n x",
+            "gh api repos/o/r | rg --no-config --pre=script x file",
+            "gh api repos/o/r | rg --no-config -nz x file.gz",
+            "gh api repos/o/r -f title=x | rg --no-config x",
+        ] {
+            assert_eq!(match_keyword("Bash", command, &kws), Some(GateMode::Gate), "{command}");
+        }
+    }
+
+    #[test]
     fn gate_wins_over_auto_allow_on_conflict() {
         // "git" gates broadly; "git push" auto-allows. A push matches both —
         // the conservative rule gates it.
