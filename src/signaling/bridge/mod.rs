@@ -34,6 +34,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
 mod action_gate;
+mod direct_commands;
 pub(crate) mod application_control;
 pub(crate) mod application_admin;
 pub(crate) mod control_claim;
@@ -537,6 +538,8 @@ pub struct SignalingBridge {
     app_state: std::sync::OnceLock<Weak<crate::core::AppState>>,
     #[cfg(test)]
     control_ticket_observer: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    #[cfg(test)]
+    direct_spawn_barrier: std::sync::Mutex<Option<Arc<direct_commands::SpawnBarrier>>>,
     /// The `gh` an approved publish is read back with (`readback`, feedback
     /// #57 #60 #97): unset, the gate shell's own `gh`; a test sets a fake.
     gh_program: std::sync::OnceLock<PathBuf>,
@@ -757,6 +760,8 @@ impl SignalingBridge {
             app_state: std::sync::OnceLock::new(),
             #[cfg(test)]
             control_ticket_observer: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            direct_spawn_barrier: std::sync::Mutex::new(None),
             gh_program: std::sync::OnceLock::new(),
             terminals: std::sync::OnceLock::new(),
             session_close_gate: Mutex::new(HashMap::new()),

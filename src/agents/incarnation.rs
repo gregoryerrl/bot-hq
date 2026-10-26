@@ -15,6 +15,36 @@ pub struct Incarnation {
     active: AtomicBool,
     writers: Arc<RwLock<()>>,
     helpers: std::sync::Mutex<HelperChildren>,
+    commands: std::sync::Mutex<CommandChildren>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CommandTicket { epoch: u64, generation: u64 }
+#[derive(Clone, Debug)]
+pub(crate) struct CommandStop { pub reason: String, pub at: tokio::time::Instant }
+#[derive(Default, Debug)]
+struct CommandChildren {
+    generation: u64,
+    closed: bool,
+    ended_epoch: u64,
+    pause_requested: Option<tokio::time::Instant>,
+    children: std::collections::HashMap<String, (u64, tokio::sync::watch::Sender<Option<CommandStop>>)>,
+}
+
+pub(crate) struct CommandRegistration { owner: Arc<Incarnation>, id: String, ticket: CommandTicket }
+impl CommandRegistration {
+    /// The final start check and synchronous spawn share the interrupt lock.
+    pub(crate) fn start<T>(&self, spawn: impl FnOnce() -> std::io::Result<T>) -> std::io::Result<T> {
+        let state = self.owner.commands.lock().unwrap_or_else(|e|e.into_inner());
+        if !self.owner.is_active() || state.closed || self.ticket.epoch <= state.ended_epoch
+            || self.ticket.generation != state.generation || !state.children.contains_key(&self.id) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "issuer stopped before command spawn; NOT RUN"));
+        }
+        spawn()
+    }
+}
+impl Drop for CommandRegistration {
+    fn drop(&mut self) { self.owner.commands.lock().unwrap_or_else(|e|e.into_inner()).children.remove(&self.id); }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -55,6 +85,7 @@ impl Incarnation {
             active: AtomicBool::new(true),
             writers: Arc::new(RwLock::new(())),
             helpers: std::sync::Mutex::new(HelperChildren::default()),
+            commands: std::sync::Mutex::new(CommandChildren::default()),
         })
     }
 
@@ -64,6 +95,54 @@ impl Incarnation {
 
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn command_ticket(&self, epoch: u64) -> Option<CommandTicket> {
+        let state = self.commands.lock().unwrap_or_else(|e|e.into_inner());
+        (self.is_active() && !state.closed && epoch > state.ended_epoch)
+            .then_some(CommandTicket { epoch, generation:state.generation })
+    }
+
+    pub(crate) fn attach_command(self: &Arc<Self>, ticket: CommandTicket)
+        -> Option<(CommandRegistration, tokio::sync::watch::Receiver<Option<CommandStop>>)> {
+        let mut state = self.commands.lock().unwrap_or_else(|e|e.into_inner());
+        if !self.is_active() || state.closed || ticket.epoch <= state.ended_epoch || ticket.generation != state.generation { return None; }
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        state.children.insert(id.clone(), (ticket.epoch, tx));
+        Some((CommandRegistration {owner:Arc::clone(self),id,ticket}, rx))
+    }
+
+    pub(crate) fn stop_commands(&self, reason: &str, epoch: Option<u64>, close: bool) {
+        let mut state = self.commands.lock().unwrap_or_else(|e|e.into_inner());
+        state.generation = state.generation.wrapping_add(1);
+        state.closed |= close;
+        if let Some(epoch) = epoch { state.ended_epoch = state.ended_epoch.max(epoch); }
+        // Pause may already have spent eight seconds deferring the native
+        // interrupt. Other interrupt sources get the same grace from now.
+        let now=tokio::time::Instant::now();
+        let at=if reason=="cancel" { state.pause_requested.take().unwrap_or(now) } else {now};
+        for (_, stop) in state.children.values() {
+            stop.send_if_modified(|current| {
+                if current.is_some() { return false; }
+                *current = Some(CommandStop {reason:reason.into(),at}); true
+            });
+        }
+    }
+
+    pub(crate) fn note_command_pause(&self) {
+        self.commands.lock().unwrap_or_else(|e|e.into_inner()).pause_requested=Some(tokio::time::Instant::now());
+    }
+
+    pub(crate) fn end_command_epoch(&self, epoch: u64) {
+        let mut state = self.commands.lock().unwrap_or_else(|e|e.into_inner());
+        state.ended_epoch = state.ended_epoch.max(epoch);
+        for (owned, stop) in state.children.values() {
+            if *owned == epoch { stop.send_if_modified(|current| {
+                if current.is_some() { return false; }
+                *current=Some(CommandStop {reason:"parent turn ended".into(),at:tokio::time::Instant::now()}); true
+            }); }
+        }
     }
 
     pub(crate) fn helper_ticket(&self, epoch: u64) -> Option<HelperTicket> {
@@ -130,6 +209,7 @@ impl Incarnation {
     /// cannot reactivate the old runtime; a retry can finish draining it.
     pub async fn retire(&self) {
         self.active.store(false, Ordering::Release);
+        self.stop_commands("parent runtime retired",None,true);
         self.stop_helpers("parent runtime retired",true);
         let _drained = self.writers.write().await;
     }
@@ -138,6 +218,44 @@ impl Incarnation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn command_tickets_cover_interrupts_without_sharing_helper_failure() {
+        let owner=Incarnation::new();
+        owner.stop_helpers("helper cleanup failed",true);
+        let ticket=owner.command_ticket(1).unwrap();
+        let (registration,stopped)=owner.attach_command(ticket).unwrap();
+        assert_eq!(registration.start(||Ok(7)).unwrap(),7);
+        owner.stop_commands("halt-self-declared",Some(1),false);
+        assert!(stopped.borrow().as_ref().unwrap().reason.contains("halt"));
+        assert!(registration.start(||Ok(7)).is_err());
+        assert!(owner.attach_command(ticket).is_none());
+        assert!(owner.command_ticket(1).is_none());
+        let next=owner.command_ticket(2).unwrap();
+        let (next,stopped)=owner.attach_command(next).unwrap();
+        owner.end_command_epoch(1);
+        assert!(stopped.borrow().is_none());
+        assert!(next.start(||Ok(())).is_ok());
+        owner.retire().await;
+        assert!(stopped.borrow().is_some());
+        let replacement=Incarnation::new();
+        let (new,signal)=replacement.attach_command(replacement.command_ticket(1).unwrap()).unwrap();
+        owner.stop_commands("late old stop",None,true);
+        assert!(signal.borrow().is_none());
+        assert!(new.start(||Ok(())).is_ok());
+    }
+
+    #[test]
+    fn command_pause_grace_is_not_restarted_after_native_deferral() {
+        let owner=Incarnation::new();
+        let (_registration,signal)=owner.attach_command(owner.command_ticket(1).unwrap()).unwrap();
+        let at=tokio::time::Instant::now()-std::time::Duration::from_secs(8);
+        owner.commands.lock().unwrap().pause_requested=Some(at);
+        owner.stop_commands("cancel",Some(1),false);
+        assert_eq!(signal.borrow().as_ref().unwrap().at,at);
+        owner.stop_commands("parent process stopped",None,true);
+        assert_eq!(signal.borrow().as_ref().unwrap().at,at,"later teardown must not restart a grace");
+    }
 
     #[tokio::test]
     async fn helper_tickets_lose_to_interrupt_completion_and_retirement() {

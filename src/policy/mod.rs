@@ -23,6 +23,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub mod audit;
+#[cfg(unix)]
+pub(crate) mod command_run;
 pub mod data_reads;
 pub mod hooks;
 pub mod presets;

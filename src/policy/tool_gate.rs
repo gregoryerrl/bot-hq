@@ -489,7 +489,9 @@ impl GateMatch {
 /// Execute `command` via the agent's shell (`gate_shell`) in `cwd`, capturing combined stdout/stderr +
 /// exit code, bounded by `timeout`. stdin is `/dev/null` so a command that
 /// expects input (e.g. `gh issue comment` with no `--body`) fails fast instead
-/// of hanging. On timeout the child is killed (kill-on-drop) and `code` is 124.
+/// of hanging. On timeout `code` is 124. Unix commands own a new session and
+/// their process group receives INT/TERM/KILL with bounded cleanup graces.
+/// Windows currently stops only the shell; job-object cleanup remains owed.
 ///
 /// `envs` are set on the child on top of the app's own environment. **The
 /// session's identity rides here** (round 12): the agent subprocess
@@ -506,6 +508,14 @@ pub async fn run_in_repo(
     timeout: Duration,
     envs: &[(&str, &str)],
 ) -> CommandOutput {
+    run_in_repo_with_spawn(command,cwd,timeout,envs,None).await
+}
+
+pub(crate) type CheckedSpawn<'a> = &'a (dyn Fn(&mut tokio::process::Command) -> std::io::Result<tokio::process::Child> + Send + Sync);
+
+pub(crate) async fn run_in_repo_with_spawn(
+    command: &str, cwd: &Path, timeout: Duration, envs: &[(&str,&str)], spawn: Option<CheckedSpawn<'_>>,
+) -> CommandOutput {
     // The agent's own shell, not a fixed one — see `gate_shell`. (Round 7's
     // sh→bash for s-06a3c60b was the same lesson one shell short: macOS's bash
     // IS 3.2, and the command was proven under zsh.)
@@ -521,7 +531,7 @@ pub async fn run_in_repo(
             code: -1,
         };
     }
-    run_in_shell(&gate_shell(), command, cwd, timeout, envs).await
+    run_in_shell_with_spawn(&gate_shell(), command, cwd, timeout, envs, spawn).await
 }
 
 /// Env pairs for a gated command run on behalf of `session_id` — the one
@@ -533,12 +543,19 @@ pub fn session_envs(session_id: &str) -> Vec<(&'static str, String)> {
 
 /// [`run_in_repo`] with the shell named by the caller — the seam the
 /// heredoc test drives with `zsh` directly, so no test mutates `SHELL`.
+#[cfg(test)]
 async fn run_in_shell(
     shell: &str,
     command: &str,
     cwd: &Path,
     timeout: Duration,
     envs: &[(&str, &str)],
+) -> CommandOutput {
+    run_in_shell_with_spawn(shell,command,cwd,timeout,envs,None).await
+}
+
+async fn run_in_shell_with_spawn(
+    shell: &str, command: &str, cwd: &Path, timeout: Duration, envs: &[(&str,&str)], spawn: Option<CheckedSpawn<'_>>,
 ) -> CommandOutput {
     let mut cmd = crate::process::tokio_command(shell);
     // A gated command is the user's own approved shell line, so it must
@@ -551,7 +568,9 @@ async fn run_in_shell(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        // Unix ownership/cleanup is explicit in command_run. A second,
+        // implicit kill after an ECHILD result could target a reused pid.
+        .kill_on_drop(cfg!(not(unix)));
     // Git-for-Windows' `sh.exe -c` does NOT put its own bin dir on PATH (a Git
     // Bash *login* shell does), so the MSYS coreutils a gated command leans on
     // (`ls`, `cat`, `touch`, `sleep`, …) would not resolve — finding `sh` alone
@@ -573,7 +592,21 @@ async fn run_in_shell(
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let child = match cmd.spawn() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // No controlling terminal and pgid == pid. A separate process_group
+        // call before setsid would make setsid fail with EPERM.
+        // SAFETY: this pre-exec closure calls only async-signal-safe setsid
+        // and reads errno; it allocates nothing and takes no locks.
+        unsafe {
+            cmd.as_std_mut().pre_exec(|| {
+                if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+            });
+        }
+    }
+    let spawned = match spawn { Some(spawn) => spawn(&mut cmd), None => cmd.spawn() };
+    let child = match spawned {
         Ok(c) => c,
         Err(e) => {
             return CommandOutput {
@@ -583,21 +616,28 @@ async fn run_in_shell(
             }
         }
     };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => CommandOutput {
+    #[cfg(unix)]
+    let result = super::command_run::output(child, timeout).await;
+    #[cfg(not(unix))]
+    let result = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "command execution bound elapsed")),
+    };
+    match result {
+        Ok(out) => CommandOutput {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             code: out.status.code().unwrap_or(-1),
         },
-        Ok(Err(e)) => CommandOutput {
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => CommandOutput {
+            stdout: String::new(),
+            stderr: format!("`{command}` timed out after {}s; {e}", timeout.as_secs()),
+            code: 124,
+        },
+        Err(e) => CommandOutput {
             stdout: String::new(),
             stderr: format!("error running `{command}`: {e}"),
             code: -1,
-        },
-        Err(_) => CommandOutput {
-            stdout: String::new(),
-            stderr: format!("`{command}` timed out after {}s", timeout.as_secs()),
-            code: 124,
         },
     }
 }

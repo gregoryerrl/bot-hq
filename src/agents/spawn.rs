@@ -26,8 +26,8 @@ use crate::agents::input;
 use crate::agents::protocol::{ControlRequest, OutgoingUserMessage};
 use crate::storage::{AgentConfig, PersistedMessage};
 
-/// Global registry of live claude-code child PIDs. Updated by
-/// `spawn_agent` (insert) and the lifecycle task (remove on exit). Read
+/// Global registry of live agent and host-command child PIDs. Updated by
+/// their owners on spawn and exit. Read
 /// by `reap_all_children` from `main.rs`'s panic hook + signal handler
 /// so the children get SIGKILL even when the tokio runtime can't be
 /// trusted (panic-abort / SIGTERM paths skip Drop chains entirely).
@@ -42,11 +42,15 @@ pub static CHILD_PIDS: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(|| Mutex::n
 /// mid-`insert()` doesn't recurse. Worst case on contention: one
 /// cleanup cycle skipped — preferable to a hang.
 pub fn reap_all_children() {
-    let pids: Vec<u32> = match CHILD_PIDS.try_lock() {
-        Ok(g) => g.iter().copied().collect(),
-        Err(_) => return,
+    let pids = match CHILD_PIDS.try_lock() {
+        Ok(g) => g,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
     };
-    for pid in pids {
+    // Gated-command owners unregister and reap under this same lock. Do not
+    // copy PIDs out: they could be reaped/reused before the later signal.
+    // Agent owners still have their older reap-then-remove ordering.
+    for &pid in pids.iter() {
         kill_child(pid);
     }
 }
@@ -865,6 +869,7 @@ pub(crate) struct StopControl {
 
 impl StopControl {
     pub fn kill(&self) {
+        self.incarnation.stop_commands("parent process stopped",None,true);
         self.incarnation.stop_helpers("parent process stopped",true);
         if let Some(tx) = self.kill.lock().unwrap_or_else(|p| p.into_inner()).take() { let _ = tx.send(()); }
     }
@@ -997,6 +1002,8 @@ impl AgentHandle {
     /// participant goes through `core::session::SessionAgent::interrupt`, which
     /// supplies the epoch off the participant's own cell.
     pub fn interrupt_at(&self, request_id: impl Into<String>, epoch: u64) -> bool {
+        let request_id = request_id.into();
+        self.incarnation.stop_commands(&request_id,Some(epoch),false);
         self.incarnation.stop_helpers("parent turn interrupted",false);
         self.interrupted_epoch
             .store(epoch, std::sync::atomic::Ordering::Release);

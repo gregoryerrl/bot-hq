@@ -61,11 +61,20 @@ fn drain_errors(child: &mut tokio::process::Child) -> tokio::task::JoinHandle<St
 }
 
 async fn claude_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::Result<()> {
+    claude_probe(f, brief, trace, None).await
+}
+
+// Some(false): a long direct gate call. Some(true): interrupt it while the
+// native client stays alive, so killing the test CLI cannot hide a leak.
+async fn claude_probe(f: &Fixture, brief: &str, trace: &mut Trace, gate: Option<bool>) -> anyhow::Result<()> {
     let model = std::env::var("BOT_HQ_HELPER_LIVE_MODEL")?;
     let account = std::env::var("BOT_HQ_HELPER_LIVE_ACCOUNT")?;
-    let mcp = json!({"mcpServers":{"fixture":{"type":"http",
+    let mcp = if gate.is_some() {
+        serde_json::from_str(&crate::signaling::mcp_config_json(f.state.signaling_addr,
+            "s1", "hands", Some("token-hands"), &serde_json::Map::new()))?
+    } else { json!({"mcpServers":{"fixture":{"type":"http",
         "url":format!("http://{}/sessions/s1/hands/mcp", f.state.signaling_addr),
-        "headers":{"x-bot-hq-mcp-token":"token-hands"}}}});
+        "headers":{"x-bot-hq-mcp-token":"token-hands"}}}}) };
     let mut cmd = crate::process::tokio_command("claude");
     scrub(&mut cmd);
     crate::agents::spawn::apply_account_env(&mut cmd, Some(&account));
@@ -84,7 +93,7 @@ async fn claude_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::R
             "--tools",
             "ToolSearch",
             "--allowedTools",
-            "ToolSearch mcp__fixture__*",
+            "ToolSearch mcp__fixture__* mcp__bot-hq-signaling__*",
         ])
         .args([
             "--permission-mode",
@@ -108,10 +117,8 @@ async fn claude_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::R
     let errors = drain_errors(&mut child);
     let started = Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(180), async {
-        child
-            .stdin
-            .take()
-            .unwrap()
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
             .write_all(
                 (json!({"type":"user","message":{"role":"user","content":brief}}).to_string()
                     + "\n")
@@ -120,7 +127,22 @@ async fn claude_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::R
             .await?;
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         let mut carry = None;
-        while let Some(line) = lines.next_line().await? {
+        let interrupt = gate_interrupt_due(f, gate);
+        tokio::pin!(interrupt);
+        let mut interrupted = false;
+        loop {
+            let line = tokio::select! {
+                line = lines.next_line() => line?,
+                _ = &mut interrupt, if !interrupted => {
+                    interrupted = true;
+                    stdin.write_all((serde_json::to_string(&crate::agents::protocol::ControlRequest::interrupt("gate-probe"))? + "\n").as_bytes()).await?;
+                    f.state.cancel_and_escalate("s1",crate::storage::now_utc()).await?;
+                    eprintln!("native Claude interrupt sent at {:.2}s", started.elapsed().as_secs_f64());
+                    observe_gate_cancellation(f).await?;
+                    continue;
+                }
+            };
+            let Some(line) = line else { break; };
             let Ok(event) = serde_json::from_str::<crate::agents::protocol::StreamEvent>(&line)
             else {
                 continue;
@@ -144,7 +166,23 @@ async fn claude_parent(f: &Fixture, brief: &str, trace: &mut Trace) -> anyhow::R
 }
 
 async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace, normal_discovery: bool) -> anyhow::Result<()> {
-    let home = std::env::var("BOT_HQ_HELPER_CODEX_HOME")?;
+    codex_probe(f, brief, trace, normal_discovery, None).await
+}
+
+async fn codex_probe(f: &Fixture, brief: &str, trace: &mut Trace, normal_discovery: bool, gate: Option<bool>) -> anyhow::Result<()> {
+    let source_home = std::env::var("BOT_HQ_HELPER_CODEX_HOME")?;
+    // Direct-command probes get their own ephemeral home. Only credentials
+    // are copied; shared hooks, catalogs and conversation files are untouched.
+    let isolated_home = if gate.is_some() { Some(tempfile::tempdir()?) } else { None };
+    let home = if let Some(dir) = isolated_home.as_ref() {
+        let auth = dir.path().join("auth.json");
+        std::fs::copy(std::path::Path::new(&source_home).join("auth.json"), &auth)?;
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o600))?;
+        }
+        dir.path().to_string_lossy().into_owned()
+    } else { source_home };
     let model = std::env::var("BOT_HQ_HELPER_CODEX_MODEL")?;
     let mut cmd = if normal_discovery {
         // Take MCP exposure/auth from the actual production command so this
@@ -197,6 +235,7 @@ async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace, normal_discov
     let (client, mut incoming) =
         CodexClient::start(child.stdout.take().unwrap(), child.stdin.take().unwrap());
     let started = Instant::now();
+    let mut raw_gate_events = Vec::new();
     let result = tokio::time::timeout(Duration::from_secs(180), async {
         client.request("initialize", json!({"clientInfo":{"name":"bot-hq-helper-mcp-probe","version":"1"},"capabilities":{"experimentalApi":true}})).await?;
         client.notify("initialized", json!({})).await?;
@@ -220,12 +259,30 @@ async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace, normal_discov
             "config":{"mcp_servers":servers}})).await?;
         let id = thread["thread"]["id"].as_str().context("no native thread")?;
         let inventory = client.request("mcpServerStatus/list",json!({"threadId":id,"limit":100})).await?;
+        let expected_tool = if gate.is_some() {"action_gate"} else {"delegate_tasks"};
         anyhow::ensure!(inventory["data"].as_array().is_some_and(|servers| servers.iter().any(|s|
-            s["name"]=="bot_hq" && s["tools"].as_object().is_some_and(|tools|tools.contains_key("delegate_tasks")))),
+            s["name"]=="bot_hq" && s["tools"].as_object().is_some_and(|tools|tools.contains_key(expected_tool)))),
             "fixture MCP tool was not registered: {inventory}");
-        client.request("turn/start", json!({"threadId":id,"input":[{"type":"text","text":brief}],"effort":"low"})).await?;
+        let turn = client.request("turn/start", json!({"threadId":id,"input":[{"type":"text","text":brief}],"effort":"low"})).await?;
+        let turn_id = turn["turn"]["id"].as_str().context("no native turn")?;
         let mut translator = crate::agents::codex::events::Translator::new(model,"Sign in to the chosen probe account.");
-        while let Some(incoming) = incoming.recv().await {
+        let interrupt = gate_interrupt_due(f, gate);
+        tokio::pin!(interrupt);
+        let mut interrupted = false;
+        loop {
+            let incoming = tokio::select! {
+                incoming = incoming.recv() => incoming,
+                _ = &mut interrupt, if !interrupted => {
+                    interrupted = true;
+                    client.request("turn/interrupt", json!({"threadId":id,"turnId":turn_id})).await?;
+                    f.state.cancel_and_escalate("s1",crate::storage::now_utc()).await?;
+                    eprintln!("native Codex interrupt sent at {:.2}s", started.elapsed().as_secs_f64());
+                    observe_gate_cancellation(f).await?;
+                    continue;
+                }
+            };
+            let Some(incoming) = incoming else { break; };
+            if gate.is_some() { raw_gate_events.push(format!("{:.3} {incoming:?}", started.elapsed().as_secs_f64())); }
             anyhow::ensure!(incoming != Incoming::Closed,"Codex stream ended without completion");
             for event in translator.translate(&incoming) {
                 let done = matches!(event, AgentEvent::TurnComplete { .. });
@@ -236,11 +293,145 @@ async fn codex_parent(f: &Fixture, brief: &str, trace: &mut Trace, normal_discov
         anyhow::bail!("Codex stream ended without completion")
     }).await;
     stop(&mut child).await;
+    if let (Some(pause), Ok(prefix)) = (gate, std::env::var("BOT_HQ_HELPER_PROBE_LOG")) {
+        std::fs::write(format!("{prefix}-codex-gate-{pause}-raw.log"), raw_gate_events.join("\n"))?;
+    }
     let errors = errors.await?;
     result
         .context("native Codex parent exceeded 180 seconds")?
         .with_context(|| format!("Codex stderr: {errors}"))
 }
+
+async fn gate_interrupt_due(f: &Fixture, gate: Option<bool>) {
+    if gate != Some(true) { return std::future::pending().await; }
+    while !f._temp.path().join("gate-grandchild").exists() {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(10)).await;
+}
+
+pub(super) fn gate_pids(f: &Fixture) -> Vec<u32> {
+    ["gate-leader", "gate-child", "gate-grandchild"].into_iter()
+        .filter_map(|name| std::fs::read_to_string(f._temp.path().join(name)).ok()?.trim().parse().ok())
+        .collect()
+}
+
+#[cfg(not(unix))]
+async fn observe_gate_cancellation(_: &Fixture) -> anyhow::Result<()> {
+    anyhow::bail!("native command-group probe is Unix-only")
+}
+
+#[cfg(unix)]
+pub(super) async fn observe_gate_cancellation(f: &Fixture) -> anyhow::Result<()> {
+    let pids = gate_pids(f);
+    anyhow::ensure!(pids.len() == 3, "gate must have started all three processes");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    while tokio::time::Instant::now() < deadline {
+        if pids.iter().all(|pid| crate::process::is_gone(*pid)) {
+            eprintln!("gate command processes stopped before fixture-client teardown: {pids:?}");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("native interrupt left gate processes running: {:?}",
+        pids.into_iter().filter(|pid| !crate::process::is_gone(*pid)).collect::<Vec<_>>())
+}
+
+#[cfg(unix)]
+pub(super) async fn gate_fixture() -> Fixture {
+    let (f,_) = helper_fixture().await;
+    for table in ["roles", "session_participants"] {
+        sqlx::query(&format!("UPDATE {table} SET capabilities='[\"read_channel\",\"gated_bash\",\"edit_files\"]' WHERE slug='hands'"))
+            .execute(f.state.storage.pool()).await.unwrap();
+    }
+    std::fs::write(f._temp.path().join("gate-command.sh"),
+        "echo $$ > gate-child\nsleep 70 &\necho $! > gate-grandchild\nwait\necho GATE_NATIVE_PELICAN >> gate-executions\necho GATE_NATIVE_PELICAN\n").unwrap();
+    f
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn dropping_the_http_gate_request_cleans_up_its_command_group() {
+    let f = gate_fixture().await;
+    let url = format!("http://{}/sessions/s1/hands/mcp", f.state.signaling_addr);
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+        "name":"action_gate","arguments":{"command":"echo $$ > gate-leader; sh gate-command.sh; :", "timeout_secs":100}}});
+    let call = tokio::spawn(async move {
+        reqwest::Client::new().post(url).header("x-bot-hq-mcp-token", "token-hands")
+            .header("content-type", "application/json").body(request.to_string()).send().await
+    });
+    let started = tokio::time::timeout(Duration::from_secs(5), async {
+        while gate_pids(&f).len()!=3 { tokio::time::sleep(Duration::from_millis(20)).await; }
+    }).await;
+    call.abort();
+    let _ = call.await;
+    let cleanup = observe_gate_cancellation(&f).await;
+    for pid in gate_pids(&f) { if !crate::process::is_gone(pid) { crate::process::kill_process_tree(pid); } }
+    f.end().await;
+    assert!(started.is_ok(), "HTTP command never started");
+    assert!(cleanup.is_ok(), "{cleanup:?}");
+}
+
+#[cfg(unix)]
+async fn native_gate(runtime: &str, pause: bool) {
+    let f = gate_fixture().await;
+    let request = json!({"command":"echo $$ > gate-leader; sh gate-command.sh; echo GATE_SHELL_FINISHED", "timeout_secs":100});
+    let brief = format!("Native MCP acceptance against disposable bot-hq storage. Discover and call action_gate EXACTLY ONCE with these arguments: {request}. Use the bot-hq MCP tool, not a shell tool. In code mode use functions.exec with tools.<discovered action_gate name> and collect its result with bounded waits as needed. The command intentionally takes 70 seconds. Never retry it after an error. Report the actual tool result and finish; do not use any other tool except MCP discovery and code-cell waits. No permissions or real projects are involved.");
+    let mut trace = vec![];
+    let result = if runtime == "claude" {
+        claude_probe(&f, &brief, &mut trace, Some(pause)).await
+    } else {
+        codex_probe(&f, &brief, &mut trace, true, Some(pause)).await
+    };
+    let executions = std::fs::read_to_string(f._temp.path().join("gate-executions")).unwrap_or_default();
+    let notices: Vec<(String,String)> = sqlx::query_as("SELECT origin,content FROM messages WHERE session_id='s1' AND kind='system_notice' AND content LIKE 'Direct command result%'")
+        .fetch_all(f.state.storage.pool()).await.unwrap();
+    // Cleanup happens even on a failing probe, after observing cancellation
+    // with the CLI still alive. No host/app PID is involved.
+    for pid in gate_pids(&f) { if !crate::process::is_gone(pid) { crate::process::kill_process_tree(pid); } }
+    f.end().await;
+    if let Ok(prefix) = std::env::var("BOT_HQ_HELPER_PROBE_LOG") {
+        std::fs::write(format!("{prefix}-{runtime}-gate-{pause}.log"), format!("result={result:?}\nexecutions={executions:?}\n{trace:#?}")).unwrap();
+    }
+    assert!(result.is_ok(), "native {runtime}: {result:?}\n{trace:#?}");
+    assert_eq!(notices.len(),1,"each direct outcome must survive a lost client reply: {notices:?}");
+    assert_eq!(notices[0].0,"system");
+    if pause { assert!(notices[0].1.contains("outcome unknown"),"{notices:?}"); }
+    let calls: Vec<_> = trace.iter().filter_map(|(at,event)| match event {
+        AgentEvent::ToolUse{id,name,..} if name.ends_with("action_gate") => Some((at,id)), _ => None
+    }).collect();
+    assert_eq!(calls.len(), 1, "must execute one real MCP call: {trace:#?}");
+    if pause { assert!(executions.is_empty()); return; }
+    let (start,id) = calls[0];
+    let (end,error,content) = trace.iter().find_map(|(at,event)| match event {
+        AgentEvent::ToolResult{tool_use_id,is_error,content} if tool_use_id==id => Some((at,is_error,content)), _ => None
+    }).expect("the native MCP call must have a result");
+    assert!(!error && content.contains("GATE_NATIVE_PELICAN"), "{content}");
+    assert_eq!(executions.lines().count(), 1);
+    assert!(end-start >= 70. && end-start < 120., "call duration {}s", end-start);
+    let waits = trace.iter().filter(|(_,e)| matches!(e,AgentEvent::ToolUse{name,..} if name.contains("wait"))).count();
+    eprintln!("native {runtime} direct action_gate: {:.2}s, one execution, {waits} wait calls", end-start);
+}
+
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "spends a Claude turn; set BOT_HQ_HELPER_LIVE_MODEL and BOT_HQ_HELPER_LIVE_ACCOUNT"]
+async fn claude_direct_gate_crosses_sixty_seconds() { native_gate("claude", false).await; }
+
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "spends a Codex turn; set BOT_HQ_HELPER_CODEX_HOME and BOT_HQ_HELPER_CODEX_MODEL"]
+async fn codex_direct_gate_crosses_sixty_seconds() { native_gate("codex", false).await; }
+
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "spends a Claude turn; native interrupt while a direct gate is running"]
+async fn claude_pause_cancels_direct_gate() { native_gate("claude", true).await; }
+
+#[tokio::test]
+#[cfg(unix)]
+#[ignore = "spends a Codex turn; native interrupt through the production code-mode route"]
+async fn codex_pause_cancels_direct_gate() { native_gate("codex", true).await; }
 
 async fn native_batch(runtime: &str, real_helper: bool) {
     let (f, _) = helper_fixture().await;

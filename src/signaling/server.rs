@@ -631,7 +631,7 @@ pub fn mcp_config_json(
     }
     servers.insert(
         "bot-hq-signaling".to_string(),
-        json!({ "type": "http", "url": url }),
+        json!({ "type": "http", "url": url, "timeout": super::MCP_TOOL_TIMEOUT_SECS * 1000 }),
     );
     serde_json::to_string_pretty(&json!({ "mcpServers": servers })).unwrap_or_else(|_| "{}".into())
 }
@@ -1302,6 +1302,20 @@ mod tests {
             .unwrap();
         assert!(servers.contains_key("bot-hq-signaling"));
         assert!(servers.contains_key("chrome-devtools"));
+    }
+
+    #[test]
+    fn only_our_mcp_server_gets_the_long_command_timeout() {
+        let extras = serde_json::from_value(json!({
+            "user-server": {"type":"http", "url":"http://example.invalid", "timeout":1200},
+            "ordinary-server": {"command":"node", "args":["user.js"]}
+        })).unwrap();
+        let rendered: serde_json::Value = serde_json::from_str(&mcp_config_json(
+            "127.0.0.1:54321".parse().unwrap(), "s", "agent", Some("test-token"), &extras,
+        )).unwrap();
+        let servers = rendered["mcpServers"].as_object().unwrap();
+        assert_eq!(servers["bot-hq-signaling"]["timeout"], 660_000);
+        for (name, value) in extras { assert_eq!(servers[&name], value); }
     }
 
     #[test]

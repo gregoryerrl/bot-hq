@@ -23,6 +23,9 @@
 //! decision doc itself flagged HTTP as the "promote if IPC gets hairy" fallback.
 
 mod bridge;
+/// Only our server gets this limit; command execution remains independently
+/// bounded to 600 seconds, leaving room for cancellation and the reply.
+pub(crate) const MCP_TOOL_TIMEOUT_SECS: u64 = 660;
 pub(crate) use bridge::control_claim::ControlClaim;
 #[cfg(test)]
 pub(crate) use bridge::ApprovalContext;

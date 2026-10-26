@@ -1194,7 +1194,7 @@ async fn call_tool(
                 ),
             };
             let output = bridge
-                .action_gate_request(
+                .action_gate_request_from(
                     caller.session_id.clone(),
                     caller.agent.clone(),
                     GateRequest {
@@ -1206,6 +1206,7 @@ async fn call_tool(
                         urgent_reason,
                         run_window,
                     },
+                    caller.token_proof.as_ref(),
                 )
                 .await
                 .map_err(internal_err_no_prefix)?;

@@ -909,6 +909,9 @@ impl AppState {
             // enabled, session held until the user steers, resumes, or closes.
             handle.activity.set_cancelling(true);
             handle.activity.set_paused(true);
+            // Only timestamp the request here. Cancellation still flows
+            // through interrupt_at after the existing atomic-tool deferral.
+            for agent in handle.agents() { agent.handle.incarnation().note_command_pause(); }
             // **And the RING, which until now was never told** (B1-F8, the
             // user's call 2026-08-16). The latch above is the UI's; without this
             // the interrupt ends the holder's turn, its `result` arrives as an

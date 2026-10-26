@@ -27,6 +27,32 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- Messages sent to agents quote nested speaker/timestamp tags in their bodies,
+  keeping command output and pasted transcripts inside their original row.
+  Stored content stays unchanged, and the escaped view keeps its delivery cap.
+- bot-hq's own MCP connection now allows 660 seconds for a tool reply, so a
+  permitted direct command can complete beyond the clients' previous 60-second
+  cutoff. Command bounds stay at 120 seconds by default and 600 maximum; other
+  MCP servers keep their configured timeouts. A stalled bot-hq tool may now hold
+  its caller for up to 11 minutes.
+- Direct host commands stop when their issuing runtime is interrupted, retired
+  or closed, even if its native MCP client leaves the HTTP request open. Atomic
+  commands and outward publications retain an eight-second finish grace across
+  interrupt sources; time already spent deferring Pause counts toward it.
+  Routine direct outcomes get a one-line receipt without rebroadcasting output.
+  A stopped caller gets the actual result if it finishes during grace, or an
+  explicit unknown outcome with cleanup requested if interrupted. Grace never
+  starts new work after a caller disconnects. Approved background gates keep
+  their existing lifecycle.
+- On Unix, host-run commands own a detached session. A command bound or cancelled
+  request now stops the whole process group, allowing two seconds each after
+  interrupt and termination signals before force-killing. This gives clients a
+  chance to cancel remote work; it does not guarantee a remote query stops.
+  Git commits, pushes and migrations therefore stop at their bound instead of
+  continuing as orphaned children. Signal-based app stop/relaunch also kills
+  running host commands, including approved commands. Normal window close/Cmd-Q
+  and Windows descendant cleanup are not covered by this change.
+
 - Codex models that require code mode can discover and call application tools,
   including managed helpers. Startup no longer excludes MCP tools from that
   route, and runtime instructions explain how to find and call them.

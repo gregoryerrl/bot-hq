@@ -459,6 +459,13 @@ impl SignalingBridge {
     /// inline text, through the gate's shell), the agent's bound for the run,
     /// and the reply lines that name both.
     pub async fn action_gate_request(&self, session_id: String, agent: String, req: GateRequest) -> Result<String> {
+        self.action_gate_request_from(session_id,agent,req,None).await
+    }
+
+    pub(crate) async fn action_gate_request_from(&self, session_id: String, agent: String, req: GateRequest, proof: Option<&McpTokenProof>) -> Result<String> {
+        // Capture ingress ownership before preparation, but keep ordinary
+        // parked gates answerable even if the issuer is no longer running.
+        let direct = self.direct_command_context(&session_id,&agent,proof).await;
         let command = req.command.clone();
         let approve_after = req.approve_after.clone();
         let requested = req.run_timeout_secs.map_or(Bound::Default, Bound::Requested);
@@ -506,7 +513,7 @@ impl SignalingBridge {
         match tool_gate::match_keyword("Bash", &command, &keywords) {
             Some(GateMode::AutoAllow) if outward_command(&command) => {
                 match self.prepare_auto_publication(&session_id, &agent, &command, approve_after.as_deref(), req.run_timeout_secs).await? {
-                    AutoPublishPreparation::Direct { note } => self.execute_gated_with(&session_id, &command, bound, &[]).await
+                    AutoPublishPreparation::Direct { note } => self.execute_direct_command(&session_id, &command, bound, direct?).await
                         .map(|run| run.text + &note.map(|n| format!("\n{n}")).unwrap_or_default() + &request_extras(&req, requested)),
                     AutoPublishPreparation::Deferred { outcome, approval_required } => {
                         let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
@@ -519,7 +526,7 @@ impl SignalingBridge {
             }
             // No keyword, or a non-outward auto_allow → run with no prompt.
             None | Some(GateMode::AutoAllow) => self
-                .execute_gated_with(&session_id, &command, bound, &[])
+                .execute_direct_command(&session_id, &command, bound, direct?)
                 .await
                 .map(|run| run.text + &request_extras(&req, requested)),
             Some(GateMode::Gate) => {
@@ -2907,7 +2914,7 @@ pub(super) struct GatedRun {
 /// issued the command it is reading the result of, and out-of-band the
 /// tray-answer row names it once on its verdict line — the old footer put a
 /// 550-char gated command into the user-voice channel a second time.
-fn format_command_output(out: &tool_gate::CommandOutput) -> String {
+pub(super) fn format_command_output(out: &tool_gate::CommandOutput) -> String {
     let mut s = String::new();
     if !out.stdout.is_empty() {
         s.push_str(&out.stdout);
@@ -3079,6 +3086,16 @@ mod tests {
         assert_eq!(validate_run_timeout(1).unwrap(), 1);
         assert_eq!(validate_run_timeout(RUN_TIMEOUT_MAX_SECS).unwrap(), 600);
         assert!(validate_run_timeout(0).is_err() && validate_run_timeout(601).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mcp_timeout_includes_command_cleanup_and_reply_margin() {
+        use crate::policy::command_run::{INTERRUPT_GRACE, TERMINATE_GRACE, REAP_BOUND};
+        let total = RUN_TIMEOUT_MAX_SECS + INTERRUPT_GRACE.as_secs()
+            + TERMINATE_GRACE.as_secs() + REAP_BOUND.as_secs()
+            + super::super::direct_commands::INTERRUPT_GRACE.as_secs() + 10;
+        assert!(total < crate::signaling::MCP_TOOL_TIMEOUT_SECS);
     }
 
     /// EYES P4 (s-42bf34b3): the text of a `command_path` file is classified

@@ -10,6 +10,9 @@ use tokio::sync::{mpsc, oneshot};
 
 #[path = "helper_native_tests.rs"]
 mod helper_native_tests;
+#[cfg(unix)]
+#[path = "direct_command_tests.rs"]
+mod direct_command_tests;
 
 struct Seat {
     input: mpsc::Receiver<OutgoingUserMessage>,

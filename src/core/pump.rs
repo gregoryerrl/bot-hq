@@ -328,7 +328,7 @@ impl PumpConfig {
 /// artisan / rails / npm): a false positive only defers a kill briefly (8s-
 /// capped, self-clears on the ToolResult); a false negative is the exact bug
 /// this prevents.
-fn is_atomic_command(name: &str, input: &serde_json::Value) -> bool {
+pub(crate) fn is_atomic_command(name: &str, input: &serde_json::Value) -> bool {
     let is_command_surface = name == "Bash" || name.ends_with("action_gate");
     if !is_command_surface {
         return false;
@@ -1853,7 +1853,10 @@ pub async fn pump_agent(
                     completed_epoch.is_some_and(|epoch| epoch != 0 && epoch == cell.load(Ordering::Acquire))
                 });
                 if current_completion {
-                    if let Some(epoch)=completed_epoch {cfg.incarnation.end_helper_epoch(epoch);}
+                    if let Some(epoch)=completed_epoch {
+                        cfg.incarnation.end_helper_epoch(epoch);
+                        cfg.incarnation.end_command_epoch(epoch);
+                    }
                 }
                 // Context occupancy rides the turn-complete event because that
                 // is the only place claude-code reports `contextWindow`.
@@ -2537,6 +2540,7 @@ pub async fn pump_agent(
     }
 
     cfg.incarnation.stop_helpers("parent event stream ended",true);
+    cfg.incarnation.stop_commands("parent event stream ended",None,true);
     let Some(_incarnation_lease) = cfg.incarnation.enter().await else { return };
     // Pump terminated (channel closed — the supervisor suppresses per-incarnation
     // Exited events, so a closed channel is the reliable "agent stopped" signal).
