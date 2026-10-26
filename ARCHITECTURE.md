@@ -1630,7 +1630,8 @@ closes that: `core/close_learnings.rs::decide` (pure, four arms — `Run`,
 `SkipNoWriter`, `SkipBusy`, `SkipAlreadyHandled`) says whether a closing
 session gets a learnings turn; `AppState::run_close_epilogue` is the live half —
 close the row and release the UI FIRST, broadcast `CLOSE_LEARNINGS_PROMPT` to
-the roster, wait bounded (`CLOSE_EPILOGUE_ARM_TIMEOUT` 15 s to be dealt,
+the roster as a system-origin row with its full instruction visible in chat
+and a short envelope heading (never human-authored text), wait bounded (`CLOSE_EPILOGUE_ARM_TIMEOUT` 15 s to be dealt,
 `CLOSE_EPILOGUE_TIMEOUT` 180 s to finish), post one outcome row (`Wrote` /
 `Declined` / `TimedOut` / `Failed` — a failed write never looks like a decline),
 then tear down. A second close for a session whose epilogue is running

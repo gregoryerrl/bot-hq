@@ -159,7 +159,7 @@ D15 epilogue, phase advance, tray answers, Stage.
 | `src/core/pump_incarnation_tests.rs` | actual handle-to-pump retirement tests: late Init/events, closed-stream teardown, atomic/busy/context/halt isolation and delayed retries | — |
 | `src/core/activity.rs` | `ActivityTracker` (per-slug busy map + latches) → `SessionActivity` + `session:activity` emit | L |
 | `src/core/state.rs` | `AppState`: open/ensure/restart/`reopen_session`, `cancel_and_escalate` (Pause: decide → interrupt → SIGKILL, atomic-op deferral via `await_atomic_op_or_cap`), resume, `close_session` + epilogue (join arm applies the archive) + `teardown_session`, `broadcast`, `send_user_response`, Stage, `advance_phase`, `resolve_choice`, `halt_declared`, `stray_turn` (stops a turn nobody dealt while another participant holds the ring) | XL |
-| `src/core/broadcast.rs` | `broadcast_user_message`: envelope + `post_to_channel("user")`; writes no stdin (D19) | S |
+| `src/core/broadcast.rs` | `broadcast_user_message`, `post_system_notice`: authored rows + envelopes; `Authored::ByHostInstruction` carries a trusted heading and keeps host directions out of the human ledger; writes no stdin (D19) | S |
 | `src/core/mentions.rs` | `parse_mention_slugs` (D17) | S |
 | `src/core/ipav.rs` | `IpavPhase` chip/name/parse/transition notice | S |
 

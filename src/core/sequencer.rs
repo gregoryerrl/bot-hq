@@ -12254,6 +12254,11 @@ mod tests {
 
         let posted = notices(&storage).await;
         assert_eq!(posted.len(), 1, "exactly one row, once: {posted:?}");
+        let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
+        let notice = rows.iter().find(|r| r.content.contains("round cap")).unwrap();
+        let wire = crate::storage::PersistedMessage::from_row(notice).wire();
+        assert!(wire.contains("] [System: round cap"), "round cap prefix missing: {wire}");
+        assert!(!wire.contains("> [System:"), "round cap prompt was quoted: {wire}");
         assert!(
             posted[0].contains("round cap"),
             "the row has to say WHY the session stopped: {:?}",

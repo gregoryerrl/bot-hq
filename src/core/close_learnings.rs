@@ -230,13 +230,13 @@ pub fn plan(decision: Epilogue, claimed: bool, in_flight: bool) -> ClosePlan {
 ///
 /// A raw string, unlike `prompts.rs` / `general_rules.rs`, which are
 /// `"\`-continued escaped literals where a bare `"` breaks the file.
-pub const CLOSE_LEARNINGS_PROMPT: &str = r#"[System: this session is closing — this is your last turn, and no one is waiting on a reply.
+pub const CLOSE_LEARNINGS_PROMPT: &str = r#"This session is closing — this is your last turn, and no one is waiting on a reply.
 
 If this session turned up something a FUTURE session would need and could not recover in seconds from the code or git history — a gotcha, a where-things-live pointer, a convention you had to infer — append it to the project's Context Library now with cl_write_file (mode: "append" — just the delta, at most ~5 one-line entries; a claim the file already makes is corrected in place with cl_edit_file, never re-stated below it).
 
 Writing nothing is the expected outcome and needs no explanation. Most sessions learn nothing worth persisting, and an invented entry is worse than an empty one: the next session reads it as fact and builds on it. Do not summarise this session, do not restate what the code already says, and do not write a "nothing to report" note anywhere.
 
-Whichever you choose, say nothing further — the session closes when your turn ends.]"#;
+Whichever you choose, say nothing further — the session closes when your turn ends."#;
 
 /// What the epilogue's turn came to.
 #[derive(Debug, Clone, PartialEq, Eq)]

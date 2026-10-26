@@ -1508,7 +1508,11 @@ impl AppState {
     async fn run_close_epilogue(&self, id: &str) {
         use close_learnings::Outcome;
         let outcome = match self
-            .broadcast(id, close_learnings::CLOSE_LEARNINGS_PROMPT, Authored::ByHost)
+            .broadcast(
+                id,
+                close_learnings::CLOSE_LEARNINGS_PROMPT,
+                Authored::ByHostInstruction("[System: close-out learnings]"),
+            )
             .await
         {
             Err(e) => Outcome::Failed(e.to_string()),
@@ -2445,9 +2449,8 @@ impl AppState {
         // for the ordering and the visibility argument.
         commit_phase_transition(&self.storage, session_id, &handle.ipav, target).await;
 
-        // Synthetic phase-change message in storage. No envelope: the wire is
-        // the notice byte for byte, because `transition_notice()` already
-        // carries its own `[PHASE: X]` and a phase envelope would double-tag it.
+        // No envelope: the canonical phase instruction shares the speaker's
+        // line. Keep its complete text in chat as well as on the wire.
         //
         // Host-authored (`origin = "system"`), so participants read it as
         // `[system] [PHASE: X] …`. It went through the user-row writer until
@@ -3043,6 +3046,39 @@ mod tests {
             pause_notice(&snapshot(1, Some("Bash")), true),
             "⏸ Paused during boot, while the participants were still orienting."
         );
+    }
+
+    #[tokio::test]
+    async fn close_epilogue_host_prompt_wire_is_not_quoted() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        // Keep the stub's input open, so broadcast does not try to respawn it.
+        let (handle, _input) = crate::core::session::stub_session_for_tests("s1", &state.bridge).await;
+        state.sessions.lock().await.insert("s1".into(), handle);
+        // The fixture has no model to finish the epilogue. Drive the real
+        // producer, then cancel its wait after the prompt has been persisted.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(1), state.run_close_epilogue("s1")
+        ).await;
+        let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
+        let prompt = rows.iter().find(|r| r.content.contains("This session is closing")).unwrap();
+        let wire = crate::storage::PersistedMessage::from_row(prompt).wire();
+        assert_eq!(prompt.origin, "system");
+        assert!(!wire.contains("> [System:"), "close prompt was quoted: {wire}");
+        assert!(wire.contains("Writing nothing is the expected outcome"));
+        assert_eq!(prompt.content, close_learnings::CLOSE_LEARNINGS_PROMPT, "the full instruction stays visible in chat");
+        assert!(storage.user_words("s1", 10_000).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn phase_change_host_prompt_wire_is_not_quoted() {
+        let (state, storage, _tmp) = state_with_stub().await;
+        state.advance_phase("s1", IpavPhase::Verify, PhaseAdvanceSource::Agent).await.unwrap();
+        let rows = storage.channel_after("s1", 0, 100).await.unwrap().rows;
+        let row = rows.iter().find(|r| r.kind == "phase_change").unwrap();
+        let wire = crate::storage::PersistedMessage::from_row(row).wire();
+        assert_eq!(row.origin, "system");
+        assert!(wire.contains("] [PHASE: Verify] Run tests"), "phase instruction was quoted: {wire}");
+        assert_eq!(wire.matches("[PHASE: Verify]").count(), 1);
     }
 
     /// The snapshot reads the BUSY participant's liveness — the one the

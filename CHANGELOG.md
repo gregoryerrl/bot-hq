@@ -27,11 +27,17 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
-- Messages sent to agents quote bracket-led body lines, including untimed and
+- Messages sent to agents quote bracket-led body lines at visual line starts, including untimed and
   phase-like tags, fullwidth brackets, Unicode line separators, and invisible
   prefix formatting. Stored content stays unchanged, and the escaped view
   keeps its delivery cap. This guards transcript framing, not arbitrary
   instructions embedded in untrusted text.
+- A body's first line stays unquoted when it shares the real speaker header's
+  line; phase, banner or prefix framing puts it at a new line and enables quoting.
+  This preserves host notices and review-notice deduplication without exempting
+  a sender or trusting later forged tags. Full host instructions remain visible
+  in chat; idle and close-out instructions use a short trusted heading.
+  Close-out prompts are attributed to the system, never to the human.
 - bot-hq's own MCP connection now allows 660 seconds for a tool reply, so a
   permitted direct command can complete beyond the clients' previous 60-second
   cutoff. Command bounds stay at 120 seconds by default and 600 maximum; other

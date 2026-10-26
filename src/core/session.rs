@@ -6835,6 +6835,8 @@ mod tests {
                 "got {:?}",
                 m.message.content
             );
+            assert!(!m.message.content.contains("> [System:"), "BOOT prompt was quoted");
+            assert!(m.message.content.contains("] [System: BOOT"), "BOOT prefix missing");
         }
         // And the ring has NOT started: one is still reading.
         done_tx.send(1).await.unwrap();
@@ -6892,6 +6894,11 @@ mod tests {
             notices.iter().any(|n| n.contains("READY") && n.contains("waiting")),
             "boot has to announce that it is done and waiting: {notices:?}"
         );
+        let rows = s.channel_after("s1", 0, 100).await.unwrap().rows;
+        let ready = rows.iter().find(|r| r.content.contains("READY")).unwrap();
+        let wire = crate::storage::PersistedMessage::from_row(ready).wire();
+        assert!(wire.contains("] [System: READY"), "READY prefix missing: {wire}");
+        assert!(!wire.contains("> [System:"), "READY prompt was quoted: {wire}");
     }
 
     /// D21 §4: *"a timeout fires, because one slow agent must not hold the
@@ -6970,6 +6977,11 @@ mod tests {
             notices.iter().any(|n| n.contains("0 of 1 participants")),
             "a truncated boot must SAY it was truncated: {notices:?}"
         );
+        let rows = s.channel_after("s1", 0, 100).await.unwrap().rows;
+        let row = rows.iter().find(|r| r.content.contains("BOOT — starting after")).unwrap();
+        let wire = crate::storage::PersistedMessage::from_row(row).wire();
+        assert!(wire.contains("] [System: BOOT — starting after"));
+        assert!(!wire.contains("> [System:"));
 
         // **The hung participant must be RELEASED, or the window is unusable.**
         //

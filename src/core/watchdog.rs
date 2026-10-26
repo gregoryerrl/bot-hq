@@ -496,13 +496,13 @@ pub async fn run_stall_watchdog(
 async fn deliver_idle_nudge(session_id: &str, idle_watch: &IdleWatch, bridge: &SignalingBridge) {
     const NOTICE: &str =
         "Session idled with no question or halt parked — nudged the executor to declare state.";
-    const NUDGE: &str = "[System: this session went idle with no question parked and no \
+    const NUDGE: &str = "This session went idle with no question parked and no \
         halt flag — the user cannot tell settled from stalled. Declare state now, with a \
         tool rather than bare prose: continue work the user already directed if any \
         remains; park a question with your recommendation (ask_user_choice); yield with \
         a reason (halt / mark_awaiting_user); or ask to close if the task is done. Never \
         invent a direction or new work to satisfy this nudge — if no user-given \
-        direction exists, the right response IS the question: ask which direction.]";
+        direction exists, the right response IS the question: ask which direction.";
     // TWO rows, because this site says two different things. NOTICE is the
     // one-line summary the user reads in the chat; NUDGE is the instruction
     // the executor reads. Before B5 Task 2 only NOTICE was recorded and NUDGE
@@ -532,7 +532,7 @@ async fn deliver_idle_nudge(session_id: &str, idle_watch: &IdleWatch, bridge: &S
         session_id,
         MessageKind::SystemNotice,
         NUDGE,
-        Some(Envelope::phase(phase.name())),
+        Some(Envelope::phase(phase.name()).with_system_prefix("[System: declare the session's state]")),
     )
     .await
     else {
@@ -786,7 +786,10 @@ mod tests {
         // as the USER has been handed a fabricated instruction.
         assert_eq!(rows[1].origin, "system");
         assert!(rows[1].participant_id.is_none());
-        assert!(rows[1].content.starts_with("[System: this session went idle"));
+        let wire = crate::storage::PersistedMessage::from_row(&rows[1]).wire();
+        assert!(wire.contains("[PHASE: Apply]\n[System:"), "host prompt was quoted: {wire}");
+        assert!(rows[1].content.starts_with("This session went idle"));
+        assert!(rows[1].content.contains("Never invent a direction or new work"), "the full instruction stays visible in chat");
 
         // **And the wake is a ring RELEASE, mentioning the participant that can
         // answer it.** It used to be a write into that participant's stdin,
