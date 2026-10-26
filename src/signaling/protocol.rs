@@ -490,7 +490,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "read_gate",
-            description: "Park ONE read listed in production_reads/staging_reads for user approval. A listed read in Bash is refused and points here. Only one command matching an entry, optionally piped into bare head/tail/jq/grep/wc/cut. rg is agent-shell-only; use grep here. No shell continuation, redirection, computed value (including unquoted glob/brace syntax) or wrapper; write verbs and database clients refuse (SQL: prod_read). From a reviewer it parks directly and names the reviewer; from an executor it is reviewed first. Returns gate_id immediately; approval delivers output as a row, also readable with gate_status.",
+            description: "Park ONE read listed in production_reads/staging_reads for user approval. A listed read in Bash is refused and points here. Only one command matching an entry, optionally piped into head/tail/jq/grep/wc/cut (bare names, Unix /bin or /usr/bin paths, or plain `command <filter>`). rg is agent-shell-only; use grep here. No shell continuation, redirection, computed value (including unquoted glob/brace syntax) or other wrapper; write verbs and database clients refuse (SQL: prod_read). From a reviewer it parks directly and names the reviewer; from an executor it is reviewed first. Returns gate_id immediately; approval delivers output as a row, also readable with gate_status.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -445,6 +445,19 @@ fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
+/// Read exemptions trust bare names and exact Unix system-tool paths, never
+/// arbitrary executables whose basename happens to name a filter.
+fn read_program_name(program: &str) -> Option<&str> {
+    if !program.contains('/') {
+        return Some(program);
+    }
+    if cfg!(unix) {
+        return program.strip_prefix("/bin/").or_else(|| program.strip_prefix("/usr/bin/"))
+            .filter(|name| !name.contains('/'));
+    }
+    None
+}
+
 const OUTWARD_TOOLS: &[&str] = &["gh", "curl"];
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh"];
 const MAX_NESTING: usize = 4;
@@ -456,7 +469,7 @@ const MAX_NESTING: usize = 4;
 #[derive(Debug, Clone)]
 struct Cmd {
     tool: String,
-    path_qualified: bool,
+    program: String,
     args: Vec<Word>,
     opaque: bool,
     /// The segment's words before this command's own (assignments like
@@ -544,7 +557,7 @@ fn simple_commands(command: &str, depth: usize) -> Vec<Cmd> {
                 }
             }
             let prefix = words[..k].iter().filter(|w| !w.op).map(|w| w.text.clone()).collect();
-            out.push(Cmd { tool, path_qualified: words[k].text.contains('/'), args, opaque, prefix });
+            out.push(Cmd { tool, program: words[k].text.clone(), args, opaque, prefix });
         }
     }
     out
@@ -664,7 +677,7 @@ pub(crate) fn is_outward(command: &str) -> bool {
 /// so does any expansion in a flag's value. The endpoint is a URL path, never
 /// a body: nothing the variable holds leaves the machine as content.
 fn is_gh_api_get(c: &Cmd) -> bool {
-    if c.tool != "gh" || c.path_qualified || c.opaque {
+    if c.tool != "gh" || read_program_name(&c.program) != Some("gh") || c.opaque {
         return false;
     }
     let args: Vec<&Word> = c.args.iter().filter(|w| !w.op).collect();
@@ -891,7 +904,8 @@ pub(crate) fn is_gh_api_read(command: &str) -> bool {
     let cmds = simple_commands(command, 0);
     let Some(first) = cmds.first() else { return false };
     is_gh_api_get(first)
-        && cmds[1..].iter().all(|c| !c.path_qualified && READ_FILTERS.contains(&c.tool.as_str()) && !c.opaque)
+        && cmds[1..].iter().all(|c| read_program_name(&c.program)
+            .is_some_and(|name| READ_FILTERS.contains(&name)) && !c.opaque)
 }
 
 /// The file `command` writes TEXT into without running anything (feedback
@@ -1578,7 +1592,8 @@ fn validate_rg_filter(args: &[Word]) -> Result<(), String> {
 /// K, EYES: the lists find a listed command INSIDE a longer line, so
 /// `gcloud logging read x; rm -rf ~/d` would otherwise reach the user's
 /// Approve as "the reviewer's read"). No `;`, `&&`, `||`, `&`, redirection,
-/// heredoc, value the shell computes, wrapper or shell. `Err` says which.
+/// heredoc, value the shell computes, or shell. Only a plain `command` prefix
+/// on a filter is accepted; other wrappers refuse. `Err` says which.
 pub(crate) fn single_read_command(command: &str) -> Result<(), String> {
     single_read_command_in(command, false)
 }
@@ -1609,18 +1624,23 @@ fn single_read_command_in(command: &str, agent_shell: bool) -> Result<(), String
             if !seg.piped_from_prev {
                 return Err("more than one command (`;`, `&&`, `||` or `&`)".to_string());
             }
-            let tool = head.text.as_str();
-            if !READ_FILTERS.contains(&tool) {
+            // `command grep` bypasses an agent-shell function. No options or
+            // other wrappers: only this plain builtin form is admitted.
+            let filter_words = if head.text == "command" { &seg.words[1..] } else { &seg.words[..] };
+            let Some(program) = filter_words.first() else {
+                return Err("a command wrapper without a filter".into());
+            };
+            let Some(tool) = read_program_name(&program.text).filter(|tool| READ_FILTERS.contains(tool)) else {
                 return Err(format!(
-                    "a pipe into `{tool}`, which is not one of the read-only filters (head, tail, \
-                     jq, grep, rg --no-config, wc, cut)"
+                    "a pipe into `{}`, which is not a supported read-only filter (head, tail, \
+                     jq, grep, rg --no-config, wc, cut; bare name or Unix /bin or /usr/bin path)", program.text
                 ));
-            }
+            };
             if tool == "rg" {
                 if !agent_shell {
                     return Err("an agent-shell-only rg filter; use grep for host-run read_gate commands".into());
                 }
-                validate_rg_filter(&seg.words[1..])?;
+                validate_rg_filter(&filter_words[1..])?;
             }
         }
         if seg.words.iter().any(|w| w.unquoted_pattern) {
@@ -2414,8 +2434,23 @@ mod tests {
     // --- read_gate's shape (group K) -----------------------------------------
 
     #[test]
-    fn read_filters_require_bare_program_names() {
-        for filter in ["./rg --no-config x", "/tmp/x/head -1", "../grep x", "/usr/bin/jq ."] {
+    fn system_and_command_filters_keep_the_read_exemption() {
+        let paths = ["/usr/bin/grep -n -E '^@app\\.|route'", "/bin/head -5", "command grep -n route", "command /usr/bin/tail -3"];
+        for filter in paths {
+            let accepted = cfg!(unix) || filter == "command grep -n route";
+            assert_eq!(is_gh_api_read(&format!("gh api 'repos/o/r/main.py?ref=abc' | {filter}")), accepted, "{filter}");
+            assert_eq!(single_read_command(&format!("gcloud logging read x | {filter}")).is_ok(), accepted, "{filter}");
+        }
+        assert_eq!(is_gh_api_read("/usr/bin/gh api repos/o/r | head -1"), cfg!(unix));
+        assert!(is_outward("/usr/bin/gh api repos/o/r -X POST"));
+        for filter in ["command /tmp/grep x", "command -- grep x", "command -p head -1", "/usr/bin/../bin/grep x", "/usr/local/bin/grep x"] {
+            assert!(!is_gh_api_read(&format!("gh api repos/o/r | {filter}")), "{filter}");
+        }
+    }
+
+    #[test]
+    fn read_filters_refuse_arbitrary_executable_paths() {
+        for filter in ["./rg --no-config x", "/tmp/x/head -1", "../grep x", "/usr/local/bin/jq ."] {
             assert!(!is_gh_api_read(&format!("gh api repos/o/r | {filter}")), "{filter}");
             assert!(single_read_command(&format!("gcloud logging read x | {filter}")).is_err(), "{filter}");
         }

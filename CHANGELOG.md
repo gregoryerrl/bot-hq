@@ -35,7 +35,8 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   included in this exemption.
   Read pipelines also refuse unquoted glob/brace expansion, which can insert
   extra options; quote regexes and GitHub placeholder/query paths.
-  The exemption requires bare gh/filter names, so an arbitrary executable
+  The exemption accepts bare gh/filter names, exact Unix /bin and /usr/bin
+  tool paths, and a plain `command <filter>` prefix. Arbitrary executables
   such as ./rg or /tmp/head cannot impersonate a read-only tool.
 - Messages sent to agents quote bracket-led body lines at visual line starts, including untimed and
   phase-like tags, fullwidth brackets, Unicode line separators, and invisible

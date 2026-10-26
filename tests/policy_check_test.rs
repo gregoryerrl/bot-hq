@@ -128,6 +128,13 @@ fn the_tool_gate_hook_passes_a_keyword_quoted_to_grep() {
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "a GET read runs unapproved");
     let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r | rg --no-config -n 'def|class'");
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "safe rg filter reaches the built hook");
+    let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api repos/o/r | command grep -n route");
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "plain command wrapper resolves the real filter");
+    #[cfg(unix)]
+    {
+        let (code, out, err) = hook_in(data.path(), "tool-gate", "/bin/bash", "gh api 'repos/o/r/main.py?ref=abc' | /usr/bin/grep -n -E '^@app\\.|route'");
+        assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""), "trusted system filter stays exempt");
+    }
     for command in [
         "gh api repos/o/r | rg -n x",
         "gh api repos/o/r | rg --no-config --pre=script x file",

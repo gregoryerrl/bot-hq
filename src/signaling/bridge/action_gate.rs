@@ -767,7 +767,7 @@ impl SignalingBridge {
         }
         if let Err(why) = super::outward_body::single_read_command(&command) {
             anyhow::bail!(
-                "read_gate takes ONE command, piped into bare head, tail, jq, grep, wc or cut — \
+                "read_gate takes ONE command, piped into supported read-only filters — \
                  this one has {why}. Split it, or ask the executor to route it through action_gate."
             );
         }
@@ -6912,7 +6912,11 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         let (bridge, storage, _eyes, _path, _body) = outward_fixture(&data, &repo).await;
         let _ring = ring_for(&bridge).await;
         let out = bridge
-            .read_gate("s1".into(), "eyes".into(), "gcloud logging read 'severity>=ERROR' | grep ERROR | head -5".into(), None)
+            .read_gate("s1".into(), "eyes".into(), if cfg!(unix) {
+                "gcloud logging read 'severity>=ERROR' | /usr/bin/grep ERROR | command head -5"
+            } else {
+                "gcloud logging read 'severity>=ERROR' | grep ERROR | command head -5"
+            }.into(), None)
             .await
             .unwrap();
         assert!(out.to_lowercase().contains("parked"), "straight for the user: {out}");
