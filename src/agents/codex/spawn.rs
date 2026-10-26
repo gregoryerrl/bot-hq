@@ -804,7 +804,15 @@ impl Driver {
                             }
                         }
                     }
+                    // The failed-hook notice says WHERE the hook's time went,
+                    // from the breadcrumb record the hook left (feedback #121) —
+                    // or that no record matches, which is its own finding.
+                    let diagnosis = gate_hook_failed(&inc).then(|| self.hook_failure_diagnosis(&inc));
                     for ev in self.translator.translate(&inc).into_iter().chain(reinjected) {
+                        let ev = match (ev, &diagnosis) {
+                            (AgentEvent::Notice(text), Some(why)) => AgentEvent::Notice(format!("{text} {why}")),
+                            (ev, _) => ev,
+                        };
                         if let AgentEvent::TurnComplete { .. } = &ev {
                             // The turn an interrupt ended may have left its
                             // command running: stop it BEFORE the completion is
@@ -917,6 +925,23 @@ impl Driver {
                 warn!(agent = %name, %e, "turn/interrupt failed");
             }
         });
+    }
+
+    /// Where a FAILED gate hook's time went (feedback #121): the breadcrumb
+    /// record the hook left under `.local/hook-phases`, matched to Codex's run
+    /// by turn id and time — one sentence for the notice, "unknown" when no
+    /// record or several match (`policy::hook_phases::diagnose`).
+    fn hook_failure_diagnosis(&self, inc: &Incoming) -> String {
+        let Incoming::Notification(n) = inc else { return String::new() };
+        let local = crate::paths::Paths::for_data_dir(self.data_dir.clone()).local_dir;
+        crate::policy::hook_phases::diagnose(
+            &local,
+            &self.session_id,
+            &self.agent_name,
+            &n.params["run"],
+            n.params["turnId"].as_str(),
+            crate::policy::hook_phases::now_ms(),
+        )
     }
 
     /// Stop the commands an interrupted turn left running: every live
@@ -1535,7 +1560,9 @@ mod tests {
         let req = h.fake.read().await;
         h.fake.answer_interrupt(&req, "t1").await;
         assert!(matches!(next_event(&mut h).await, AgentEvent::Health(AgentHealth::Stalled)));
-        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(n) if n.contains("FAILED")));
+        // No breadcrumb record anywhere (the harness's data dir does not
+        // exist): the notice says the phase is unknown rather than guessing.
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Notice(n) if n.contains("FAILED") && n.contains("stalled phase is unknown")));
         // The turn ends in time: the deadline is cleared, the driver lives on.
         h.fake.turn_interrupted("t1").await;
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { stop_reason: Some(s), .. } if s == "interrupted"));
@@ -1543,6 +1570,57 @@ mod tests {
         h.input.send(OutgoingUserMessage::text("again")).await.unwrap();
         h.fake.hooks_armed().await;
         assert_eq!(h.fake.read().await["method"], "turn/start");
+    }
+
+    /// Feedback #121: the hook left its breadcrumb record (killed mid-phase,
+    /// its process gone), Codex reports the run's start and duration on the
+    /// same turn — the notice shows the one overlapping record with ownership
+    /// unconfirmed: the startup gap, each recorded phase's time, the last
+    /// recorded phase and the pid observation, through the driver's real data
+    /// dir, session/agent names and liveness check.
+    #[tokio::test]
+    async fn a_failed_gate_hook_notice_names_the_phase_the_record_left() {
+        let data = tempfile::tempdir().unwrap();
+        let local = crate::paths::Paths::for_data_dir(data.path().to_path_buf()).local_dir;
+        let dir = crate::policy::hook_phases::dir_under(&local, "s-test", "eyes").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = crate::policy::hook_phases::now_ms() - 31_000;
+        // A pid no system hands out: the record's process is gone.
+        let pid = i32::MAX as u32;
+        let record = crate::policy::hook_phases::HookPhaseRecord {
+            version: 1, hook: "codex-gate".into(), pid, started_at_ms: started + 1_500,
+            turn_id: Some("t1".into()), tool_use_id: Some("call_7".into()), tool_name: Some("Bash".into()),
+            phases: vec![
+                crate::policy::hook_phases::Phase { phase: "read-payload".into(), at_ms: started + 1_510 },
+                crate::policy::hook_phases::Phase { phase: "fetch-posture".into(), at_ms: started + 1_600 },
+            ],
+        };
+        let path = dir.join(format!("{}-{pid}.json", started + 1_500));
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        DATA_DIR.with(|d| *d.borrow_mut() = Some(data.path().to_path_buf()));
+        let mut h = harness();
+        DATA_DIR.with(|d| *d.borrow_mut() = None);
+        h.input.send(OutgoingUserMessage::text("run it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        h.fake.write(json!({"method": "hook/completed", "params": {"threadId": "thr", "turnId": "t1", "run": {
+            "eventName": "preToolUse", "status": "failed", "sourcePath": "/h/hooks.json",
+            "startedAt": started, "completedAt": started + 30_002, "durationMs": 30_002,
+            "entries": [{"kind": "error", "text": "hook timed out after 30s"}]
+        }}})).await;
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::Health(AgentHealth::Stalled)));
+        let AgentEvent::Notice(notice) = next_event(&mut h).await else { panic!("a notice") };
+        assert!(notice.contains("hook timed out after 30s"), "{notice}");
+        assert!(notice.contains("Codex gave the hook up after 30.0 s"), "{notice}");
+        assert!(notice.contains("one bot-hq hook record overlaps that run (ownership unconfirmed: the two carry no shared invocation id)"), "{notice}");
+        assert!(notice.contains(&format!("pid {pid} started +1.5 s, turn t1, last recorded phase fetch-posture, its process is gone")), "{notice}");
+        assert!(notice.contains("recorded phases read-payload 90 ms → fetch-posture entered 28.4 s before Codex gave up"), "{notice}");
+        assert!(path.exists(), "the record is evidence the notice does not destroy");
+        h.fake.turn_interrupted("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
     }
 
     /// The failed-hook interrupt carries the same deadline as a user's: a turn

@@ -65,7 +65,7 @@ pub fn dir_under(local_dir: &Path) -> PathBuf {
 /// Is `s` usable as one path segment? Session ids (`s-d43b3630`) and
 /// participant slugs (`hands`, `hands-2`) are; anything that could leave the
 /// directory is not, and such a pair simply gets no file.
-fn safe_segment(s: &str) -> bool {
+pub(crate) fn safe_segment(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 96
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')

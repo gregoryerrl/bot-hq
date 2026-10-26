@@ -1354,6 +1354,26 @@ hold a reviewer more strictly belonged to the native loop and went with it (D9).
   `run_tool_gate`) blocks a `gate`-matched command with **exit 2** and parks it
   through the authenticated `/hooks/tool-gate` route (with an `action_gate`
   fallback). The Codex hook uses the same route after checking caller posture.
+  The Codex hook also leaves breadcrumbs for its 30 s budget
+  (`src/policy/hook_phases.rs`, feedback #121): one record per invocation under
+  `.local/hook-phases/<session>/<agent>/`, written before the payload is read,
+  rewritten at each phase (read-payload, parse-payload, shell-lint,
+  start-runtime, fetch-posture, resolve-policy, review-auto-gate / park-gate,
+  decide, handoff-reminder) and removed on exit, so a hook Codex killed leaves
+  the phase it was in. When Codex reports a failed run the driver looks for
+  records of the same turn (the one identifier both sides carry; Codex's run
+  id reaches neither the hook's stdin nor its environment) whose start lies in
+  the run's `startedAt`/`durationMs` window, and appends to the FAILED notice
+  what it found — never an attribution, since no shared invocation id exists:
+  one overlapping record is shown with ownership unconfirmed (the gap after
+  Codex's start, each recorded phase's time up to the LAST RECORDED phase, and
+  whether a process with its pid still runs, as an observation only — a live
+  pid may be another call's hook or a reused number); several are listed and
+  the owner is unknown; none is missing evidence (the hook may not have
+  started in the window, or wrote nothing, or already cleaned up). Records
+  are never deleted by the reader — a live hook removes its own, a leftover is
+  swept after 15 minutes. An invocation the hook cannot parse exits 2 (fail
+  closed), unlike the other hooks' soft exit 0.
   An outward `auto_allow` command also asks the host: unread content queues
   for review and automatic execution, while already-covered content or a
   roster without a reviewer may proceed. The route rechecks policy and the

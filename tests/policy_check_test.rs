@@ -203,6 +203,26 @@ fn the_codex_gate_fails_closed_without_a_session_or_the_app() {
     // The zsh trap is caught before anything else, like the other two hooks.
     let payload_trap = run(Some("s-nowhere"), "Bash", r#"git show "$R:app/x""#);
     assert_eq!(payload_trap.0, 2);
+    // Feedback #121: every exit above left no breadcrumb record behind — the
+    // directory was created for the session that had an id, and is empty.
+    let records = data.path().join(".local/hook-phases/s-nowhere/eyes");
+    assert!(records.is_dir(), "the record directory is made on the first invocation");
+    assert_eq!(std::fs::read_dir(&records).unwrap().count(), 0, "a hook that exits removes its record");
+    assert!(!data.path().join(".local/hook-phases").read_dir().unwrap().any(|e| e.unwrap().file_name() != "s-nowhere"),
+        "no session id, no record anywhere");
+    // An invocation the hook cannot even parse (bot-hq's own hooks.json names
+    // --data-dir; a damaged one does not) still fails CLOSED: exit 2, not the
+    // other hooks' soft exit 0.
+    let out = Command::new(env!("CARGO_BIN_EXE_bot-hq"))
+        .args(["policy-check", "codex-gate"])
+        .env("BOT_HQ_SESSION_ID", "s-nowhere").env("BOT_HQ_AGENT", "eyes")
+        .stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("BLOCKED") && String::from_utf8_lossy(&out.stderr).contains("--data-dir"));
+    let out = Command::new(env!("CARGO_BIN_EXE_bot-hq"))
+        .args(["policy-check", "shell-lint"])
+        .stdin(Stdio::null()).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "the other hooks keep their soft exit");
 }
 
 #[tokio::test]

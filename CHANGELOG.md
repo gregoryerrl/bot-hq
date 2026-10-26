@@ -27,6 +27,19 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- When Codex gives up on bot-hq's gate hook (`hook timed out after 30s`), the
+  notice now says where the time went: the hook keeps a per-invocation record
+  of the phase it is in (reading the payload, the posture call, policy files,
+  parking the gate…) and removes it on exit, and the host reads the records
+  of the same turn that overlap Codex's run. The two carry no shared
+  invocation id, so nothing is attributed: one overlapping record is shown
+  with ownership unconfirmed — the gap after Codex's start, each recorded
+  phase's time up to the last recorded phase, and whether a process with its
+  pid still runs, as an observation — several are listed with the owner
+  unknown, and none means the evidence is missing (the hook may not have
+  started in the window, or wrote nothing, or already cleaned up). Records
+  are kept as evidence, not consumed. A `codex-gate` invocation the hook
+  cannot parse now exits 2 instead of letting the call through.
 - A forced approval (`action_gate` with `require_approval: true`) is read by
   the reviewer before it reaches your tray, whatever the command's shape —
   scripts included, which bot-hq does not parse. Three production reads

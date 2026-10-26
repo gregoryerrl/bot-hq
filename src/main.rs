@@ -1092,8 +1092,15 @@ fn attach_parent_console_if_bare() {
 /// working repos. Exits with the appropriate status code (0 = clean, 1 = block).
 fn run_policy_check_cli(args: &[String]) -> Result<()> {
     let exit_code = hooks::run_cli(args).unwrap_or_else(|e| {
+        // The Codex gate fails CLOSED: nothing stands behind it, so an
+        // invocation it cannot even parse must refuse the call, not let it
+        // through (feedback #121). Every other hook soft-fails — an internal
+        // error must not break the user's git workflow.
+        if args.first().map(String::as_str) == Some("codex-gate") {
+            eprintln!("bot-hq codex-gate: BLOCKED — {e}. Nothing runs until the hook's own invocation is right.");
+            return 2;
+        }
         eprintln!("bot-hq policy-check: {e}");
-        // Soft-fail: don't break the user's git workflow on internal errors.
         0
     });
     if exit_code != 0 {

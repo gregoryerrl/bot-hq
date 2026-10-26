@@ -26,6 +26,7 @@ pub mod audit;
 #[cfg(unix)]
 pub(crate) mod command_run;
 pub mod data_reads;
+pub mod hook_phases;
 pub mod hooks;
 pub mod presets;
 pub mod read_only_rules;

@@ -1398,6 +1398,11 @@ pub(crate) enum CodexPosture {
 pub(crate) struct CodexHookPayload {
     pub tool_name: String,
     pub command: Option<String>,
+    /// Codex's `turn_id` / `tool_use_id` for the call — the turn id is the one
+    /// identifier the host also sees on the run's `hook/completed`
+    /// notification, so a breadcrumb record carries it (feedback #121).
+    pub turn_id: Option<String>,
+    pub tool_use_id: Option<String>,
 }
 
 impl CodexHookPayload {
@@ -1414,7 +1419,8 @@ impl CodexHookPayload {
             .then(|| v.get("tool_input")?.get("command")?.as_str().map(|c| c.trim().to_string()))
             .flatten()
             .filter(|c| !c.is_empty());
-        Some(Self { tool_name, command })
+        let id = |key: &str| v.get(key)?.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+        Some(Self { tool_name, command, turn_id: id("turn_id"), tool_use_id: id("tool_use_id") })
     }
 }
 
@@ -1435,39 +1441,62 @@ fn run_codex_gate(
     session_id: Option<&str>,
     agent: &str,
 ) -> Result<i32> {
+    // Feedback #121: breadcrumbs for the 30 s Codex gives this hook — written
+    // before the first thing that can block, rewritten at every phase, removed
+    // on exit; a kill leaves the phase it happened in for the host to report.
+    let local_dir = crate::paths::Paths::for_data_dir(data_dir.to_path_buf()).local_dir;
+    let mut phases = crate::policy::hook_phases::PhaseRecorder::begin(&local_dir, "codex-gate", session_id, agent);
+    let code = run_codex_gate_phased(data_dir, project, session_id, agent, &mut phases);
+    phases.finish();
+    Ok(code)
+}
+
+fn run_codex_gate_phased(
+    data_dir: &Path,
+    project: Option<&str>,
+    session_id: Option<&str>,
+    agent: &str,
+    phases: &mut crate::policy::hook_phases::PhaseRecorder,
+) -> i32 {
     use std::io::Read;
+    phases.enter("read-payload");
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
         eprintln!("bot-hq codex-gate: BLOCKED — could not read the hook payload; nothing runs until it can.");
-        return Ok(2);
+        return 2;
     }
+    phases.enter("parse-payload");
     let Some(payload) = CodexHookPayload::parse(&buf) else {
         eprintln!("bot-hq codex-gate: BLOCKED — the hook payload is not a PreToolUse call bot-hq understands; nothing runs until it is.");
-        return Ok(2);
+        return 2;
     };
+    phases.identify(payload.turn_id.as_deref(), payload.tool_use_id.as_deref(), Some(&payload.tool_name));
     let Some(session_id) = session_id else {
         eprintln!(
             "bot-hq codex-gate: BLOCKED — no BOT_HQ_SESSION_ID in this process's environment, so \
              bot-hq cannot tell which participant is calling. A Codex participant bot-hq spawned \
              always carries it; nothing runs without it."
         );
-        return Ok(2);
+        return 2;
     };
     // The zsh `$var:x` trap first, as in the other two hooks, for every
     // posture — a trapped command is never parked, and never run mangled.
+    phases.enter("shell-lint");
     if let Some(command) = payload.command.as_deref() {
         if let Some(refusal) = shell_trap_refusal(command) {
             eprintln!("{refusal}");
-            return Ok(2);
+            return 2;
         }
     }
+    phases.enter("start-runtime");
     let rt = match hook_runtime() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("bot-hq codex-gate: BLOCKED — could not start the client that asks bot-hq for your posture ({e}); nothing runs until it can.");
-            return Ok(2);
+            return 2;
         }
     };
+    phases.enter("fetch-posture");
     let posture = match rt.block_on(fetch_posture(data_dir, session_id, agent)) {
         Ok(p) => p,
         Err(reason) => {
@@ -1475,10 +1504,11 @@ fn run_codex_gate(
                 "bot-hq codex-gate: BLOCKED — {reason}. Nothing runs until bot-hq is running and \
                  knows this participant (session {session_id}, participant {agent})."
             );
-            return Ok(2);
+            return 2;
         }
     };
     // What the edit posture needs, resolved the way `run_tool_gate` does it.
+    phases.enter("resolve-policy");
     let sid = Some(session_id);
     let mut automatic_review = None;
     let mut needs_automatic_review = false;
@@ -1493,9 +1523,11 @@ fn run_codex_gate(
                     == Some(crate::policy::tool_gate::GateMode::Gate);
             let parked = if listed.is_none() && needs_auto_publication_review(command, &keywords) {
                 needs_automatic_review = true;
+                phases.enter("review-auto-gate");
                 automatic_review = rt.block_on(review_auto_gate(data_dir, session_id, agent, command));
                 None
             } else if gated {
+                phases.enter("park-gate");
                 rt.block_on(park_gate(data_dir, session_id, agent, command))
             } else {
                 None
@@ -1510,6 +1542,7 @@ fn run_codex_gate(
         }
         _ => (Vec::new(), None, None),
     };
+    phases.enter("decide");
     let (code, message) = if needs_automatic_review {
         auto_review_exit(payload.command.as_deref().unwrap_or(""), automatic_review.as_ref())
     } else {
@@ -1521,11 +1554,12 @@ fn run_codex_gate(
     if code == 0 {
         // The mid-turn handoff reminder rides the same hook (B1e), on a pass
         // only: a refusal is the whole message.
+        phases.enter("handoff-reminder");
         if let Some(text) = handoff_due_text(data_dir, sid, agent) {
             print!("{}", crate::agents::handoff::due_hook_output(&text));
         }
     }
-    Ok(code)
+    code
 }
 
 /// The Codex gate's decision table, pure. Read-only: a file-editing tool, a
@@ -3928,13 +3962,13 @@ mod tests {
     #[test]
     fn codex_gate_for_a_read_only_role_denies_edits_and_mutations_and_passes_reads() {
         let deny = |tool: &str, cmd: Option<&str>| {
-            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string) };
+            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string), turn_id: None, tool_use_id: None };
             let (code, msg) = codex_gate_decision(CodexPosture::ReadOnly, &payload, &[], None, None);
             assert_eq!(code, 2, "{tool} {cmd:?} must be denied");
             msg.expect("a denial names its reason")
         };
         let allow = |tool: &str, cmd: Option<&str>| {
-            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string) };
+            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string), turn_id: None, tool_use_id: None };
             let d = codex_gate_decision(CodexPosture::ReadOnly, &payload, &[], None, None);
             assert_eq!(d, (0, None), "{tool} {cmd:?} must pass silently");
         };
@@ -3965,7 +3999,7 @@ mod tests {
         use crate::policy::tool_gate::{GateMode, GatedKeyword};
         let kws = vec![GatedKeyword { keyword: "gh pr merge".into(), mode: GateMode::Gate }];
         let decide = |tool: &str, cmd: Option<&str>, listed: Option<crate::policy::data_reads::DataRead>| {
-            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string) };
+            let payload = CodexHookPayload { tool_name: tool.into(), command: cmd.map(str::to_string), turn_id: None, tool_use_id: None };
             codex_gate_decision(CodexPosture::EditFiles, &payload, &kws, listed, None)
         };
         assert_eq!(decide("apply_patch", None, None), (0, None));
@@ -3987,11 +4021,13 @@ mod tests {
     /// CLOSED on it, unlike the claude hook (whose permission layer backs it).
     #[test]
     fn codex_hook_payload_parses_tool_name_and_bash_command() {
-        let p = CodexHookPayload::parse(r#"{"tool_name":"Bash","tool_input":{"command":" git push "}}"#).unwrap();
+        let p = CodexHookPayload::parse(r#"{"tool_name":"Bash","tool_input":{"command":" git push "},"turn_id":"t1","tool_use_id":"call_9"}"#).unwrap();
         assert_eq!(p.tool_name, "Bash");
         assert_eq!(p.command.as_deref(), Some("git push"));
+        assert_eq!((p.turn_id.as_deref(), p.tool_use_id.as_deref()), (Some("t1"), Some("call_9")));
         let p = CodexHookPayload::parse(r#"{"tool_name":"apply_patch","tool_input":{"patch":"*** Begin Patch"}}"#).unwrap();
         assert_eq!((p.tool_name.as_str(), p.command), ("apply_patch", None));
+        assert_eq!((p.turn_id, p.tool_use_id), (None, None), "absent ids stay absent");
         assert!(CodexHookPayload::parse("not json").is_none());
         assert!(CodexHookPayload::parse(r#"{"tool_input":{}}"#).is_none(), "no tool name");
     }
