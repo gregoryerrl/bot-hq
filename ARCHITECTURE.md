@@ -1431,7 +1431,21 @@ The agent-shell plain `gh api` GET exemption additionally allows bare
 `rg --no-config` with supported search/output flags. The flag must come first;
 unknown options and program launchers (`--pre`, `--hostname-bin`, compressed
 search) remain outside that exemption. The leading gh and all filters use the
-same bare/system-path rule, never arbitrary executable paths.
+same bare/system-path rule, never arbitrary executable paths. Every filter's
+arguments are parsed against a stdin-only grammar
+(`outward_body::validate_read_filter`, feedback #128): a file operand
+(`grep . /path/prod.env`), a file-loading option (`grep -f`, `jq --rawfile`,
+`wc --files0-from`, `rg -f`) or a form that leaves the pipe (`grep -r`,
+`tail -F`) is refused by name, so neither the GET exemption nor a listed read
+can become a read of some other file; unknown options fail closed. The
+expressions come first whatever their text (`grep -- -` searches for a dash),
+`-` is the pipe only in a file position, `jq --args` makes values of the
+words after it only, the coreutils filters take a long option's value
+attached only (`--context=3`: BSD grep's `--context[=num]` would otherwise
+read the next word as a FILE), and a jq program carrying an `import`/`include`
+directive (a module load from the search path or its own `{search: …}`
+metadata, no option needed) is refused — field names, variables, object keys,
+strings and comments spelled the same are not.
 It refuses `;`, `&&`, redirection, `$(…)`, unquoted glob/brace expansion, other wrappers
 (`outward_body::single_read_command`) and write verbs (`write_word`), because
 one list both gates the executor and limits the reviewer. It also refuses a

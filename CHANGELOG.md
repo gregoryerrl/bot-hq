@@ -55,6 +55,17 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   The exemption accepts bare gh/filter names, exact Unix /bin and /usr/bin
   tool paths, and a plain `command <filter>` prefix. Arbitrary executables
   such as ./rg or /tmp/head cannot impersonate a read-only tool.
+- Read-only filters on a plain `gh api` GET or a listed read now transform
+  only their pipe: a file operand (`grep . /path/prod.env`), a file-loading
+  option (`grep -f`, `jq --rawfile`, `wc --files0-from`, `rg -f`) or a form
+  that leaves stdin (`grep -r`, `tail -F`) keeps normal gate handling instead
+  of riding the exemption, and the refusal names the file or option. Unknown
+  filter options are refused rather than assumed harmless; `-` still means the
+  pipe in a file position. A long option's value must be attached for the
+  coreutils filters (`--context=3`), since BSD and GNU disagree on optional
+  values, and a jq program that `import`s or `include`s a module is refused
+  (that loads files with no option at all). Every recorded `gh api` command
+  classified as before.
 - Messages sent to agents quote bracket-led body lines at visual line starts, including untimed and
   phase-like tags, fullwidth brackets, Unicode line separators, and invisible
   prefix formatting. Stored content stays unchanged, and the escaped view

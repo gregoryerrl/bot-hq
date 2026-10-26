@@ -7501,6 +7501,7 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         for (command, why) in [
             ("gcloud logging read x | rg --no-config --pre=script x file", "ONE command"),
             ("gcloud logging read x | rg -n x", "ONE command"),
+            ("gcloud logging read x | grep ERROR /etc/passwd", "not its pipe"),
             ("gcloud logging read x; rm -rf ~/d", "ONE command"),
             ("gcloud logging read x | sort -o ~/.zshrc", "ONE command"),
             ("gcloud auth list", "matches none"),

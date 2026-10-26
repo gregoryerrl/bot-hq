@@ -846,6 +846,24 @@ mod tests {
         }
     }
 
+    /// Feedback #128: the exemption is for a filter that transforms the GET's
+    /// output; a filter handed a file reads that file instead, so the keyword
+    /// gate applies as if the GET were not there.
+    #[test]
+    fn a_filter_that_names_a_file_does_not_reach_the_keyword_exemption() {
+        let kws = [kw("gh api", GateMode::Gate)];
+        assert_eq!(match_keyword("Bash", "gh api repos/o/r | grep -c open", &kws), None);
+        for command in [
+            "gh api repos/o/r | grep . /path/prod.env",
+            "gh api repos/o/r | head -1 /path/prod.env",
+            "gh api repos/o/r | jq --rawfile p /path/prod.env -n '$p'",
+            "gh api repos/o/r | wc --files0-from=/tmp/list",
+            "gh api repos/o/r | rg --no-config x /path/prod.env",
+        ] {
+            assert_eq!(match_keyword("Bash", command, &kws), Some(GateMode::Gate), "{command}");
+        }
+    }
+
     #[test]
     fn gate_wins_over_auto_allow_on_conflict() {
         // "git" gates broadly; "git push" auto-allows. A push matches both —

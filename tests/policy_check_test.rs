@@ -144,6 +144,10 @@ fn the_tool_gate_hook_passes_a_keyword_quoted_to_grep() {
         "gh api repos/o/r | ./rg --no-config x",
         "gh api repos/o/r | /tmp/x/head -1",
         "./gh api repos/o/r",
+        // Feedback #128: a filter handed a file reads that file, not the GET.
+        "gh api repos/o/r | grep . /path/prod.env",
+        "gh api repos/o/r | jq --rawfile p /path/prod.env -n '$p'",
+        "gh api repos/o/r | rg --no-config x /path/prod.env",
     ] {
         let (code, _, err) = hook_in(data.path(), "tool-gate", "/bin/bash", command);
         assert_eq!(code, 2, "unsafe/configurable rg stays gated: {command}: {err}");

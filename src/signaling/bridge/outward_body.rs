@@ -1534,14 +1534,23 @@ const READ_FILTERS: &[&str] = &["head", "tail", "jq", "grep", "rg", "wc", "cut"]
 /// A bounded rg filter, independent of the caller's config file. Require the
 /// disabling flag FIRST so it cannot actually be a regexp/option value.
 /// Unknown options fail closed, including future command-launching flags.
+/// Feedback #128: the words left over are ONE pattern (none when `-e` gave
+/// it) — a second one is a path rg would search instead of its pipe, and
+/// `-f FILE` reads its patterns from a file — both refused.
 fn validate_rg_filter(args: &[Word]) -> Result<(), String> {
     if args.first().map(|w| w.text.as_str()) != Some("--no-config") {
         return Err("an rg filter must begin `rg --no-config` (config files can launch programs)".into());
     }
     let mut rest = args[1..].iter();
+    let mut pattern_given = false;
+    let mut operands: Vec<(&str, bool)> = Vec::new();
     while let Some(word) = rest.next() {
         let arg = word.text.as_str();
-        if arg == "--" { break; } // remaining words are patterns/paths, never options
+        if arg == "--" {
+            // Remaining words are patterns/paths, never options.
+            operands.extend(rest.by_ref().map(|w| (w.text.as_str(), false)));
+            break;
+        }
         if let Some(long) = arg.strip_prefix("--") {
             let (name, value) = long.split_once('=').map_or((long, None), |(n, v)| (n, Some(v)));
             match name {
@@ -1556,7 +1565,8 @@ fn validate_rg_filter(args: &[Word]) -> Result<(), String> {
                 "hidden" | "files-with-matches" | "files-without-match" => {
                     if value.is_some() { return Err(format!("rg filter option `--{name}` takes no value")); }
                 }
-                "regexp" | "file" | "max-count" | "after-context" | "before-context" |
+                "file" => return Err(file_option_refusal("rg", "--file")),
+                "regexp" | "max-count" | "after-context" | "before-context" |
                 "context" | "glob" | "iglob" | "type" | "type-not" | "replace" |
                 "threads" | "max-columns" | "encoding" | "color" | "colors" |
                 "context-separator" | "field-match-separator" | "field-context-separator" |
@@ -1565,23 +1575,368 @@ fn validate_rg_filter(args: &[Word]) -> Result<(), String> {
                     if value.is_none() && rest.next().is_none() {
                         return Err(format!("rg filter option `--{name}` needs a value"));
                     }
+                    pattern_given |= name == "regexp";
                 }
                 _ => return Err(format!("unsupported rg filter option `--{name}`")),
             }
         } else if let Some(shorts) = arg.strip_prefix('-').filter(|s| !s.is_empty()) {
             for (at, flag) in shorts.char_indices() {
-                if "efmABCgrtTjME".contains(flag) {
+                if flag == 'f' {
+                    return Err(file_option_refusal("rg", "-f"));
+                }
+                if "emABCgrtTjME".contains(flag) {
                     // A value consumes the rest of its cluster, or the next
                     // word. A regexp containing -z/--pre is data, not a flag.
                     if at + flag.len_utf8() == shorts.len() && rest.next().is_none() {
                         return Err(format!("rg filter option `-{flag}` needs a value"));
                     }
+                    pattern_given |= flag == 'e';
                     break;
                 }
                 if !"nNiIsSvFwxocqlLaUbHPu0".contains(flag) {
                     return Err(format!("unsupported rg filter option `-{flag}`"));
                 }
             }
+        } else {
+            operands.push((arg, false));
+        }
+    }
+    operands_transform_the_pipe("rg", &operands, if pattern_given { 0 } else { 1 }).map(|_| ())
+}
+
+/// `a \`tool\` filter option \`flag\` that reads a file` — the refusal for an
+/// option that loads a file beside the pipe (`grep -f`, `jq --rawfile`).
+fn file_option_refusal(tool: &str, flag: &str) -> String {
+    format!("a `{tool}` filter option `{flag}` that reads a file")
+}
+
+/// Feedback #128: the words a filter is left with after its options are its
+/// expressions (grep's pattern, jq's filter — `expressions` of them at most,
+/// whatever their text: `grep -- -` searches for a dash) and then FILES: the
+/// filter reads those instead of its pipe, so any such word is refused by
+/// name. In a file position `-` is the pipe itself, and a word flagged as a
+/// value (`jq … --args a b`: only the words AFTER the switch) is literal
+/// data. Returns the expressions, for a grammar that inspects them.
+fn operands_transform_the_pipe<'a>(
+    tool: &str,
+    operands: &[(&'a str, bool)],
+    expressions: usize,
+) -> Result<Vec<&'a str>, String> {
+    let mut found = Vec::new();
+    for (word, value) in operands {
+        if found.len() < expressions {
+            found.push(*word);
+            continue;
+        }
+        if *word == "-" || *value { continue; }
+        return Err(format!("a `{tool}` filter that reads a file (`{word}`), not its pipe"));
+    }
+    Ok(found)
+}
+
+/// The module directive a jq PROGRAM carries, if any: `import "path" as
+/// $x [meta];` / `include "path" [meta];` load `path.jq` / `path.json` from
+/// the search path or the directive's own `{search: …}` metadata — a file
+/// read with no command-line option at all (eyes-2 `ce2cbc3e`). Per jq's
+/// grammar a directive is the bare keyword followed by a string literal (`"…"`
+/// or `@fmt "…"`), so `.import`, `$import`, `{import: 1}`, strings and
+/// comments are left alone; string interpolation (`"\(…)"`) is scanned as
+/// code so a keyword cannot hide inside it.
+fn jq_module_directive(program: &str) -> Option<&'static str> {
+    let bytes = program.as_bytes();
+    // One frame per nesting: `None` is code at the top level, `Some(depth)`
+    // is code inside a `\(…)` interpolation with that many open parens.
+    let mut code: Vec<Option<usize>> = vec![None];
+    let mut in_string = false;
+    let mut i = 0;
+    let mut previous = b' ';
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            match b {
+                b'\\' if bytes.get(i + 1) == Some(&b'(') => {
+                    in_string = false;
+                    code.push(Some(0));
+                    i += 2;
+                    continue;
+                }
+                b'\\' => { i += 2; continue; }
+                b'"' => { in_string = false; previous = b'"'; }
+                _ => {}
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+                previous = b' ';
+                continue;
+            }
+            b'"' => { in_string = true; previous = b'"'; }
+            b'(' => {
+                if let Some(Some(depth)) = code.last_mut() { *depth += 1; }
+                previous = b;
+            }
+            b')' => {
+                match code.last_mut() {
+                    Some(Some(0)) => {
+                        // The interpolation closes: back into its string.
+                        code.pop();
+                        in_string = true;
+                    }
+                    Some(Some(depth)) => *depth -= 1,
+                    _ => {}
+                }
+                previous = b;
+            }
+            b if b.is_ascii_alphabetic() || b == b'_' => {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+                let word = &program[start..i];
+                if matches!(word, "import" | "include") && previous != b'.' && previous != b'$' {
+                    // The path is a string literal, possibly after whitespace
+                    // or a comment; a keyword used as an object key is not one.
+                    let mut j = i;
+                    loop {
+                        while j < bytes.len() && bytes[j].is_ascii_whitespace() { j += 1; }
+                        if bytes.get(j) == Some(&b'#') {
+                            while j < bytes.len() && bytes[j] != b'\n' { j += 1; }
+                            continue;
+                        }
+                        break;
+                    }
+                    if matches!(bytes.get(j), Some(b'"') | Some(b'@')) {
+                        return Some(if word == "import" { "import" } else { "include" });
+                    }
+                }
+                previous = b'a';
+                continue;
+            }
+            b if b.is_ascii_whitespace() => {}
+            _ => previous = b,
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The argument grammar of one read-only filter, for [`validate_read_filter`].
+/// Only forms that transform stdin are listed; everything unlisted fails
+/// closed, so a future file-loading option is refused until it is read here.
+struct FilterGrammar {
+    /// Short flags that take no value, as cluster characters.
+    short_flags: &'static str,
+    /// Short flags whose value is the rest of the cluster or the next word.
+    short_values: &'static str,
+    /// Short flags that read a file or leave the pipe (`grep -f`, `grep -r`).
+    short_files: &'static str,
+    /// Long options that take no value (`--name`; `--name=x` is refused).
+    long_flags: &'static [&'static str],
+    /// Long options with that many values (`--name=x`, or `--name x` unless
+    /// `long_values_attached`).
+    long_values: &'static [(&'static str, usize)],
+    /// A long value must be attached (`--context=3`): the coreutils dialects
+    /// differ on whether a value is optional (BSD grep's `--context[=num]`
+    /// would take `name` as the pattern and the next word as a FILE), and only
+    /// the attached spelling means the same thing everywhere.
+    long_values_attached: bool,
+    /// Long options whose value is only ever attached (`--color[=WHEN]`).
+    long_optional: &'static [&'static str],
+    /// Long options that read a file or leave the pipe.
+    long_files: &'static [&'static str],
+    /// Options that supply the expression, so no positional one is expected.
+    expression_options: &'static [&'static str],
+    /// Long options after which every further positional word is a value.
+    value_switches: &'static [&'static str],
+    /// How many positional expressions the filter takes (pattern, jq filter).
+    expressions: usize,
+    /// The expression is required (grep without a pattern is an error).
+    requires_expression: bool,
+    /// A cluster of digits is a count (`grep -2`, `head -5`), not flags.
+    numeric_cluster: bool,
+}
+
+fn filter_grammar(tool: &str) -> Option<FilterGrammar> {
+    Some(match tool {
+        "grep" => FilterGrammar {
+            short_flags: "abcEFGhHiIlLnoPqsTUuvwxyZz",
+            short_values: "ABCme",
+            short_files: "fdDrR",
+            long_flags: &[
+                "extended-regexp", "fixed-strings", "basic-regexp", "perl-regexp", "ignore-case",
+                "no-ignore-case", "invert-match", "word-regexp", "line-regexp", "count",
+                "files-with-matches", "files-without-match", "only-matching", "quiet", "silent",
+                "no-messages", "byte-offset", "with-filename", "no-filename", "line-number",
+                "line-buffered", "initial-tab", "null", "null-data", "text", "binary",
+                "unix-byte-offsets", "no-group-separator",
+            ],
+            long_values: &[
+                ("regexp", 1), ("max-count", 1), ("after-context", 1), ("before-context", 1),
+                ("context", 1), ("binary-files", 1), ("label", 1), ("group-separator", 1),
+            ],
+            long_values_attached: true,
+            long_optional: &["color", "colour"],
+            long_files: &[
+                "file", "recursive", "dereference-recursive", "directories", "devices", "include",
+                "exclude", "exclude-from", "exclude-dir",
+            ],
+            expression_options: &["-e", "--regexp"],
+            value_switches: &[],
+            expressions: 1,
+            requires_expression: true,
+            numeric_cluster: true,
+        },
+        "head" | "tail" => FilterGrammar {
+            short_flags: if tool == "tail" { "qvzr" } else { "qvz" },
+            short_values: "nc",
+            short_files: if tool == "tail" { "fFs" } else { "" },
+            long_flags: &["quiet", "silent", "verbose", "zero-terminated"],
+            long_values: &[("lines", 1), ("bytes", 1)],
+            long_values_attached: true,
+            long_optional: &[],
+            long_files: &["follow", "pid", "retry", "sleep-interval", "max-unchanged-stats"],
+            expression_options: &[],
+            value_switches: &[],
+            expressions: 0,
+            requires_expression: false,
+            numeric_cluster: true,
+        },
+        "cut" => FilterGrammar {
+            short_flags: "nswz",
+            short_values: "bcfd",
+            short_files: "",
+            long_flags: &["complement", "only-delimited", "zero-terminated"],
+            long_values: &[("bytes", 1), ("characters", 1), ("fields", 1), ("delimiter", 1), ("output-delimiter", 1)],
+            long_values_attached: true,
+            long_optional: &[],
+            long_files: &[],
+            expression_options: &[],
+            value_switches: &[],
+            expressions: 0,
+            requires_expression: false,
+            numeric_cluster: false,
+        },
+        "wc" => FilterGrammar {
+            short_flags: "lwcmL",
+            short_values: "",
+            short_files: "",
+            long_flags: &["lines", "words", "bytes", "chars", "max-line-length"],
+            long_values: &[("total", 1)],
+            long_values_attached: true,
+            long_optional: &[],
+            long_files: &["files0-from"],
+            expression_options: &[],
+            value_switches: &[],
+            expressions: 0,
+            requires_expression: false,
+            numeric_cluster: false,
+        },
+        "jq" => FilterGrammar {
+            short_flags: "rcesnajRMCS",
+            short_values: "",
+            short_files: "fL",
+            long_flags: &[
+                "raw-output", "compact-output", "exit-status", "sort-keys", "slurp", "null-input",
+                "ascii-output", "join-output", "raw-input", "monochrome-output", "color-output",
+                "tab", "seq", "stream", "stream-errors", "unbuffered", "raw-output0",
+            ],
+            long_values: &[("indent", 1), ("arg", 2), ("argjson", 2)],
+            long_values_attached: false,
+            long_optional: &[],
+            long_files: &["from-file", "rawfile", "slurpfile", "argfile", "library-path", "run-tests"],
+            expression_options: &[],
+            value_switches: &["args", "jsonargs"],
+            expressions: 1,
+            requires_expression: false,
+            numeric_cluster: false,
+        },
+        _ => return None,
+    })
+}
+
+/// Feedback #128: a read-only filter is admitted only in forms that transform
+/// its PIPE. Its arguments are parsed against [`filter_grammar`]: a file
+/// operand (`grep . /path/prod.env`), a file-loading option (`grep -f`, `jq
+/// --rawfile`, `wc --files0-from`) or a form that leaves stdin (`grep -r`,
+/// `tail -F`) would turn the GET exemption or a listed read into a read of
+/// that file. Unknown options fail closed, as the rg parser's do. rg keeps
+/// its own parser ([`validate_rg_filter`]).
+fn validate_read_filter(tool: &str, args: &[Word]) -> Result<(), String> {
+    let Some(g) = filter_grammar(tool) else {
+        return Err(format!("a pipe into `{tool}`, which is not a supported read-only filter"));
+    };
+    let mut rest = args.iter();
+    let mut operands: Vec<(&str, bool)> = Vec::new();
+    let mut expression_given = false;
+    let mut values = false;
+    while let Some(word) = rest.next() {
+        let arg = word.text.as_str();
+        if arg == "--" {
+            operands.extend(rest.by_ref().map(|w| (w.text.as_str(), values)));
+            break;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            let (name, value) = long.split_once('=').map_or((long, None), |(n, v)| (n, Some(v)));
+            if g.long_files.contains(&name) {
+                return Err(file_option_refusal(tool, &format!("--{name}")));
+            } else if g.long_flags.contains(&name) {
+                if value.is_some() {
+                    return Err(format!("a `{tool}` filter option `--{name}` given a value"));
+                }
+            } else if let Some((_, count)) = g.long_values.iter().find(|(n, _)| *n == name) {
+                if g.long_values_attached && value.is_none() {
+                    return Err(format!(
+                        "a `{tool}` filter option `--{name}` without its value attached (`--{name}=…`)"
+                    ));
+                }
+                let needed = count - usize::from(value.is_some());
+                if rest.by_ref().take(needed).count() < needed {
+                    return Err(format!("a `{tool}` filter option `--{name}` without its value"));
+                }
+            } else if g.long_optional.contains(&name) {
+                // `--color` alone and `--color=never`; a following word is
+                // not its value.
+            } else if g.value_switches.contains(&name) {
+                values = true;
+            } else {
+                return Err(format!("an unsupported `{tool}` filter option `--{name}`"));
+            }
+            expression_given |= g.expression_options.contains(&&*format!("--{name}"));
+        } else if let Some(shorts) = arg.strip_prefix('-').filter(|s| !s.is_empty()) {
+            if g.numeric_cluster && shorts.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            for (at, flag) in shorts.char_indices() {
+                if g.short_files.contains(flag) {
+                    return Err(file_option_refusal(tool, &format!("-{flag}")));
+                }
+                if g.short_values.contains(flag) {
+                    // The value is the rest of the cluster, or the next word.
+                    if at + flag.len_utf8() == shorts.len() && rest.next().is_none() {
+                        return Err(format!("a `{tool}` filter option `-{flag}` without its value"));
+                    }
+                    expression_given |= g.expression_options.contains(&&*format!("-{flag}"));
+                    break;
+                }
+                if !g.short_flags.contains(flag) {
+                    return Err(format!("an unsupported `{tool}` filter option `-{flag}`"));
+                }
+            }
+        } else {
+            operands.push((arg, values));
+        }
+    }
+    let expressions = if expression_given { 0 } else { g.expressions };
+    let found = operands_transform_the_pipe(tool, &operands, expressions)?;
+    if g.requires_expression && !expression_given && found.is_empty() {
+        return Err(format!("a `{tool}` filter without a pattern"));
+    }
+    if tool == "jq" {
+        if let Some(directive) = found.iter().find_map(|program| jq_module_directive(program)) {
+            return Err(format!(
+                "a `jq` filter whose program loads a module (`{directive}`), which reads files beside its pipe"
+            ));
         }
     }
     Ok(())
@@ -1641,6 +1996,8 @@ fn single_read_command_in(command: &str, agent_shell: bool) -> Result<(), String
                     return Err("an agent-shell-only rg filter; use grep for host-run read_gate commands".into());
                 }
                 validate_rg_filter(&filter_words[1..])?;
+            } else {
+                validate_read_filter(tool, &filter_words[1..])?;
             }
         }
         if seg.words.iter().any(|w| w.unquoted_pattern) {
@@ -2517,6 +2874,107 @@ mod tests {
             "gh api repos/o/r {--method=POST,x} | rg --no-config x",
         ] {
             assert!(!is_gh_api_read(get), "shell/write restrictions remain: {get}");
+        }
+    }
+
+    /// Feedback #128: a read-only filter transforms its PIPE. A file operand
+    /// or a file-loading option would make `gh api … | grep . /path/prod.env`
+    /// a read of that file under the GET exemption — and under a listed read
+    /// — so every filter's arguments are parsed and only stdin forms pass.
+    #[test]
+    fn read_filters_transform_only_their_pipe() {
+        for filter in [
+            "grep -n route", "grep -c open", "grep -i -E 'a|b'", "grep -nE route",
+            "grep -A2 -B 1 --context=3 x", "grep -m1 -o 'v[0-9]+'", "grep -e open -e closed",
+            "grep --max-count=1 -v x", "grep -2 x", "grep -w -x -F -- -literal",
+            "grep --color=never x", "grep --color x", "grep -q x", "grep x -",
+            "head -5", "head -n 5", "head -n5", "head -c 100", "head --lines=5",
+            "tail -3", "tail -n +2", "tail -n -5", "tail -q -n 1",
+            "cut -d, -f1", "cut -d: -f1,3", "cut -c1-10", "cut -f 2 -s", "cut --delimiter=, --fields=1",
+            "wc -l", "wc -lw", "wc --lines", "wc -c", "wc -l -",
+            "jq .", "jq", "jq .name", "jq -r .title", "jq -rc '.[].id'", "jq --arg k v '.[$k]'",
+            "jq --argjson n 1 '.[] | select(.n == $n)'", "jq -n '$ARGS.positional' --args a b",
+            "jq -e -S .", "jq --indent 4 .", "jq -s 'length'", "jq . -",
+            "jq --args -n '$ARGS.positional' a b", "jq '.import'", "jq '.\"include\"'",
+            "jq '\"import x\" + .'", "jq '. # import x'", "jq '. as $import | $import'",
+            "jq '{import: .include}'",
+            "grep --context=3 x", "grep --regexp=x", "grep -- -", "head -1 -",
+            "rg --no-config -n route", "rg --no-config -e a -e b", "rg --no-config -- --pre",
+            "rg --no-config x -", "rg --no-config -- -",
+        ] {
+            let get = format!("gh api repos/o/r | {filter}");
+            assert!(is_gh_api_read(&get), "stdin transform: {get}");
+            let listed = format!("gcloud logging read x | {filter}");
+            assert_eq!(single_read_command_in(&listed, true), Ok(()), "{listed}");
+        }
+        for (filter, why) in [
+            ("grep . /path/prod.env", "not its pipe"),
+            ("grep -n x '/Users/me/.ssh/id_rsa'", "not its pipe"),
+            ("grep -- x /etc/passwd", "not its pipe"),
+            ("grep x y", "not its pipe"),
+            ("grep -e x -e y z", "not its pipe"),
+            ("grep -f /etc/passwd x", "`-f`"),
+            ("grep --file=/etc/passwd x", "`--file`"),
+            ("grep -nf /etc/passwd x", "`-f`"),
+            ("grep -r secret", "`-r`"),
+            ("grep --exclude-from=/etc/passwd x", "`--exclude-from`"),
+            ("grep -m", "`-m`"),
+            ("grep -c", "without a pattern"),
+            ("grep --fancy x", "`--fancy`"),
+            ("head /etc/passwd", "not its pipe"),
+            ("head -n 5 -- /etc/shadow", "not its pipe"),
+            ("tail -3 .env", "not its pipe"),
+            ("tail -F /var/log/auth.log", "`-F`"),
+            ("tail -f", "`-f`"),
+            ("cut -d: -f1 /etc/passwd", "not its pipe"),
+            ("cut -f1 -- .env", "not its pipe"),
+            ("cut -f", "`-f`"),
+            ("wc -l /etc/passwd", "not its pipe"),
+            ("wc --files0-from=/tmp/list", "`--files0-from`"),
+            ("wc --files0-from /tmp/list", "`--files0-from`"),
+            ("jq . /etc/passwd", "not its pipe"),
+            ("jq -R . /etc/passwd", "not its pipe"),
+            ("jq -f /tmp/x.jq", "`-f`"),
+            ("jq --from-file /tmp/x.jq", "`--from-file`"),
+            ("jq -rf prog.jq", "`-f`"),
+            ("jq --rawfile p /etc/passwd -n '$p'", "`--rawfile`"),
+            ("jq --slurpfile p /etc/passwd -n '$p'", "`--slurpfile`"),
+            ("jq --argfile p /etc/passwd -n '$p'", "`--argfile`"),
+            ("jq -L / 'import \"tmp/data\" as $d; $d'", "`-L`"),
+            ("jq --library-path / 'include \"x\"; .'", "`--library-path`"),
+            ("jq --run-tests /tmp/t", "`--run-tests`"),
+            ("jq --arg k", "`--arg`"),
+            // eyes-2 f17a3842: `-` is the pattern here, so the next word is a
+            // file; `--args` turns only LATER words into values; BSD grep's
+            // `--context[=num]` would make `name` the pattern and read the file.
+            ("grep -- - frontend/package.json", "not its pipe"),
+            ("jq -r .name frontend/package.json --args", "not its pipe"),
+            ("jq -r .name frontend/package.json --jsonargs", "not its pipe"),
+            ("grep --context name frontend/package.json", "`--context`"),
+            ("grep --max-count 1 x", "`--max-count`"),
+            ("head --lines 5", "`--lines`"),
+            // eyes-2 ce2cbc3e: the jq program itself can load modules.
+            ("jq -nr 'import \"package\" as $p {search:[\"/x/frontend\"]}; $p[0].name'", "`import`"),
+            ("jq 'include \"x\" {search: \"/x\"}; .'", "`include`"),
+            ("jq '\"\\(include \"x\"; .)\"'", "`include`"),
+            ("jq -n 'import @text \"x\" as $x; $x'", "`import`"),
+            ("rg --no-config x /etc/passwd", "not its pipe"),
+            ("rg --no-config -- - frontend/package.json", "not its pipe"),
+            ("rg --no-config -- x /etc/passwd", "not its pipe"),
+            ("rg --no-config x .", "not its pipe"),
+            ("rg --no-config -e x /etc/passwd", "not its pipe"),
+            ("rg --no-config -f /etc/passwd x", "`-f`"),
+            ("rg --no-config --file=/etc/passwd x", "`--file`"),
+            ("rg --no-config -nf /etc/passwd x", "`-f`"),
+        ] {
+            let get = format!("gh api repos/o/r | {filter}");
+            assert!(!is_gh_api_read(&get), "reads a file: {get}");
+            let listed = format!("gcloud logging read x | {filter}");
+            let err = single_read_command_in(&listed, true).expect_err(&listed);
+            assert!(err.contains(why), "{filter}: {err}");
+            if !filter.starts_with("rg") {
+                assert!(single_read_command(&listed).unwrap_err().contains(why), "{filter}");
+            }
         }
     }
 
