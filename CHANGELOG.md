@@ -27,6 +27,10 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- Close-out turns no longer inherit the preceding turn's displayed age or
+  unanswered tool indicator. Restarting host prompts remain system-attributed
+  in chat; passive notices do not reset the display. Before new agent output,
+  the prompt's time is the fallback, not an exact turn-start measurement.
 - Plain `gh api` GETs can pipe into `rg --no-config` with supported search and
   output flags in agent shells without an extra approval. Host-run `read_gate`
   refuses rg before parking and points to grep, since agent-bundled tools may

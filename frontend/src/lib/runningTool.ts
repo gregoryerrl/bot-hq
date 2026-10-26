@@ -97,8 +97,8 @@ function labelOf(m: AgentMessage): string {
 }
 
 /** The tool call `slug` has in flight: the newest `tool_use` row of its current
- *  run (its unbroken rows at the end of the chat — host notices do not break
- *  it, as for the turn's age) that no `tool_result` has answered yet. `null`
+ *  run (passive host notices do not break it; restarting host prompts do,
+ *  as for the turn's age) that no `tool_result` has answered yet. `null`
  *  when its last call was answered, when it is writing rather than running a
  *  tool, or when the rows cannot be read. */
 export function runningTool(
@@ -110,6 +110,7 @@ export function runningTool(
   const open: AgentMessage[] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
+    if (m.kind === "system_prompt") break;
     if (m.kind === "system_notice" || m.kind === "phase_change") continue;
     if (m.author !== slug) break;
     if (m.kind !== "tool_use" && m.kind !== "tool_result") continue;

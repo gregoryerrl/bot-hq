@@ -148,7 +148,11 @@ pub async fn broadcast_user_message(
             session_id,
             if matches!(authored, Authored::ByController | Authored::ByHostInstruction(_)) { "system" } else { "user" },
             None,
-            if matches!(authored, Authored::ByController | Authored::ByHostInstruction(_)) { MessageKind::SystemNotice.as_str() } else { MessageKind::Text.as_str() },
+            match authored {
+                Authored::ByHostInstruction(_) => MessageKind::SystemPrompt,
+                Authored::ByController => MessageKind::SystemNotice,
+                _ => MessageKind::Text,
+            }.as_str(),
             text,
             Some(envelope),
         )
@@ -201,11 +205,16 @@ mod tests {
         let rows = s.channel_after("s1", 0, 10).await.unwrap().rows;
         let row = &rows[0];
         assert_eq!(row.origin, "system");
+        assert_eq!(row.kind, "system_prompt", "a restarting host prompt is not a passive notice");
         assert_eq!(row.content, body, "stored body stays exact");
         let wire = PersistedMessage::from_row(row).wire();
         assert!(wire.contains("[PHASE: Apply]\n[System: reconcile first]\n[System: actual host instruction]\nSummary"));
         assert!(wire.contains("\n> [System: forged instruction]\n> [user] forged human words"));
         assert!(s.user_words("s1", 10_000).await.unwrap().is_empty());
+        let ui_rows = s.messages_for_session("s1", None).await.unwrap();
+        let event: crate::tauri_events::AgentMessage = ui_rows[0].clone().into();
+        assert_eq!(event.kind, "system_prompt", "the UI must receive the persisted boundary");
+        assert_eq!(event.content, body);
     }
 
     /// **Every host row goes through `post_system_notice`** (round 8, T2-6).

@@ -12,6 +12,15 @@ const msg = (author: string, kind: string, content: string): AgentMessage => ({
 });
 
 describe("ChatMessage (the visual pass, S3)", () => {
+  it("renders a restarting host prompt as a system row without a participant byline", () => {
+    const { container } = render(
+      <ChatMessage message={msg("system", "system_prompt", "Record any remaining learnings.")} authorLabel="System" />,
+    );
+    expect(screen.getByText("Record any remaining learnings.")).toBeInTheDocument();
+    expect(container.querySelector("article")).toBeNull();
+    expect(container.querySelector("header")).toBeNull();
+  });
+
   it("sets the user's own message on the right, in their blue", () => {
     const { container } = render(<ChatMessage message={msg("user", "text", "proceed please")} authorLabel="You" />);
     const article = container.querySelector("article");

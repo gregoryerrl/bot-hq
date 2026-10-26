@@ -30,7 +30,7 @@ export const CHAT_PAGE = 300;
  * auto-follow — same threshold the old useStickyScroll hook used. */
 const STICKY_THRESHOLD_PX = 80;
 /** Rows bot-hq writes itself; they never continue an author's run. */
-const HOST_ROWS = new Set(["phase_change", "system_notice"]);
+const HOST_ROWS = new Set(["phase_change", "system_notice", "system_prompt"]);
 /** How long after a burst is opened or closed its resize counts as the
  *  user's own (it is measured within a frame or two). */
 const TOGGLE_SETTLE_MS = 1000;

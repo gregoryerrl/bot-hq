@@ -3139,6 +3139,7 @@ fn redact_for_storage(kind: &str, content: String) -> String {
         Some(
             MessageKind::Text
             | MessageKind::SystemNotice
+            | MessageKind::SystemPrompt
             | MessageKind::PhaseChange
             | MessageKind::Boot,
         )

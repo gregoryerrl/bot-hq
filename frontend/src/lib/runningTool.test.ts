@@ -46,6 +46,17 @@ describe("describeToolCall", () => {
 });
 
 describe("runningTool", () => {
+  it("excludes unanswered calls from before a restarting host prompt", () => {
+    const earlier = [
+      use("hands", "old", "Bash", { command: "old work" }, 600),
+      row("system", "system_prompt", "Record any remaining learnings.", 90),
+      row("system", "system_notice", "A passive notice", 80),
+    ];
+    expect(runningTool(earlier, "hands")).toBeNull();
+    expect(runningTool([...earlier, use("hands", "new", "Read", { path: "notes.md" }, 20)], "hands"))
+      .toEqual({ label: "Read notes.md", startedAt: Date.parse(at(20)), others: 0 });
+  });
+
   it("is the newest unanswered call of the participant's current run", () => {
     const messages = [
       row("user", "text", "go", 600),

@@ -76,7 +76,7 @@ export const ChatMessage = memo(function ChatMessage({
     );
   }
 
-  if (message.kind === "system_notice") {
+  if (message.kind === "system_notice" || message.kind === "system_prompt") {
     // Host-emitted notice (e.g. the idle-unflagged watchdog). Centered like a
     // phase change — it is persisted with synthetic author=user, so it must
     // NOT fall through to the prose render and read as the user's words.

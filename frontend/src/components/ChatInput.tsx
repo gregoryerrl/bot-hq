@@ -1038,14 +1038,20 @@ function WorkerLine({
   }, [workers.length]);
   const messages = useChatStore((s) => (sessionId ? s.messages[sessionId] : undefined));
   // The turn as the CHAT records it (EYES 172d8082): the participant's
-  // unbroken run of rows at the end of the chat — host notices do not break
-  // it — so a remount, a session switch or a reload mid-turn still shows the
+  // unbroken run of rows at the end of the chat — passive notices do not
+  // break it, while a restarting host prompt does — so a remount or reload shows the
   // real age, not "0s". Before its first row the busy flip above stands in.
   const currentRun = (slug: string): { start: number | null; tools: number } => {
     let start: number | null = null;
     let tools = 0;
     for (let i = (messages?.length ?? 0) - 1; i >= 0; i--) {
       const m = messages![i];
+      if (m.kind === "system_prompt") {
+        // Before the first new output, use this boundary instead of a cached
+        // busy timestamp from the previous run. It is not a precise deal time.
+        start ??= Date.parse(m.created_at);
+        break;
+      }
       if (m.kind === "system_notice" || m.kind === "phase_change") continue;
       if (m.author !== slug) break;
       start = Date.parse(m.created_at);
@@ -1064,6 +1070,7 @@ function WorkerLine({
         // The rows are authored by slug; the busy key may be a slot key.
         const slug = slugOf?.(key) ?? key;
         const running = sessionId ? runningTool(messages, slug) : null;
+        const run = currentRun(slug);
         return (
           <span key={key} className="flex min-w-0 items-center gap-1.5">
             {i > 0 && <span className="text-on-surface-variant/40">·</span>}
@@ -1072,8 +1079,8 @@ function WorkerLine({
             </span>
             <span>is working</span>
             <span className="text-on-surface-variant/70" data-testid="turn-age">
-              · {formatElapsed(now - (currentRun(slug).start ?? since.current[key] ?? now))}
-              {sessionId ? ` · ${currentRun(slug).tools} tools` : ""}
+              · {formatElapsed(now - (run.start ?? since.current[key] ?? now))}
+              {sessionId ? ` · ${run.tools} tools` : ""}
             </span>
             {running && (
               // Feedback #79/#91: what it is running, in the call's own words —

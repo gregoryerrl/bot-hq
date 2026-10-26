@@ -315,6 +315,35 @@ describe("ChatInput turn-status + Stop", () => {
     expect(screen.getByTestId("turn-age")).toHaveTextContent("· 2m · 1 tools");
   });
 
+  it("starts a close-out display at its host prompt and excludes the previous turn's tools", () => {
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+    const row = (id: number, author: string, kind: string, minutesAgo: number, content = "x") => ({
+      id, session_id: "s-close", author, kind, content, created_at: at(minutesAgo),
+    });
+    const before = [
+      row(1, "hands", "text", 45),
+      row(2, "hands", "tool_use", 40, JSON.stringify({ name: "Bash", input: { command: "old work" }, tool_use_id: "old" })),
+      row(3, "system", "system_prompt", 2, "Record any remaining learnings."),
+      row(4, "system", "system_notice", 1, "Passive status notice"),
+    ];
+    useChatStore.setState({ messages: { "s-close": before } });
+    const props = { activity: "busy" as const, busy: { hands: true }, busyLabel: LABEL, sessionId: "s-close", onSend: () => {} };
+    const { unmount } = render(<ChatInput {...props} />);
+    expect(screen.getByTestId("turn-age")).toHaveTextContent("· 2m · 0 tools");
+    expect(screen.queryByTestId("running-tool")).toBeNull();
+    unmount();
+
+    useChatStore.setState({ messages: { "s-close": [...before,
+      row(5, "hands", "text", 1),
+      row(6, "hands", "tool_use", 0.5, JSON.stringify({ name: "Read", input: { path: "notes.md" }, tool_use_id: "new" })),
+    ] } });
+    render(<ChatInput {...props} />);
+    expect(screen.getByTestId("turn-age")).toHaveTextContent("· 1m · 1 tools");
+    expect(screen.getByTestId("running-tool")).toHaveTextContent("Read notes.md");
+    expect(screen.getByTestId("running-tool")).not.toHaveTextContent("more");
+    useChatStore.setState({ messages: {} });
+  });
+
   it("reads a turn's age from the chat, so mounting mid-turn is not '0s'", () => {
     // EYES 172d8082: the clock started at mount — a user coming back to a
     // 45-minute turn saw "· 0s · 0 tools".

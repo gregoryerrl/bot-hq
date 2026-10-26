@@ -335,6 +335,11 @@ policy block in layer 7).
 
 ## Turn coordination — the ring
 
+Restarting host instructions (currently close-out) persist as `system_prompt`
+rows with system origin. They retain host rendering while separating the UI's
+turn age and tool indicators from earlier work. Passive `system_notice` rows
+do not reset those indicators; this distinction does not drive scheduling.
+
 **One participant holds the turn at a time.** `src/core/sequencer.rs` runs a
 fixed rotation over the session's ACTIVE participants in `turn_position` order;
 `on_mention` participants are skipped rather than handed a no-op turn. Each participant's pump (`src/core/pump.rs::pump_agent`) reports

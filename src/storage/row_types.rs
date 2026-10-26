@@ -20,6 +20,10 @@ pub enum MessageKind {
     /// constraint on `messages.author` has no host author, and the chat should
     /// attribute host actions to neither agent.
     SystemNotice,
+    /// Host instruction that restarts the rotation, such as close-out.
+    /// Rendered as a host row, but unlike a passive notice it separates the
+    /// UI's turn age and tool indicators from the preceding run.
+    SystemPrompt,
     /// Orientation, from the BOOT phase before the ring starts (rc3 **D21**):
     /// the primer the host hands every participant, and whatever each says while
     /// reading it.
@@ -44,6 +48,7 @@ impl MessageKind {
             MessageKind::ToolResult => "tool_result",
             MessageKind::PhaseChange => "phase_change",
             MessageKind::SystemNotice => "system_notice",
+            MessageKind::SystemPrompt => "system_prompt",
             MessageKind::Boot => "boot",
         }
     }
