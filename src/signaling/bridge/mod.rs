@@ -38,6 +38,7 @@ mod direct_commands;
 pub(crate) mod application_control;
 pub(crate) mod application_admin;
 pub(crate) mod control_claim;
+pub(crate) mod control_events;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
     GATE_HISTORY_DEFAULT,
@@ -189,6 +190,12 @@ pub enum SignalingEvent {
         session_id: String,
         agent: String,
         reason: String,
+        /// The `halt_id` the declaration minted — the halt instance's identity
+        /// for a reader that must not confuse a delayed event with a newer
+        /// halt (the control-event journal); a UUID, since two declarations
+        /// can share a millisecond stamp. `None` when the slot could not be
+        /// written.
+        halt_id: Option<String>,
     },
     /// Resolved (so the UI can clean up its inline rendering).
     ChoiceResolved {

@@ -120,6 +120,22 @@ impl Storage {
         agent: &str,
         reason: &str,
     ) -> Result<bool> {
+        Ok(self.declare_session_halt_stamped(session_id, agent, reason).await?.is_some())
+    }
+
+    /// [`Self::declare_session_halt`], returning the `halt_id` it minted — the
+    /// halt instance's identity, which the banner event carries so a reader of
+    /// a delayed event never borrows a newer halt's (Plan 5c-1, eyes-2
+    /// `d73ff458`). A UUID, not the millisecond stamp: two declarations can
+    /// share a millisecond (`04babed4`). `None` is the closed-row refusal.
+    pub async fn declare_session_halt_stamped(
+        &self,
+        session_id: &str,
+        agent: &str,
+        reason: &str,
+    ) -> Result<Option<String>> {
+        let at = now_utc();
+        let halt_id = uuid::Uuid::new_v4().to_string();
         // An ordinary halt replaces a temporary one's wake time too: one slot.
         // `closed_at IS NULL`: a CLOSED session refuses the declare (round 13).
         // The live specimen: teardown's kill reached the pump before the row
@@ -130,16 +146,17 @@ impl Storage {
         // predicate is the half that holds even if a straggler declare lands
         // after that.
         sqlx::query(
-            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = NULL              WHERE id = ? AND closed_at IS NULL",
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = NULL, halt_id = ?              WHERE id = ? AND closed_at IS NULL",
         )
         .bind(agent)
         .bind(reason)
-        .bind(now_utc())
+        .bind(&at)
+        .bind(&halt_id)
         .bind(session_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("declaring halt for session {session_id}"))
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| (r.rows_affected() > 0).then_some(halt_id))
     }
 
     /// A TEMPORARY halt (round 12, migration 0069): the same slot, plus the
@@ -153,19 +170,34 @@ impl Storage {
         reason: &str,
         wake_at: &str,
     ) -> Result<bool> {
+        Ok(self.declare_temporary_session_halt_stamped(session_id, agent, reason, wake_at).await?.is_some())
+    }
+
+    /// [`Self::declare_temporary_session_halt`] returning the `halt_id` it
+    /// minted, as [`Self::declare_session_halt_stamped`] does.
+    pub async fn declare_temporary_session_halt_stamped(
+        &self,
+        session_id: &str,
+        agent: &str,
+        reason: &str,
+        wake_at: &str,
+    ) -> Result<Option<String>> {
+        let at = now_utc();
+        let halt_id = uuid::Uuid::new_v4().to_string();
         // Same closed-row refusal as `declare_session_halt` (round 13).
         sqlx::query(
-            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = ?              WHERE id = ? AND closed_at IS NULL",
+            "UPDATE sessions SET halt_declared_by = ?, halt_reason = ?,              halt_declared_at = ?, halt_wake_at = ?, halt_id = ?              WHERE id = ? AND closed_at IS NULL",
         )
         .bind(agent)
         .bind(reason)
-        .bind(now_utc())
+        .bind(&at)
         .bind(wake_at)
+        .bind(&halt_id)
         .bind(session_id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("declaring temporary halt for session {session_id}"))
-        .map(|r| r.rows_affected() > 0)
+        .map(|r| (r.rows_affected() > 0).then_some(halt_id))
     }
 
     /// The wake instant of the session's TEMPORARY halt, or `None` for no halt
@@ -229,7 +261,7 @@ impl Storage {
     /// caller's cue to tell the UI the state changed.
     pub async fn clear_session_halt(&self, session_id: &str) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL, halt_wake_at = NULL              WHERE id = ? AND halt_reason IS NOT NULL",
+            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL,              halt_declared_at = NULL, halt_wake_at = NULL, halt_id = NULL              WHERE id = ? AND halt_reason IS NOT NULL",
         )
         .bind(session_id)
         .execute(&self.pool)
@@ -243,7 +275,7 @@ impl Storage {
     pub async fn clear_host_session_halt(&self, session_id: &str) -> Result<bool> {
         let res = sqlx::query(
             "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL, \
-             halt_declared_at = NULL, halt_wake_at = NULL \
+             halt_declared_at = NULL, halt_wake_at = NULL, halt_id = NULL \
              WHERE id = ? AND halt_reason IS NOT NULL \
                AND COALESCE(halt_declared_by, 'system') = 'system'",
         )
@@ -438,11 +470,12 @@ impl Storage {
             "UPDATE sessions SET closed_at = NULL, archived = 0, \
                  halt_declared_by = 'system', \
                  halt_reason = 'Session reopened — waiting for your prompt.', \
-                 halt_declared_at = ?, halt_wake_at = NULL, \
+                 halt_declared_at = ?, halt_wake_at = NULL, halt_id = ?, \
                  reopened_at = ? \
              WHERE id = ? AND closed_at IS NOT NULL",
         )
         .bind(&now)
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(&now)
         .bind(id)
         .execute(conn)

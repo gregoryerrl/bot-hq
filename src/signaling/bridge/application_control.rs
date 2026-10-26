@@ -73,6 +73,16 @@ pub(crate) enum AppControlRequest {
         session_id: Option<String>,
         before_id: Option<i64>,
     },
+    /// Plan 5c-1: a forward page of the control-event journal. A pure read —
+    /// no cursor moves (a watch acknowledges explicitly, in 5c-2), nothing is
+    /// delivered.
+    Events {
+        #[serde(default)]
+        since_id: i64,
+        sessions: Option<Vec<String>>,
+        kinds: Option<Vec<String>>,
+        limit: Option<usize>,
+    },
 }
 
 impl AppControlRequest {
@@ -97,6 +107,7 @@ impl AppControlRequest {
             Self::Choice { .. } => ("choice", None),
             Self::Document { session_id, .. } => ("document", Some(session_id)),
             Self::Audit { session_id, .. } => ("audit", session_id.as_deref()),
+            Self::Events { .. } => ("events", None),
         }
     }
 }
@@ -415,6 +426,14 @@ impl SignalingBridge {
                     .await?;
                 let next = (rows.len() == 20).then(|| rows.last().unwrap().id);
                 json!({"rows":rows,"next_before_id":next})
+            }
+            Events { since_id, sessions, kinds, limit } => {
+                anyhow::ensure!(since_id >= 0, "since_id must be 0 or a journal id");
+                let page = storage
+                    .control_events_page(since_id, sessions.as_deref(), kinds.as_deref(), limit.unwrap_or(50))
+                    .await?;
+                json!({"events": page.events, "scanned": page.scanned, "next_since_id": page.next_since_id, "truncated": page.truncated, "markers": page.markers,
+                    "note": "A read: no cursor moved, nothing delivered. next_since_id is the last journal id scanned, so a filtered page still progresses; truncated means rows between since_id and the oldest retained row were swept; markers lists the journal_restart / journal_gap rows among the scanned ones whatever the filters — events before a restart marker, or counted by a gap row, may be missing, and the pending decisions / standing halts re-listed after a restart repeat earlier rows: (kind, session_id, ref_id) identifies a decision or a halt."})
             }
         };
         anyhow::ensure!(

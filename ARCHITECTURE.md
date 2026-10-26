@@ -1006,7 +1006,37 @@ worker. The authenticated source is persisted as Agent provenance, and its
 original ticket/current grant is rechecked when the reserved boundary is claimed.
 A revocation while queued cancels intent before any runtime is retired. Dormant
 targets must be started and reread before submitting their current revision.
-Event watches, relay and shared-webview control remain pending.
+`events` pages the control-event journal (`control_events`, 0112): ONE bridge
+task subscribed to the bridge's own `SignalingEvent` broadcast appends a row per
+event a controller may care about — a non-tool message row (a delegated message
+names its controller as `source_session`/`source_slug`), a decision parked or
+resolved, a halt declared or cleared, a session closed, a participant's health,
+an activity transition (a repeated state once), an urgent gate, a phase vote, a
+document/findings/roster change — and nothing for configuration, context meters,
+attention toggles or staging plumbing (`signaling::bridge::control_events`). The
+read is forward by id with `sessions`/`kinds` filters applied to the returned
+rows only: `next_since_id` is the last id SCANNED so a filtered page still
+progresses, `truncated` says rows between the cursor and the oldest retained row
+were swept (7 days / 50,000 rows), `markers` lists the journal's own
+`journal_restart`/`journal_gap` rows among the scanned ones whatever the filters
+(a filtered page must not consume the only loss evidence), and it moves no
+cursor and delivers nothing. Durability is the broadcast's — it fires after the
+source row exists, so a crash between the two loses the event — hence the task
+writes a `journal_restart` row when it starts and reconciles the two durable
+attention states into the journal: EVERY pending decision and standing halt of
+every open session, deduped by a stable identity (`ref_id` = the choice id, or
+the halt's `halt_id` — a UUID the declaration mints into the slot (0112) and the
+`AwaitingUser` event carries, since two declarations can share a millisecond
+stamp) against the rows already there — no time cutoff,
+since the newest row proves nothing about coverage after an interrupted
+catch-up — and the same identity check keeps a `PendingChoice` buffered during
+the catch-up from landing twice; a lagged receiver writes a `journal_gap` row
+with the count; a reader sees the discontinuity. The chatty kinds (`message`, `activity`) are journaled only
+while some enabled participant of an open session holds `control_bot_hq`
+(re-read every 30 s and on roster/session changes); attention kinds always are.
+Watches that wake a controller (an explicit, scoped acknowledgement; a wake
+modelled on the temporary halt's discipline), relay and shared-webview control
+remain pending.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

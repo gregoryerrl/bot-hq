@@ -97,7 +97,7 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }
-        SignalingEvent::AwaitingUser { session_id, agent, reason } => {
+        SignalingEvent::AwaitingUser { session_id, agent, reason, .. } => {
             let payload = AwaitingUser { session_id, agent, reason };
             emit_event(
                 AwaitingUser::EVENT_NAME,
@@ -293,6 +293,7 @@ mod tests {
             session_id: "s1".into(),
             agent: "hands".into(),
             reason: "test reason".into(),
+            halt_id: None,
         };
 
         route(ev, &emitter, &move |name: &str, payload: Value| {

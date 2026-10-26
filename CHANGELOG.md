@@ -25,6 +25,22 @@ only built-in empty listing calls are allowed. Newly started Claude participants
 no longer expose native Agent/Workflow/Task delegation, with or without the checkbox;
 the checkbox grants managed helpers only. Existing processes adopt this at restart.
 
+### Added
+
+- Application control gained `events`: a forward, cursor-paged read of a new
+  durable control-event journal (migration 0112) that records, for every open
+  session, non-tool message rows, decisions parked and resolved, halts declared
+  and cleared, urgent gates, participant health, activity changes, phase votes,
+  document/findings/roster changes and session closes. It is a pure read — no
+  cursor moves, nothing is delivered — and says when events may be missing: a
+  `journal_restart` row marks each start (every pending decision and standing
+  halt not yet journaled is re-listed after it, identified by choice id or a
+  per-declaration halt id so nothing is listed twice), a `journal_gap` row counts
+  dropped broadcasts, both ride every page as `markers` whatever the filters,
+  and `truncated` flags a cursor older than the 7-day / 50,000-row retention. The
+  chatty kinds are journaled only while some session holds the
+  application-control grant. Watches that wake a controller come next.
+
 ### Fixed
 
 - When Codex gives up on bot-hq's gate hook (`hook timed out after 30s`), the

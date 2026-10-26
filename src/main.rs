@@ -239,6 +239,10 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
             // (feedback #66a); a relaunch re-reads the due rows, so nothing is
             // re-armed by hand.
             bridge.spawn_scheduled_gate_runner();
+            // The control-event journal a Driver pages with `app_control
+            // events` (Plan 5c): the restart marker, the reconciliation of
+            // pending decisions and standing halts, then every broadcast.
+            bridge.spawn_control_event_journal();
             if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
                 tracing::warn!(?e, "cl startup init failed — index may be partial");
             }

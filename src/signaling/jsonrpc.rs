@@ -2470,6 +2470,88 @@ mod tests {
         assert!(!CapabilitySet::preset_eyes().allows_tool("app_control"));
     }
 
+    /// Plan 5c-1 (Driver event watch): `app_control events` pages the durable
+    /// journal the bridge keeps from its own broadcast — forward by id, filtered
+    /// by session and kind, `next_since_id` the last id SCANNED so a page whose
+    /// rows are all filtered out still progresses, `truncated` when the cursor
+    /// predates retention — and moves no cursor, delivers nothing, records an
+    /// audit row like every other read. Rows the controller itself caused carry
+    /// its source; tool rows are never journaled.
+    #[tokio::test]
+    async fn driver_events_read_pages_the_journal_forward_without_acknowledging() {
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let (bridge, storage) = two_role_session().await;
+        sqlx::query("UPDATE roles SET capabilities = '[\"control_bot_hq\"]' WHERE slug = 'hands'").execute(storage.pool()).await.unwrap();
+        sqlx::query("UPDATE session_participants SET capabilities = '[\"control_bot_hq\"]' WHERE session_id = 's1' AND slug = 'hands'").execute(storage.pool()).await.unwrap();
+        let mut driver = caller();
+        driver.capabilities = ResolvedCapabilities::Known(CapabilitySet::from_slugs(&["control_bot_hq"]));
+        storage.create_session("target", "project work", None).await.unwrap();
+        storage.ensure_session_roster("target", 2).await.unwrap();
+        // The journal is fed by the bridge's own events; drive it directly.
+        let journal = bridge.control_event_journal_for_tests();
+        let text = storage.post_to_channel("target", "participant", Some("hands"), "text", "I pushed the branch", None).await.unwrap().message_id();
+        journal.record(&SignalingEvent::MessagePersisted { session_id: Arc::from("target"), message_id: text }).await;
+        let tool_row = storage.post_to_channel("target", "participant", Some("hands"), "tool_use", "{\"name\":\"Bash\"}", None).await.unwrap().message_id();
+        journal.record(&SignalingEvent::MessagePersisted { session_id: Arc::from("target"), message_id: tool_row }).await;
+        journal.record(&SignalingEvent::AwaitingUser { session_id: "target".into(), agent: "hands".into(), reason: "CI is running".into(), halt_id: None }).await;
+        journal.record(&SignalingEvent::SessionActivity { session_id: "target".into(), state: "idle".into(), slot0_busy: false, slot1_busy: false, busy_slots: vec![] }).await;
+        journal.record(&SignalingEvent::SessionActivity { session_id: "target".into(), state: "idle".into(), slot0_busy: false, slot1_busy: false, busy_slots: vec![] }).await;
+        journal.record(&SignalingEvent::AgentHealth { session_id: "s1".into(), agent: "eyes".into(), health: "stalled".into() }).await;
+
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":0,"limit":10})).await.unwrap());
+        let rows = page["result"]["events"].as_array().unwrap();
+        let kinds: Vec<&str> = rows.iter().map(|r| r["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["message", "halt_declared", "activity", "health"], "{page}");
+        assert_eq!(rows[0]["session_id"], "target");
+        assert_eq!(rows[0]["agent"], "hands");
+        assert_eq!(rows[0]["ref_id"], text.to_string());
+        assert_eq!(rows[0]["detail"], "text");
+        assert_eq!(rows[1]["detail"], "CI is running");
+        assert_eq!(rows[2]["detail"], "idle", "a repeated activity state is journaled once");
+        assert_eq!(page["result"]["truncated"], false);
+        let last = rows.last().unwrap()["id"].as_i64().unwrap();
+        assert_eq!(page["result"]["next_since_id"], last);
+        // A filtered page: only s1's rows, scanned past target's.
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":0,"sessions":["s1"],"limit":10})).await.unwrap());
+        assert_eq!(page["result"]["events"].as_array().unwrap().len(), 1);
+        assert_eq!(page["result"]["next_since_id"], last, "the cursor is the last id scanned");
+        // Every scanned row filtered out: the page is empty but still advances.
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":0,"kinds":["decision_pending"],"limit":2})).await.unwrap());
+        assert_eq!(page["result"]["events"].as_array().unwrap().len(), 0);
+        assert_eq!(page["result"]["next_since_id"], rows[1]["id"], "two rows scanned, none returned");
+        // Beyond the end: nothing scanned, the cursor stays.
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":last,"limit":10})).await.unwrap());
+        assert_eq!(page["result"]["events"].as_array().unwrap().len(), 0);
+        assert_eq!(page["result"]["next_since_id"], last);
+        // A pure read: no cursor moved, nothing delivered, one audit row per call.
+        let delivered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM participant_deliveries").fetch_one(storage.pool()).await.unwrap();
+        assert_eq!(delivered, 0);
+        assert_eq!(storage.control_audit_page(None, None).await.unwrap().iter().filter(|a| a.operation == "events").count(), 4);
+        assert_eq!(page["result"]["markers"].as_array().unwrap().len(), 0, "no marker among those rows");
+        // The journal's loss markers ride a filtered page that excludes them
+        // (eyes-2: a filtered read must not consume the only loss evidence).
+        journal.gap(3).await;
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":last,"sessions":["target"],"kinds":["health"],"limit":10})).await.unwrap());
+        assert_eq!(page["result"]["events"].as_array().unwrap().len(), 0, "{page}");
+        assert_eq!(page["result"]["markers"][0]["kind"], "journal_gap");
+        assert_eq!(page["result"]["markers"][0]["detail"], "3 bridge events were dropped before the journal read them");
+        let gap_id = page["result"]["markers"][0]["id"].as_i64().unwrap();
+        assert_eq!(page["result"]["next_since_id"], gap_id);
+        assert_eq!(page["result"]["scanned"], 1);
+        // Retention: once rows below the cursor are gone, the read says so.
+        sqlx::query("DELETE FROM control_events WHERE id <= ?").bind(rows[1]["id"].as_i64().unwrap()).execute(storage.pool()).await.unwrap();
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":0,"limit":10})).await.unwrap());
+        assert_eq!(page["result"]["truncated"], true, "{page}");
+        assert_eq!(page["result"]["events"].as_array().unwrap().len(), 3);
+        assert_eq!(page["result"]["markers"].as_array().unwrap().len(), 1);
+        // The largest cursor is a legal, empty read.
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":i64::MAX})).await.unwrap());
+        assert_eq!((page["result"]["scanned"].as_u64(), page["result"]["truncated"].as_bool()), (Some(0), Some(false)));
+        assert!(tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":-1})).await.unwrap().contains("since_id"));
+        // Without the grant the read is refused like every other action.
+        assert!(tool(&bridge, caller(), "app_control", json!({"action":"events","since_id":0})).await.unwrap().contains("refused"));
+    }
+
     #[tokio::test]
     async fn tools_list_returns_all_tools() {
         let bridge = SignalingBridge::new();

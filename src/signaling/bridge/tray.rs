@@ -2395,6 +2395,7 @@ impl SignalingBridge {
         // session that keeps dealing turns under a failed write is the worse of
         // the two — but a halt nobody can recover is not allowed to look
         // identical to one that persisted.
+        let mut halt_id = None;
         let recorded = {
             let storage = self.storage.lock().await.clone();
             match storage {
@@ -2403,12 +2404,15 @@ impl SignalingBridge {
                     // the same slot; the banner counts down to it.
                     Some(wake) => {
                         storage
-                            .declare_temporary_session_halt(&session_id, &agent, &text, wake)
+                            .declare_temporary_session_halt_stamped(&session_id, &agent, &text, wake)
                             .await
                     }
-                    None => storage.declare_session_halt(&session_id, &agent, &text).await,
+                    None => storage.declare_session_halt_stamped(&session_id, &agent, &text).await,
                 } {
-                    Ok(true) => true,
+                    Ok(Some(id)) => {
+                        halt_id = Some(id);
+                        true
+                    }
                     // `Ok(false)` is the REFUSAL: the session is closed (or
                     // gone) and the declare matched no row (round 13,
                     // 828147ad). Nothing may follow — no awaiting flip, no
@@ -2418,7 +2422,7 @@ impl SignalingBridge {
                     // storage. The one caller racing a close (a pump's
                     // died-mid-turn declare, an agent halting into a
                     // concurrent close) simply loses, which is the point.
-                    Ok(false) => {
+                    Ok(None) => {
                         tracing::debug!(
                             session_id,
                             "halt declare refused: the session is closed"
@@ -2460,6 +2464,7 @@ impl SignalingBridge {
             session_id,
             agent,
             reason: text,
+            halt_id,
         });
     }
 
@@ -4431,8 +4436,10 @@ mod tests {
             .split("\n    /// ")
             .next()
             .expect("a split always yields a first part");
+        // The stamped writer (Plan 5c-1): the slot write that also hands the
+        // banner event the halt's declared-at identity.
         let write = body
-            .find("declare_session_halt(")
+            .find("declare_session_halt_stamped(")
             .expect("the halt is written");
         let stop = body
             .find("set_session_awaiting(")
@@ -4448,7 +4455,7 @@ mod tests {
              persisted"
         );
         assert!(
-            body.contains("Ok(false) => {"),
+            body.contains("Ok(None) => {"),
             "the closed-row REFUSAL must be its own arm — folding it into \
              `recorded = false` banners a session with no halt in storage \
              (828147ad)"
@@ -4557,7 +4564,7 @@ mod tests {
             .await;
         let ev = sub.recv().await.unwrap();
         assert!(
-            matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason }
+            matches!(ev, SignalingEvent::AwaitingUser { session_id, agent, reason, .. }
             if session_id == "s1" && agent == "hands" && reason == "ping")
         );
     }
