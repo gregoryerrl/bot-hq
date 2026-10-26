@@ -169,7 +169,14 @@ export function useOsNotifications(): void {
     [push],
   );
   const onUrgent = useCallback(
-    (p: { session_id: string; choice_id: string; agent: string; reason: string; command: string }) => {
+    (p: {
+      session_id: string;
+      choice_id: string;
+      agent: string;
+      reason: string;
+      command: string;
+      under_review?: boolean;
+    }) => {
       fireUrgent(
         {
           choiceId: p.choice_id,
@@ -177,6 +184,7 @@ export function useOsNotifications(): void {
           agent: p.agent,
           reason: p.reason,
           command: p.command,
+          underReview: p.under_review === true,
         },
         0,
       );

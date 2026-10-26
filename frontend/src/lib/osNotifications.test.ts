@@ -33,6 +33,20 @@ describe("urgent gates", () => {
     expect(urgentToast(gate, 3).title).toBe(`bot-hq — URGENT approval (still waiting, 3/${URGENT_RENOTIFY_MAX})`);
   });
 
+  // Feedback #127: a forced approval notifies while the reviewer still has to
+  // read it — the toast says so instead of claiming an approval is waiting.
+  it("says the gate is under review when it is not yet the user's to answer", () => {
+    const t = urgentToast({ ...gate, underReview: true }, 0);
+    expect(t.title).toBe("bot-hq — URGENT, under review");
+    expect(t.body).toBe(
+      "reviewer reads it first — Cloud Run job is burning the shared Meta budget — gcloud run jobs executions cancel nightly --region us-east1",
+    );
+    expect(urgentToast({ ...gate, underReview: true }, 2).title).toBe(
+      `bot-hq — URGENT, under review (still waiting, 2/${URGENT_RENOTIFY_MAX})`,
+    );
+    expect(urgentToast({ ...gate, underReview: false }, 0).title).toBe("bot-hq — URGENT approval");
+  });
+
   it("repeats every ten minutes, six times, then stops", () => {
     expect(URGENT_RENOTIFY_MS).toBe(600_000);
     expect(URGENT_RENOTIFY_MAX).toBe(6);

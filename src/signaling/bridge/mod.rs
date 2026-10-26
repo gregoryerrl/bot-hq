@@ -354,6 +354,11 @@ pub enum SignalingEvent {
         agent: String,
         reason: String,
         command: String,
+        /// Feedback #127: a forced approval is notified while it is still
+        /// QUEUED for the reviewer's read (`true`) and again when it parks
+        /// (`false`); the toast says which, so "approve now" is never claimed
+        /// for a card the user cannot yet answer.
+        under_review: bool,
     },
 }
 

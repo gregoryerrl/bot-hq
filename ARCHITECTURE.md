@@ -1560,6 +1560,53 @@ again. The Settings Off toggle still silences it. The session tile turns red
 (`NeedsYou.urgent`, "URGENT approval"), the card leads with `🚨 URGENT APPROVAL`
 and the reason, and `gate_status` / `gate_history` carry the mark.
 
+**A forced approval is read by the reviewer first** (feedback #127; the user's
+pick on tray `cc6ae784`, 2026-10-26). Three production reads wrapped in Python
+scripts reached the user's tray with no reviewer turn in between: the read was
+inside script text, which no parser classifies, so the group-K list match and
+the outward classifier both said "nothing to review". The agent's own
+`require_approval: true` is now that signal — `ReviewIntent::Explicit` rides
+from `action_gate_request_from` into `park_gated_command_locked`, which takes
+the fresh-read path a listed data read takes (`fresh_review`: a configured
+reviewer reads it every time, no coverage shortcut; an outward forced request
+still passes the body checks first). The queued row is the ordinary one
+(`insert_queued_gate_with_approval`, `approval_required = 1`), its notice is the
+`🔐 Approval request queued for review` row (`QueueSubject::Explicit`; a listed
+read or a publish keeps its own notice), and settlement, veto, revision, restart
+re-arm and roster reconciliation are unchanged. What the user sees is stated on
+the card: `promote_queued_row` appends `✅ Review completed by <reviewer> at
+<time>` to the prompt (`promote_queued_gate_for_body`'s `review_note`), and a
+request that reaches them without a read says `⚠ Review SKIPPED — <why>` (no
+other reviewer, a user-approved reviewer-down override, a roster change). An
+urgent forced request fires `GateUrgent` at the queue (`under_review: true` —
+the toast reads "URGENT, under review", never "approval") AND at promotion
+(`under_review: false`, fresh repeats), so the user is alerted at once while
+review still precedes approval; a veto's withdrawal now sends `ChoiceResolved`
+so the notification loop stops; review never extends a run window (the run is
+refused after `run_not_after` as before). A relaunch re-arms only PENDING
+urgent rows (`useOsNotifications`' mount read), so a forced request still queued
+at restart is not re-notified until its promotion fires — the queue's own
+re-arm summons the reviewer.
+An identical re-issue returns the queued or the promoted gate; a forced request
+whose identical command is already PENDING without a read (`body_row_id` null —
+a keyword gate, a park on prior coverage) is refused with that gate's id and
+the way out (let it stand, or withdraw and re-issue) rather than queued twice or
+counted as reviewed — unless nobody could read it now (no other reviewer, an
+overridden-down reviewer), when the existing gate is returned with the skip
+note (EYES `479680fc`). The fresh-read path carries the publish path's
+command-keyed veto guard (`open_veto_refusal`, test `44fd3e56`): while a
+blocking finding that named a gate with this exact command is open, an
+unchanged re-issue — forced or a listed read — is refused with the finding and
+gate ids, so no new row can later promote as "nothing blocking"; a rebuttal or
+fix reopens it to a fresh read. And every queue notice is rendered BEFORE its
+row exists and refused when `body_delivered_whole` says the wire would cut it
+(`WIRE_BODY_CLAMP_BYTES`, test `0929fd7e`): settlement only knows the cursor
+passed the row, so a cut script tail or body — and the reviewer's instructions
+after it — would otherwise promote as reviewed; a revision the wire would cut is
+not re-posted and the channel says so. The parser boundary stands: bot-hq still
+does not read script text, and a forced approval from a roster with no other
+reviewer parks unread, labelled.
+
 ---
 
 ## Session policy

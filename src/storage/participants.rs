@@ -2662,6 +2662,15 @@ fn quoted_wire_body(body: &str, first_at_line_start: bool) -> std::borrow::Cow<'
     quoted.map(std::borrow::Cow::Owned).unwrap_or(std::borrow::Cow::Borrowed(body))
 }
 
+/// Whether `body` reaches a participant WHOLE: quoted as the worst case
+/// (`first_at_line_start`, every bracket-led line) and within
+/// [`WIRE_BODY_CLAMP_BYTES`]. A caller that needs every byte READ — a review
+/// notice whose read is what parks a gate (feedback #127) — refuses before
+/// posting instead of discovering the cut after settlement.
+pub fn body_delivered_whole(body: &str) -> bool {
+    quoted_wire_body(body, true).len() <= WIRE_BODY_CLAMP_BYTES
+}
+
 /// [`WIRE_BODY_CLAMP_BYTES`] applied: oversized bodies are cut at a char
 /// boundary and carry a marker saying what was cut and where the rest lives.
 /// The marker addresses the AGENT reading it — the actionable move (a file

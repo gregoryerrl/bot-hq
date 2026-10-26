@@ -111,6 +111,8 @@ pub struct GateUrgentEvent {
     pub agent: String,
     pub reason: String,
     pub command: String,
+    /// `true` while the gate is still queued for the reviewer's read (#127).
+    pub under_review: bool,
 }
 
 impl GateUrgentEvent {

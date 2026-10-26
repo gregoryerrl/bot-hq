@@ -443,11 +443,20 @@ impl Storage {
 
     /// Bridge promotion is based on a reviewed snapshot. A revision that
     /// changed/cleared its body pointer must not inherit that promotion.
-    pub async fn promote_queued_gate_for_body(&self, choice_id: &str, body_row_id: Option<i64>) -> Result<u64> {
+    /// `review_note` is appended to the card's prompt (feedback #127: the card
+    /// says whether the reviewer's read happened, or why it was skipped).
+    pub async fn promote_queued_gate_for_body(
+        &self,
+        choice_id: &str,
+        body_row_id: Option<i64>,
+        review_note: Option<&str>,
+    ) -> Result<u64> {
+        let note = crate::policy::secret_scan::redact(review_note.unwrap_or_default());
         let res = sqlx::query(
-            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL \
+            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL, \
+                 prompt = prompt || ? \
              WHERE choice_id = ? AND body_row_id IS ? AND status = 'queued' AND run_started_at IS NULL",
-        ).bind(now_utc()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+        ).bind(now_utc()).bind(note.as_ref()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
             .context("promoting the reviewed body to user approval")?;
         Ok(res.rows_affected())
     }

@@ -110,6 +110,11 @@ export interface UrgentGate {
   agent: string;
   reason: string;
   command: string;
+  /** Feedback #127: a forced approval notifies while it is still queued for
+   *  the reviewer's read; the card is not the user's to answer yet, and the
+   *  toast must not say "approval" as if it were. The promotion fires again
+   *  without this flag. */
+  underReview?: boolean;
 }
 
 /** The toast for an urgent gate: the reason first, then the command's first
@@ -118,9 +123,11 @@ export interface UrgentGate {
 export function urgentToast(g: UrgentGate, repeat: number): Toast {
   const command = g.command.split("\n").find((l) => l.trim() !== "")?.trim() ?? "";
   const still = repeat > 0 ? ` (still waiting, ${repeat}/${URGENT_RENOTIFY_MAX})` : "";
+  const what = g.underReview ? "URGENT, under review" : "URGENT approval";
+  const lead = g.underReview ? "reviewer reads it first — " : "";
   return {
-    title: `bot-hq — URGENT approval${still}`,
-    body: snip(command ? `${g.reason} — ${command}` : g.reason),
+    title: `bot-hq — ${what}${still}`,
+    body: snip(`${lead}${command ? `${g.reason} — ${command}` : g.reason}`),
   };
 }
 

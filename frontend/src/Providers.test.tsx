@@ -436,6 +436,47 @@ describe("Providers — the OS-notification wire", () => {
     expect(mockSend).toHaveBeenCalledTimes(2);
   });
 
+  // Feedback #127: a forced approval marked urgent notifies while it is still
+  // queued for the reviewer's read; a veto withdraws it (choice_resolved with
+  // "(withdrawn)") and the repeats stop, and its promotion re-fires as the
+  // user's approval.
+  it("an urgent gate under review stops repeating when the reviewer withdraws it", async () => {
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
+    renderProviders();
+    emit("session:gate_urgent", {
+      session_id: "s1",
+      choice_id: "g3",
+      agent: "hands",
+      reason: "incident read",
+      command: "python3 read_incident.py",
+      under_review: true,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockSend.mock.calls[0][0]).toMatchObject({
+      title: "bot-hq — URGENT, under review",
+      body: "reviewer reads it first — incident read — python3 read_incident.py",
+    });
+    emit("session:choice_resolved", { choice_id: "g3", picked: "(withdrawn)" });
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    // The same gate promoted after the read: the approval toast, fresh repeats.
+    emit("session:gate_urgent", {
+      session_id: "s1",
+      choice_id: "g3",
+      agent: "hands",
+      reason: "incident read",
+      command: "python3 read_incident.py",
+      under_review: false,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+    expect(mockSend.mock.calls[1][0]).toMatchObject({ title: "bot-hq — URGENT approval" });
+    emit("session:choice_resolved", { choice_id: "g3", picked: "Approve" });
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(mockSend).toHaveBeenCalledTimes(2);
+  });
+
   it("an unanswered urgent gate stops repeating after six repeats", async () => {
     vi.spyOn(document, "hasFocus").mockReturnValue(true);
     renderProviders();

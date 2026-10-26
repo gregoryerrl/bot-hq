@@ -216,6 +216,34 @@ fn request_extras(req: &GateRequest, bound: Bound) -> String {
     out
 }
 
+/// Why a park is read by the reviewer before the user sees it (feedback
+/// #127, tray `cc6ae784`, 2026-10-26).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewIntent {
+    /// Review only when the command's own shape asks for it: an outward
+    /// publish, a listed data read, a `prod_read`.
+    Routine,
+    /// The agent asked for `require_approval`: a configured reviewer reads it
+    /// first, every time, whatever the command's shape — three production
+    /// reads wrapped in Python scripts reached the user's tray unread because
+    /// no parser could see the read inside them (s-5a0d1dba), and the user's
+    /// standing rule is that a forced approval is reviewed before it is theirs
+    /// to answer. Prior coverage of the same text is not a substitute.
+    Explicit,
+}
+
+/// What a queued row's channel notice asks the reviewer to read.
+#[derive(Debug, Clone, Copy)]
+enum QueueSubject<'a> {
+    /// An outward publish: the body it would publish is posted with it.
+    Publish,
+    /// A command that runs one of the project's listed data reads (group K).
+    Listed(&'a crate::policy::data_reads::DataRead),
+    /// A forced approval that is neither (#127): the command text is the
+    /// whole content, including script text bot-hq cannot parse.
+    Explicit,
+}
+
 /// Which bound a reply speaks of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bound {
@@ -317,6 +345,7 @@ impl SignalingBridge {
                     false,
                     None,
                     None,
+                    ReviewIntent::Routine,
                 )
                 .await?;
             return Ok(AutoPublishPreparation::Deferred {
@@ -399,7 +428,7 @@ impl SignalingBridge {
             OutwardReview::Refuse(reason) => anyhow::bail!("{reason}"),
             OutwardReview::Queued { reviewer_id } => {
                 let extra = card_extra(command, self.script_pins(session_id, command).await, None, approve_after, None, None);
-                let (gate_id, existing) = self.queue_outward_park(session_id, agent, command, reviewer_id, None, &extra, false, run_timeout_secs).await?;
+                let (gate_id, existing) = self.queue_outward_park(session_id, agent, command, reviewer_id, QueueSubject::Publish, &extra, false, run_timeout_secs).await?;
                 Ok(AutoPublishPreparation::Deferred { outcome: ParkOutcome::Queued { gate_id, existing }, approval_required: false })
             }
             OutwardReview::Covered { reviewer, .. } => Ok(AutoPublishPreparation::Direct {
@@ -415,7 +444,7 @@ impl SignalingBridge {
             OutwardReview::Proceed(_) => {
                 // An explicit reviewer-down override is a user-gate escape,
                 // not a claim that the missing review actually happened.
-                let outcome = self.park_gated_command_locked(session_id, agent, command, approve_after, false, None, None).await?;
+                let outcome = self.park_gated_command_locked(session_id, agent, command, approve_after, false, None, None, ReviewIntent::Routine).await?;
                 Ok(AutoPublishPreparation::Deferred { outcome, approval_required: true })
             }
         }
@@ -494,12 +523,17 @@ impl SignalingBridge {
         let listed = self.data_read_in(&session_id, &command).await.is_some();
         // An URGENT gate parks whatever the list says (feedback #52): a command
         // that must reach the user NOW is one they must see before it runs.
+        // Feedback #127 (tray `cc6ae784`): a FORCED approval is read by the
+        // reviewer first, whatever the command's shape — the flag is the
+        // agent's own statement that this must not run unapproved, and the
+        // user's rule is that such a request reaches them reviewed.
         if req.require_approval || listed || req.urgent_reason.is_some() || req.run_window.is_some() {
+            let intent = if req.require_approval { ReviewIntent::Explicit } else { ReviewIntent::Routine };
             let outcome = self
-                .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref(), req.run_window.as_ref())
+                .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), false, None, req.run_window.as_ref(), intent)
                 .await?;
             let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
-            let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref()).await;
+            let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref(), intent).await;
             let window = self.record_run_window(&outcome, req.run_window.as_ref()).await;
             return Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound) + &urgency + &window);
         }
@@ -534,7 +568,7 @@ impl SignalingBridge {
                     .park_gated_command_with(&session_id, &agent, &command, approve_after.as_deref(), None)
                     .await?;
                 let bound = self.record_run_timeout(&outcome, req.run_timeout_secs).await;
-                let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref()).await;
+                let urgency = self.record_urgency(&session_id, &agent, &command, &outcome, req.urgent_reason.as_deref(), ReviewIntent::Routine).await;
                 Ok(park_outcome_text(&outcome, &command) + &request_extras(&req, bound) + &urgency)
             }
         }
@@ -611,8 +645,12 @@ impl SignalingBridge {
     /// follows. A fresh park that is PENDING fires `GateUrgent` now and posts a
     /// channel row (the audit: whoever marked it, and why, is on record); a
     /// fresh QUEUED publish keeps the mark on its row and `promote_queued_row`
-    /// fires the event when the reviewer's read parks it. An identical re-issue
-    /// returns the EXISTING gate, whose urgency stands as it was.
+    /// fires the event when the reviewer's read parks it — except a FORCED
+    /// approval (#127), which notifies the user now, while the reviewer reads
+    /// it, and again when it parks: urgency reaches them at once, review still
+    /// precedes approval, and the run window (if any) is not extended by
+    /// either. An identical re-issue returns the EXISTING gate, whose urgency
+    /// stands as it was.
     async fn record_urgency(
         &self,
         session_id: &str,
@@ -620,6 +658,7 @@ impl SignalingBridge {
         command: &str,
         outcome: &ParkOutcome,
         reason: Option<&str>,
+        intent: ReviewIntent,
     ) -> String {
         let Some(reason) = reason else { return String::new() };
         let (gate_id, existing, queued) = match outcome {
@@ -640,13 +679,24 @@ impl SignalingBridge {
             }
         }
         if !queued {
-            self.fire_gate_urgent(&storage, session_id, agent, gate_id, reason, command).await;
+            self.fire_gate_urgent(&storage, session_id, agent, gate_id, reason, command, false).await;
             return format!(
                 "\nURGENT ({reason}): the user is notified now, even with bot-hq focused, and again every \
                  {} minutes until they answer (at most {} times); the session tile is red and the card \
                  shows the reason.",
                 URGENT_RENOTIFY_MINUTES, URGENT_RENOTIFY_MAX
             )
+        }
+        if intent == ReviewIntent::Explicit {
+            self.fire_gate_urgent(&storage, session_id, agent, gate_id, reason, command, true).await;
+            return format!(
+                "\nURGENT ({reason}): the user is notified now, even with bot-hq focused, while the \
+                 reviewer reads this request; it parks for their approval only after that read (a \
+                 blocking finding withdraws it instead, and the alerts stop), and they are notified \
+                 again then — every {} minutes until they answer (at most {} times). Review time does \
+                 not extend a run window.",
+                URGENT_RENOTIFY_MINUTES, URGENT_RENOTIFY_MAX
+            );
         }
         format!(
             "\nURGENT ({reason}): once the reviewer's read parks it for the user, they are notified at \
@@ -657,6 +707,7 @@ impl SignalingBridge {
 
     /// The urgent gate is PENDING for the user: the event the notification
     /// rides, and the channel row that is its audit.
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn fire_gate_urgent(
         &self,
         storage: &crate::storage::Storage,
@@ -665,6 +716,7 @@ impl SignalingBridge {
         gate_id: &str,
         reason: &str,
         command: &str,
+        under_review: bool,
     ) {
         let _ = self.event_tx.send(SignalingEvent::GateUrgent {
             session_id: session_id.to_string(),
@@ -672,14 +724,20 @@ impl SignalingBridge {
             agent: agent.to_string(),
             reason: reason.to_string(),
             command: command.to_string(),
+            under_review,
         });
         let id8: String = gate_id.chars().take(8).collect();
+        let notice = if under_review {
+            format!("🚨 Gate {id8} is URGENT ({agent}): {reason} — the user is being notified while the reviewer reads it; it parks for their approval after that read.")
+        } else {
+            format!("🚨 Gate {id8} is URGENT ({agent}): {reason} — the user is being notified until they answer.")
+        };
         let _ = crate::core::post_system_notice(
             storage,
             Some(self),
             session_id,
             crate::storage::MessageKind::SystemNotice,
-            format!("🚨 Gate {id8} is URGENT ({agent}): {reason} — the user is being notified until they answer."),
+            notice,
             None,
         )
         .await;
@@ -703,28 +761,72 @@ impl SignalingBridge {
     /// no other reviewer in the roster parks it directly, with a note (so a
     /// reviewer's own read goes straight to the user); a reviewer down holds
     /// it unless the user approved an override.
-    async fn data_read_review(&self, session_id: &str, agent: &str) -> Result<OutwardReview> {
+    async fn data_read_review(&self, session_id: &str, agent: &str, command: &str) -> Result<OutwardReview> {
+        self.fresh_review(session_id, agent, command, "listed data read").await
+    }
+
+    /// A read the reviewer takes EVERY time, no coverage shortcut: the listed
+    /// data read's precondition above, and (#127) a forced approval's — `what`
+    /// names the request in the notes and the refusal. An OPEN targeted veto
+    /// on this exact command refuses first, in every roster shape (EYES/test
+    /// `44fd3e56`: a re-issue used to get a NEW gate the old veto no longer
+    /// named, and its card could say "nothing blocking" while the finding was
+    /// still open); the same command-keyed guard the publish path has.
+    async fn fresh_review(&self, session_id: &str, agent: &str, command: &str, what: &str) -> Result<OutwardReview> {
+        if let Some(refusal) = self.open_veto_refusal(session_id, command, what).await? {
+            return Ok(OutwardReview::Refuse(refusal));
+        }
+        Ok(match self.fresh_reader(session_id, agent, what).await? {
+            FreshRead::Reviewer(reviewer_id) => OutwardReview::Queued { reviewer_id },
+            FreshRead::Skipped(note) => OutwardReview::Proceed(Some(note)),
+            FreshRead::Held(reason) => OutwardReview::Refuse(reason),
+        })
+    }
+
+    /// The refusal for a command an OPEN blocking finding vetoed by gate
+    /// (`open_targeted_veto_for_command`), or `None`. A changed script is a
+    /// different command text and matches nothing — it goes to a fresh read.
+    async fn open_veto_refusal(&self, session_id: &str, command: &str, what: &str) -> Result<Option<String>> {
+        let storage = self
+            .storage
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("no storage wired"))?;
+        Ok(storage.open_targeted_veto_for_command(session_id, command).await?.map(|(finding, gate, _)| {
+            format!(
+                "{what} held: open blocking finding {} vetoed this exact command (gate {}). Fix what \
+                 it raises and disposition it `fixed`, or rebut it, then re-issue.",
+                &finding[..finding.len().min(8)],
+                &gate[..gate.len().min(8)]
+            )
+        }))
+    }
+
+    /// Who takes a fresh read now: the first other reviewer in the roster
+    /// (`Reviewer`), nobody — no other reviewer, a user-approved reviewer-down
+    /// override, or a reviewer missing from the roster rows — with the note
+    /// the reply and the card carry (`Skipped`), or a configured reviewer that
+    /// is down with no override (`Held`, the refusal).
+    async fn fresh_reader(&self, session_id: &str, agent: &str, what: &str) -> Result<FreshRead> {
         let reviewers: Vec<String> = self
             .session_reviewers(session_id)
             .into_iter()
             .filter(|slug| slug != agent)
             .collect();
         let Some(reviewer_slug) = reviewers.first() else {
-            return Ok(OutwardReview::Proceed(Some(
-                "note: no other reviewer in this roster — the listed data read parks without a \
-                 reviewer's read"
-                    .into(),
+            return Ok(FreshRead::Skipped(format!(
+                "note: no other reviewer in this roster — the {what} parks without a reviewer's read"
             )));
         };
         if let Some((_, health)) = self.session_reviewer_down(session_id, agent) {
             return Ok(match self.reviewer_override_reason(session_id) {
-                Some(_) => OutwardReview::Proceed(Some(
-                    "note: reviewer down — user-approved override in effect; the listed data read \
-                     parks without a reviewer's read"
-                        .into(),
+                Some(_) => FreshRead::Skipped(format!(
+                    "note: reviewer down — user-approved override in effect; the {what} parks \
+                     without a reviewer's read"
                 )),
-                None => OutwardReview::Refuse(format!(
-                    "listed data read held: the reviewer ({reviewer_slug}) is {health} and not \
+                None => FreshRead::Held(format!(
+                    "{what} held: the reviewer ({reviewer_slug}) is {health} and not \
                      recently active. Respawn it, or ask the user to approve \
                      override_reviewer_block."
                 )),
@@ -737,11 +839,10 @@ impl SignalingBridge {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("no storage wired"))?;
         match storage.participant_by_slug(session_id, reviewer_slug).await? {
-            Some(reviewer) => Ok(OutwardReview::Queued { reviewer_id: reviewer.id }),
-            None => Ok(OutwardReview::Proceed(Some(
-                "note: reviewer not in this session's roster rows — the listed data read parks \
-                 without a reviewer's read"
-                    .into(),
+            Some(reviewer) => Ok(FreshRead::Reviewer(reviewer.id)),
+            None => Ok(FreshRead::Skipped(format!(
+                "note: reviewer not in this session's roster rows — the {what} parks without a \
+                 reviewer's read"
             ))),
         }
     }
@@ -795,7 +896,7 @@ impl SignalingBridge {
         }
         let reviewer = self.session_reviewers(&session_id).iter().any(|slug| slug == &agent);
         let outcome = self
-            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer, None, None)
+            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer, None, None, ReviewIntent::Routine)
             .await?;
         Ok(park_outcome_text(&outcome, &command))
     }
@@ -835,11 +936,12 @@ impl SignalingBridge {
         approve_after: Option<&str>,
         window: Option<&RunWindow>,
     ) -> Result<ParkOutcome> {
-        self.park_gated_command_as(session_id, agent, command, approve_after, false, None, window).await
+        self.park_gated_command_as(session_id, agent, command, approve_after, false, None, window, ReviewIntent::Routine).await
     }
 
     /// The park, with whose read a listed command is: `reviewer_read` is the
-    /// reviewer's own (`read_gate`), whose card says so (EYES).
+    /// reviewer's own (`read_gate`), whose card says so (EYES) — and with the
+    /// agent's review intent (#127: `Explicit` for a forced approval).
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn park_gated_command_as(
         &self,
@@ -850,18 +952,24 @@ impl SignalingBridge {
         reviewer_read: bool,
         prod_read_card: Option<&str>,
         window: Option<&RunWindow>,
+        intent: ReviewIntent,
     ) -> Result<ParkOutcome> {
         let lock = self.gate_preparation_lock(session_id, command).await;
         let _guard = lock.lock().await;
-        self.park_gated_command_locked(session_id, agent, command, approve_after, reviewer_read, prod_read_card, window).await
+        self.park_gated_command_locked(session_id, agent, command, approve_after, reviewer_read, prod_read_card, window, intent).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn park_gated_command_locked(
         &self, session_id: &str, agent: &str, command: &str, approve_after: Option<&str>,
-        reviewer_read: bool, prod_read_card: Option<&str>, window: Option<&RunWindow>,
+        reviewer_read: bool, prod_read_card: Option<&str>, window: Option<&RunWindow>, intent: ReviewIntent,
     ) -> Result<ParkOutcome> {
+        let explicit = intent == ReviewIntent::Explicit;
         let mut upgraded = None;
-        if let Some(storage) = self.storage.lock().await.clone() {
+        // Bound first: the `if let` scrutinee's guard would otherwise live
+        // across the awaits below, and the explicit branch locks storage again.
+        let storage = self.storage.lock().await.clone();
+        if let Some(storage) = storage {
             if let Some(row) = storage.active_gate_for_command(session_id, command).await? {
                 if row.status == "auto_running" {
                     anyhow::bail!("the identical automatic run was already claimed (gate_id: {}); approval cannot be added retroactively. Read gate_status; nothing new was parked or run", row.choice_id);
@@ -871,6 +979,40 @@ impl SignalingBridge {
                         anyhow::bail!("gate {} changed while user approval was being required; inspect gate_status before retrying", row.choice_id);
                     }
                     upgraded = Some(row);
+                } else if row.status == "pending" && explicit {
+                    // #127: a pending card that came through the queue (its
+                    // body row is the reviewer's read) is the gate this
+                    // request asks for — it stands. One parked WITHOUT that
+                    // read (an ordinary keyword gate, or a park on prior
+                    // coverage) cannot be strengthened in place: when a
+                    // reviewer could read it now, say so, with the id and the
+                    // way out, rather than queue a duplicate or pretend the
+                    // read happened; when nobody can (EYES `479680fc`: a solo
+                    // roster, an overridden-down reviewer), withdrawing and
+                    // re-issuing would only park it unread again — the
+                    // existing gate stands, with the note.
+                    if row.body_row_id.is_some() {
+                        return Ok(ParkOutcome::Parked { gate_id: row.choice_id, existing: true, note: None });
+                    }
+                    if let Some(refusal) = self.open_veto_refusal(session_id, command, "forced approval request").await? {
+                        anyhow::bail!("{refusal}");
+                    }
+                    let note = match self.fresh_reader(session_id, agent, "forced approval request").await? {
+                        FreshRead::Reviewer(_) => anyhow::bail!(
+                            "action_gate: an identical command is ALREADY parked for the user's approval \
+                             WITHOUT the reviewer's read a forced approval requires (gate_id: {id}). Nothing \
+                             new was parked and nothing ran. Either let that gate stand (gate_status(\"{id}\")), \
+                             or withdraw it (withdraw_question(\"{id}\")) and re-issue this request so the \
+                             reviewer reads it first.",
+                            id = row.choice_id
+                        ),
+                        FreshRead::Skipped(note) => note,
+                        FreshRead::Held(_) => format!(
+                            "note: the reviewer is down — the existing gate stands as it was parked, \
+                             without a reviewer's read"
+                        ),
+                    };
+                    return Ok(ParkOutcome::Parked { gate_id: row.choice_id, existing: true, note: Some(note) });
                 }
             }
         }
@@ -880,6 +1022,18 @@ impl SignalingBridge {
         let mut card_extra = card_extra(command, scripts, listed.as_ref(), approve_after, reader, window);
         if let Some(card) = prod_read_card {
             card_extra = format!("\n\n{card}{card_extra}");
+        }
+        if explicit {
+            card_extra.push_str(
+                "\n\nThe executor asked for your approval (require_approval); the reviewer reads such a \
+                 request before it reaches you — this card says below whether that read happened.",
+            );
+            if window.is_some() {
+                card_extra.push_str(
+                    " Review time does not extend the run window: if it closes before your Approve, the \
+                     command is refused.",
+                );
+            }
         }
         // A prod_read is a data read whatever the lists say (group K).
         let reviewed_read = listed.is_some() || prod_read_card.is_some();
@@ -908,9 +1062,15 @@ impl SignalingBridge {
         // A DOWN reviewer is reported before the dedupe (feedback #32): "already
         // queued, nothing to do" would leave the executor waiting on a read
         // that can never happen.
-        if (outward_command(command) || reviewed_read) && self.reviewer_override_reason(session_id).is_none() {
+        if (outward_command(command) || reviewed_read || explicit) && self.reviewer_override_reason(session_id).is_none() {
             if let Some((reviewer, health)) = self.session_reviewer_down(session_id, agent) {
-                let what = if outward_command(command) { "outward publish" } else { "listed data read" };
+                let what = if outward_command(command) {
+                    "outward publish"
+                } else if reviewed_read {
+                    "listed data read"
+                } else {
+                    "forced approval request"
+                };
                 anyhow::bail!(
                     "{what} held: the reviewer ({reviewer}) is {health} and not \
                      recently active. Respawn it, or ask the user to approve \
@@ -938,7 +1098,8 @@ impl SignalingBridge {
                             if let Some(current) = storage.get_tray_entry(&existing).await? {
                                 if prior.reviewed_at.is_some() && prior.body_row_id == current.body_row_id {
                                     if self.promote_queued_row(&storage, session_id, &current,
-                                        format!("User approval is now required for reviewed publication {existing}. Nothing ran.")).await {
+                                        format!("User approval is now required for reviewed publication {existing}. Nothing ran."),
+                                        review_completed_note(Some(&reviewer.slug))).await {
                                         return Ok(ParkOutcome::Parked { gate_id: existing, existing: true, note: None });
                                     }
                                 } else if prior.body_row_id == current.body_row_id {
@@ -957,30 +1118,52 @@ impl SignalingBridge {
             }
         }
         // A listed data read is reviewed every time (group K, tray `d9555879`);
-        // a command that also publishes takes the publish review.
-        let review = if reviewed_read && !outward_command(command) {
-            self.data_read_review(session_id, agent).await?
+        // a command that also publishes takes the publish review. A forced
+        // approval (#127) takes a fresh read every time too: for a publish the
+        // body checks above still apply, and a body the reviewer already
+        // received is read again — the question is whether THIS run should
+        // reach the user, not whether the text was seen.
+        let outward = outward_command(command);
+        let review = if reviewed_read && !outward {
+            self.data_read_review(session_id, agent, command).await?
+        } else if explicit && !outward {
+            self.fresh_review(session_id, agent, command, "forced approval request").await?
         } else {
-            self.outward_review_check(session_id, agent, command).await?
+            match self.outward_review_check(session_id, agent, command).await? {
+                OutwardReview::Covered { .. } | OutwardReview::Proceed(None) if explicit => {
+                    self.fresh_review(session_id, agent, command, "outward publish").await?
+                }
+                other => other,
+            }
         };
         let (note, covered) = match review {
             OutwardReview::Refuse(text) => return Err(anyhow::anyhow!(text)),
             OutwardReview::Queued { reviewer_id } => {
                 // A prod_read the lists do not name is still a production read.
-                let subject = listed.clone().or_else(|| {
+                let listed_subject = listed.clone().or_else(|| {
                     prod_read_card.map(|_| crate::policy::data_reads::DataRead {
                         kind: crate::policy::data_reads::DataReadKind::Production,
                         entry: "prod_read".to_string(),
                     })
                 });
+                let subject = match &listed_subject {
+                    Some(read) => QueueSubject::Listed(read),
+                    None if outward => QueueSubject::Publish,
+                    None => QueueSubject::Explicit,
+                };
                 let (gate_id, existing) = self
-                    .queue_outward_park(session_id, agent, command, reviewer_id, subject.as_ref(), &card_extra, true, None)
+                    .queue_outward_park(session_id, agent, command, reviewer_id, subject, &card_extra, true, None)
                     .await?;
                 return Ok(ParkOutcome::Queued { gate_id, existing });
             }
             OutwardReview::Proceed(note) => {
                 if let Some(n) = &note {
                     tracing::warn!(session_id, agent, note = %n, "outward park proceeding with review precondition skipped");
+                    // #127: the card discloses a skipped read, not only the
+                    // agent's reply.
+                    if explicit {
+                        card_extra.push_str(&format!("\n\n⚠ Review SKIPPED — {n}."));
+                    }
                 }
                 (note, None)
             }
@@ -1319,11 +1502,17 @@ impl SignalingBridge {
                  A blocking finding withdraws it and a revision request holds it. Do not re-issue it.",
                 if row.reviewed_at.is_some() { "reviewed; automatic run queued" } else { "queued for the reviewer's read" }
             ),
-            ("queued", None) => format!(
+            ("queued", None) if outward_command(full_command) => format!(
                 "queued — `{command}` is an outward publish waiting for the reviewer to read \
                  its body (posted to the channel; the reviewer is summoned). It parks for the \
                  user on its own after their turn, or is withdrawn if they file a blocking \
                  finding. Do not re-issue it."
+            ),
+            ("queued", None) => format!(
+                "queued — `{command}` is a reviewed request (a listed data read, or a forced \
+                 approval, #127) waiting for the reviewer to read it (posted to the channel; the \
+                 reviewer is summoned). It parks for the user on its own after their turn, or is \
+                 withdrawn if they file a blocking finding. Do not re-issue it."
             ),
             ("pending", _) => format!(
                 "pending — `{command}` is still awaiting the user's approval. Do not \
@@ -1723,6 +1912,13 @@ pub(crate) enum OutwardReview {
     Covered { reviewer: String, rows: Vec<i64> },
 }
 
+/// Who takes a fresh read now (`fresh_reader`): see the function.
+enum FreshRead {
+    Reviewer(i64),
+    Skipped(String),
+    Held(String),
+}
+
 /// What [`SignalingBridge::park_gated_command`] did with a command. `Parked` is
 /// the user's card (fresh, or a dedupe hit on an identical pending one);
 /// `Queued` is a row the reviewer must read first (0080) — fresh, or a dedupe
@@ -1774,18 +1970,31 @@ impl ParkOutcome {
 /// told it to end its turn bare so the ring would deal the reviewer, which
 /// collided with "every stop declares itself" and produced the #32 deadlock.
 pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> String {
-    let lead = if existing {
-        "action_gate: an identical outward command is ALREADY queued for review — if its body \
-         files changed since, the new body was just re-posted for the reviewer and the advisory \
-         that asked for the revision is settled; if not, nothing was re-posted"
+    let outward = outward_command(command);
+    let lead = match (existing, outward) {
+        (true, true) => {
+            "action_gate: an identical outward command is ALREADY queued for review — if its body \
+             files changed since, the new body was just re-posted for the reviewer and the advisory \
+             that asked for the revision is settled; if not, nothing was re-posted"
+        }
+        (true, false) => "action_gate: an identical command is ALREADY queued for review — nothing was re-posted",
+        (false, _) => "action_gate: QUEUED for the reviewer",
+    };
+    // A listed data read and a forced approval (#127) are reviewed before
+    // they reach the user the same way a publish is; what the reviewer gets
+    // is the command itself, not a body.
+    let what = if outward {
+        "This is an OUTWARD publish and the reviewer has not read its content yet. \
+         bot-hq has posted the body to the channel for them"
     } else {
-        "action_gate: QUEUED for the reviewer"
+        "This request is read by the reviewer before it reaches the user (a listed data read, \
+         or your require_approval — the user's standing rule). bot-hq has posted the command to \
+         the channel for them"
     };
     let command = super::util::command_excerpt(command);
     format!(
         "{lead} (gate_id: {gate_id}): `{command}`.\n\
-         This is an OUTWARD publish and the reviewer has not read its content yet. \
-         bot-hq has posted the body to the channel for them and summoned them for the \
+         {what} and summoned them for the \
          next turn; after that turn the gate parks for the user's approval on its own \
          (same gate id) — unless they file a blocking finding, in which case it is \
          withdrawn and a system row says so. Nothing for you to do: do NOT re-issue, do \
@@ -1793,6 +2002,17 @@ pub(crate) fn queued_gate_text(gate_id: &str, command: &str, existing: bool) -> 
          session from reading as idle. `gate_status(\"{gate_id}\")` reports queued / \
          pending / answered / withdrawn."
     )
+}
+
+/// How a queued row is named in notices: a publish when the command is
+/// outward, otherwise a reviewed request — a listed data read or a forced
+/// approval (#127).
+fn queued_subject_label(command: &str) -> &'static str {
+    if outward_command(command) {
+        "outward publish"
+    } else {
+        "reviewed request"
+    }
 }
 
 /// The lines a gate's card gains (group K): which list entry a listed data
@@ -2165,13 +2385,14 @@ impl SignalingBridge {
     /// as a system row the reviewer's backlog will carry, (3) the row pointed
     /// at that body, (4) the reviewer summoned. No `GateOpened`: D35's latch
     /// closes only when settlement promotes the row.
+    #[allow(clippy::too_many_arguments)]
     async fn queue_outward_park(
         &self,
         session_id: &str,
         agent: &str,
         command: &str,
         reviewer_id: i64,
-        listed: Option<&crate::policy::data_reads::DataRead>,
+        subject: QueueSubject<'_>,
         card_extra: &str,
         approval_required: bool,
         run_timeout_secs: Option<u64>,
@@ -2195,30 +2416,22 @@ impl SignalingBridge {
         // The same card text a direct park builds — so a promoted queued card
         // also says why it was gated and whether it was rejected before.
         let prompt = self.gate_card_prompt(session_id, command, card_extra).await;
-        storage
-            .insert_queued_gate_with_approval(session_id, &gate_id, agent, &prompt, command, approval_required)
-            .await?;
-        if let Some(secs) = run_timeout_secs { storage.set_tray_run_timeout_secs(&gate_id, secs).await?; }
-        self.record_body_digest(session_id, &gate_id, command).await;
         let mut body = self.queued_body_text(session_id, command).await;
         // Feedback #60: an EDIT shows the reviewer what it changes — the diff
         // against the live body, not only the full new text (that diff is what
         // caught an undisclosed change, finding 79aa827f) — and the live body's
         // hash is re-checked before the approved edit runs (EYES, s-3158eb35).
-        if let Some((section, live_sha)) = self.live_edit_section(session_id, command).await {
+        let mut live_sha = None;
+        if let Some((section, sha)) = self.live_edit_section(session_id, command).await {
             body.push_str("\n\n");
             body.push_str(&section);
-            if let Some(sha) = live_sha {
-                if let Err(e) = storage.set_tray_live_body_sha(&gate_id, &sha).await {
-                    tracing::warn!(%gate_id, error = %e, "could not record the live body's hash");
-                }
-            }
+            live_sha = sha;
         }
         let after_review = if approval_required { "park for the user" } else { "run automatically under auto_allow, with no user approval card" };
-        let notice = match listed {
+        let notice = match subject {
             // Group K (EYES: the list both gates and limits, so the card says
             // what matched, not "a read").
-            Some(read) => format!(
+            QueueSubject::Listed(read) => format!(
                 "📊 Listed command queued for review (gate {gate_id}) — {agent} wants to run a \
                  command matching the project's {} list entry `{}`:\n`{command}`{card_extra}\n\n\
                  [Reviewer: this runs against {} data under the user's credentials. Read what \
@@ -2230,7 +2443,22 @@ impl SignalingBridge {
                 read.entry,
                 read.kind.label(),
             ),
-            None => format!(
+            // Feedback #127: a forced approval matched no list entry and is not
+            // an outward publish, so the reviewer's read is the only one it
+            // gets — and the command text (a script, often) is the whole
+            // content, which bot-hq does not parse.
+            QueueSubject::Explicit => format!(
+                "🔐 Approval request queued for review (gate {gate_id}) — {agent} asked for the \
+                 user's approval (require_approval) before running:\n`{command}`{card_extra}\n\n\
+                 [Reviewer: the user's rule is that a forced approval is read by you before it \
+                 reaches their tray. This one matched no listed data read and is not an outward \
+                 publish, so your read is the only one it gets. Read what the command does — \
+                 including any script text, which bot-hq cannot parse — what it reads or changes, \
+                 under whose credentials, and whether its prerequisites have happened. To stop it, \
+                 file a `blocking` finding with gate_id \"{gate_id}\" (say why). Anything else lets \
+                 it park for the user after your turn.]"
+            ),
+            QueueSubject::Publish => format!(
             "📨 Outward publish queued for review (gate {gate_id}) — {agent} wants to run:\n\
              `{command}`\n\n{body}\n\n\
              [Reviewer: this content publishes under the user's identity. Read it on this \
@@ -2240,6 +2468,38 @@ impl SignalingBridge {
              gate_id \"none\". Anything else lets it {after_review} after your turn.]"
         ),
         };
+        // The notice is rendered BEFORE the row exists and refused when it
+        // would not reach the reviewer whole (test `0929fd7e`, EYES): delivery
+        // clamps a row at `WIRE_BODY_CLAMP_BYTES` and settlement only knows
+        // that the cursor passed the row, so a cut notice — the end of a 256 KB
+        // script, or of a body, and the reviewer's instructions after it —
+        // would promote as "reviewed" though nobody read it. Checked on the
+        // text as stored (redacted) and quoted as delivered.
+        let stored = crate::policy::secret_scan::redact_string(notice.clone());
+        if !crate::storage::body_delivered_whole(&stored) {
+            anyhow::bail!(
+                "{} held: its review notice is {} bytes and a delivered row is cut at {} bytes, so the \
+                 reviewer could not read all of it before it parks. Nothing was queued. Shorten the \
+                 command or its body, or split it, and re-issue.",
+                match subject {
+                    QueueSubject::Publish => "outward publish",
+                    QueueSubject::Listed(_) => "listed data read",
+                    QueueSubject::Explicit => "forced approval request",
+                },
+                stored.len(),
+                crate::storage::WIRE_BODY_CLAMP_BYTES
+            );
+        }
+        storage
+            .insert_queued_gate_with_approval(session_id, &gate_id, agent, &prompt, command, approval_required)
+            .await?;
+        if let Some(secs) = run_timeout_secs { storage.set_tray_run_timeout_secs(&gate_id, secs).await?; }
+        self.record_body_digest(session_id, &gate_id, command).await;
+        if let Some(sha) = live_sha {
+            if let Err(e) = storage.set_tray_live_body_sha(&gate_id, &sha).await {
+                tracing::warn!(%gate_id, error = %e, "could not record the live body's hash");
+            }
+        }
         let Some(row) = crate::core::post_system_notice(
             &storage,
             Some(self),
@@ -2283,13 +2543,6 @@ impl SignalingBridge {
         if row.body_sha256.as_deref() == Some(now_sha.as_str()) && row.body_row_id.is_some() {
             return;
         }
-        if let Some(old_body) = row.body_row_id {
-            if !storage.begin_queued_gate_revision(gate_id, old_body).await.unwrap_or(false) { return; }
-        }
-        if let Err(e) = storage.set_tray_body_sha(gate_id, &now_sha).await {
-            tracing::warn!(%gate_id, error = %e, "could not record the revised body's hash");
-            return;
-        }
         let body = self.queued_body_text(session_id, command).await;
         let after_review = if row.approval_required { "park for the user" } else { "run automatically under auto_allow" };
         let notice = format!(
@@ -2299,6 +2552,34 @@ impl SignalingBridge {
              finding with gate_id \"{gate_id}\"; to ask for another revision, an `advisory` one with \
              that gate_id. Anything else lets it {after_review} after your turn.]"
         );
+        // A revision the wire would cut is not re-posted (test `0929fd7e`): the
+        // queued row keeps its reviewed body and hash, so the changed files are
+        // refused at run time as before, and the channel says what to do.
+        if !crate::storage::body_delivered_whole(&crate::policy::secret_scan::redact_string(notice.clone())) {
+            let _ = crate::core::post_system_notice(
+                storage,
+                Some(self),
+                session_id,
+                crate::storage::MessageKind::SystemNotice,
+                format!(
+                    "⚠ Revised body of gate {gate_id} NOT re-posted for review: the notice would be \
+                     cut at {} bytes on delivery, so the reviewer could not read all of it. The gate \
+                     keeps its earlier reviewed body (a changed file is refused at run time). Withdraw \
+                     it and re-issue a shorter body, or split it.",
+                    crate::storage::WIRE_BODY_CLAMP_BYTES
+                ),
+                None,
+            )
+            .await;
+            return;
+        }
+        if let Some(old_body) = row.body_row_id {
+            if !storage.begin_queued_gate_revision(gate_id, old_body).await.unwrap_or(false) { return; }
+        }
+        if let Err(e) = storage.set_tray_body_sha(gate_id, &now_sha).await {
+            tracing::warn!(%gate_id, error = %e, "could not record the revised body's hash");
+            return;
+        }
         let Some(posted) = crate::core::post_system_notice(
             storage,
             Some(self),
@@ -2436,7 +2717,8 @@ impl SignalingBridge {
                         // This completed review still covers the same body.
                         if current.approval_required && current.body_row_id == Some(body_row) {
                             self.promote_queued_row(&storage, session_id, &current,
-                                format!("Reviewed publication {} now requires the user's approval.", row.choice_id)).await;
+                                format!("Reviewed publication {} now requires the user's approval.", row.choice_id),
+                                review_completed_note(Some(&reviewer.slug))).await;
                         }
                     }
                 }
@@ -2450,12 +2732,13 @@ impl SignalingBridge {
                 )
             } else {
                 format!(
-                    "✅ Queued outward publish {} is now PARKED for the user's approval (the \
+                    "✅ Queued {} {} is now PARKED for the user's approval (the \
                      reviewer read it and filed nothing blocking): `{command}`",
+                    queued_subject_label(&command),
                     row.choice_id
                 )
             };
-            self.promote_queued_row(&storage, session_id, &row, notice).await;
+            self.promote_queued_row(&storage, session_id, &row, notice, review_completed_note(Some(&reviewer.slug))).await;
         }
     }
 
@@ -2500,16 +2783,20 @@ impl SignalingBridge {
                 _ => None,
             };
             if let Some(reason) = reason {
+                let reviewer = self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug);
                 self.promote_queued_row(&storage, &row.session_id, &row,
-                    format!("Automatic publication {} now needs user approval: {reason}. Nothing ran.", row.choice_id)).await;
+                    format!("Automatic publication {} now needs user approval: {reason}. Nothing ran.", row.choice_id),
+                    review_completed_note(reviewer.as_deref())).await;
                 continue;
             }
             if self.execute_reviewed_auto_gate(&row).await {
                 ran += 1;
             } else if let Ok(Some(current)) = storage.get_tray_entry(&row.choice_id).await {
                 if current.approval_required && current.body_row_id == Some(body_row) {
+                    let reviewer = self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug);
                     self.promote_queued_row(&storage, &row.session_id, &current,
-                        format!("Reviewed publication {} now requires the user's approval.", row.choice_id)).await;
+                        format!("Reviewed publication {} now requires the user's approval.", row.choice_id),
+                        review_completed_note(reviewer.as_deref())).await;
                 }
             }
         }
@@ -2543,7 +2830,8 @@ impl SignalingBridge {
                 self.summon_participant(session, reviewer.id).await;
             } else {
                 self.promote_queued_row(&storage, session, &row,
-                    format!("Session agents changed; queued decision {} now needs your approval because its reviewer is no longer available. Nothing ran.", row.choice_id)).await;
+                    format!("Session agents changed; queued decision {} now needs your approval because its reviewer is no longer available. Nothing ran.", row.choice_id),
+                    review_skipped_note("the session's agents changed and no reviewer remains to read it")).await;
             }
         }
         Ok(())
@@ -2591,10 +2879,17 @@ impl SignalingBridge {
             Some(self),
             session_id,
             crate::storage::MessageKind::SystemNotice,
-            format!("⛔ Queued outward publish {} withdrawn — {why}: `{command}`", row.choice_id),
+            format!("⛔ Queued {} {} withdrawn — {why}: `{command}`", queued_subject_label(&command), row.choice_id),
             None,
         )
         .await;
+        // The row is settled for the UI too (#127): a forced approval marked
+        // urgent was notifying the user while it was queued, and the
+        // notification loop stops on this event.
+        let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
+            choice_id: row.choice_id.clone(),
+            picked: "(withdrawn)".to_string(),
+        });
     }
 
     /// Flip one queued row to a PENDING user card with the side effects a
@@ -2608,8 +2903,9 @@ impl SignalingBridge {
         session_id: &str,
         row: &crate::storage::SessionTrayEntry,
         notice: String,
+        review_note: String,
     ) -> bool {
-        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id).await.unwrap_or(0) != 1 {
+        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id, Some(&review_note)).await.unwrap_or(0) != 1 {
             return false;
         }
         let command = row.command_text.clone().unwrap_or_default();
@@ -2633,11 +2929,13 @@ impl SignalingBridge {
                 command: None,
             }
         };
+        // The card the UI renders is the stored prompt plus the review line
+        // the promotion just appended (#127).
         let _ = self.event_tx.send(SignalingEvent::PendingChoice(PendingChoice {
             choice_id: row.choice_id.clone(),
             session_id: session_id.to_string(),
             agent: row.agent.clone(),
-            question: row.prompt.clone(),
+            question: format!("{}{}", row.prompt, crate::policy::secret_scan::redact(&review_note)),
             options: vec!["Approve".to_string(), "Reject".to_string()],
             approval: Some(approval),
         }));
@@ -2651,9 +2949,10 @@ impl SignalingBridge {
         )
         .await;
         // An urgent publish (feedback #52) was marked while queued; the user's
-        // notification starts now that it is theirs to answer.
+        // notification starts now that it is theirs to answer (a forced
+        // approval, #127, was already notified at the queue and is again now).
         if let Some(reason) = row.urgent_reason.as_deref() {
-            self.fire_gate_urgent(storage, session_id, &row.agent, &row.choice_id, reason, &command).await;
+            self.fire_gate_urgent(storage, session_id, &row.agent, &row.choice_id, reason, &command, false).await;
         }
         true
     }
@@ -2691,7 +2990,8 @@ impl SignalingBridge {
                  Approve card: `{command}`",
                 row.choice_id
             );
-            if self.promote_queued_row(&storage, session_id, &row, notice).await {
+            if self.promote_queued_row(&storage, session_id, &row, notice,
+                review_skipped_note("released UNREVIEWED by the user-approved reviewer-down override")).await {
                 released += 1;
             }
         }
@@ -2740,6 +3040,27 @@ impl SignalingBridge {
             .await;
         }
     }
+}
+
+/// The line a promoted card gains (feedback #127): the reviewer's read
+/// happened, by whom and when — so the user can tell a reviewed request from
+/// one that reached them on a skip.
+fn review_completed_note(reviewer: Option<&str>) -> String {
+    let when = window_time(&crate::storage::now_utc());
+    match reviewer {
+        Some(slug) => format!(
+            "\n\n✅ Review completed by {slug} at {when} — they read the queued row and filed nothing blocking."
+        ),
+        None => format!(
+            "\n\n✅ Review completed at {when} — the reviewer read the queued row and filed nothing blocking."
+        ),
+    }
+}
+
+/// The line a card gains when it reaches the user WITHOUT the reviewer's read
+/// (#127): the reason, never silence.
+fn review_skipped_note(why: &str) -> String {
+    format!("\n\n⚠ Review SKIPPED — {why}.")
 }
 
 fn parked_gate_text(
@@ -5263,7 +5584,8 @@ mod tests {
         // The event the notification rides, with the reason and the command.
         let mut fired = None;
         while let Ok(ev) = events.try_recv() {
-            if let SignalingEvent::GateUrgent { choice_id, reason, command, agent, session_id } = ev {
+            if let SignalingEvent::GateUrgent { choice_id, reason, command, agent, session_id, under_review } = ev {
+                assert!(!under_review, "a pending gate is the user's to answer now");
                 fired = Some((choice_id, reason, command, agent, session_id));
             }
         }
@@ -6819,6 +7141,256 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
     }
 
     // --- group K: a listed data read ------------------------------------------
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forced_approval_command_path_is_reviewed_before_approval_and_runs_once() {
+        use crate::signaling::{jsonrpc::{dispatch, CallerIdentity}, protocol::JsonRpcRequest};
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, _, _) = outward_fixture(&data, &repo).await;
+        let mut ring = ring_for(&bridge).await;
+        let fake_secret = format!("ghp_{}", "a".repeat(36));
+        let command = format!("# {fake_secret}\npython3 - <<'PY'\nfrom pathlib import Path\nwith Path('ran.txt').open('a') as f: f.write('once\\n')\nPY\n");
+        assert!(!outward_command(&command));
+        assert!(bridge.data_read_in("s1", &command).await.is_none());
+        let file = repo.path().join("read.sh");
+        std::fs::write(&file, &command).unwrap();
+        let caller = CallerIdentity { session_id: "s1".into(), agent: "hands".into(), token_proof: None,
+            capabilities: crate::agents::ResolvedCapabilities::Known(crate::agents::CapabilitySet::preset_hands()) };
+        let response = dispatch(JsonRpcRequest { jsonrpc: "2.0".into(), id: Some(serde_json::json!(1)),
+            method: "tools/call".into(), params: Some(serde_json::json!({"name":"action_gate",
+                "arguments":{"command_path":file,"require_approval":true}})) }, &caller, &bridge).await.unwrap().unwrap();
+        let value = serde_json::to_value(response).unwrap();
+        let out = value["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(out.contains("QUEUED"), "forced approval must await review: {out}");
+        let id = gate_id_in(out);
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(row.command_text.as_deref(), Some(command.as_str()));
+        let body_id = row.body_row_id.unwrap();
+        let body = message_by_id(&storage, body_id).await.content;
+        assert!(body.contains("Approval request queued for review"), "{body}");
+        assert!(!body.contains(&fake_secret), "review notice must redact credentials");
+        assert_eq!(summons_in(&drain(&mut ring)), vec![eyes]);
+        assert!(storage.pending_gate_ids("s1").await.unwrap().is_empty());
+        assert!(!repo.path().join("ran.txt").exists());
+        let again = bridge.action_gate("s1".into(), "hands".into(), command.clone(), true).await.unwrap();
+        assert_eq!(gate_id_in(&again), id);
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&id).await.unwrap().unwrap().status, "queued");
+        storage.commit_delivery(eyes, &[(body_id, None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        let ready = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(ready.status, "pending");
+        assert!(ready.prompt.contains("Review completed by eyes"), "{}", ready.prompt);
+        assert_eq!(gate_opened_in(&drain(&mut ring)), vec![id.clone()]);
+        let again = bridge.action_gate("s1".into(), "hands".into(), command, true).await.unwrap();
+        assert_eq!(gate_id_in(&again), id);
+        bridge.resolve_choice(&id, "Approve".into()).await.unwrap();
+        let _ = bridge.resolve_choice(&id, "Approve".into()).await;
+        assert_eq!(std::fs::read_to_string(repo.path().join("ran.txt")).unwrap(), "once\n");
+    }
+
+    #[tokio::test]
+    async fn forced_approval_alerts_urgent_review_without_opening_a_gate_or_extending_the_window() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, _, _) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let mut events = bridge.subscribe();
+        let now = chrono::Utc::now();
+        let window = validate_run_window(now, None, &(now + chrono::Duration::minutes(2)).to_rfc3339()).unwrap();
+        let out = bridge.action_gate_request("s1".into(), "hands".into(), GateRequest {
+            command: "echo inspect incident".into(), require_approval: true,
+            urgent_reason: Some("incident read needs attention".into()), run_window: Some(window.clone()), ..GateRequest::default()
+        }).await.unwrap();
+        assert!(out.contains("QUEUED"), "{out}");
+        let id = gate_id_in(&out);
+        let mut urgent = 0;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                SignalingEvent::GateUrgent { choice_id, .. } if choice_id == id => urgent += 1,
+                SignalingEvent::PendingChoice(_) => panic!("review must precede the user card"),
+                _ => {}
+            }
+        }
+        assert_eq!(urgent, 1, "notify immediately while still queued for review");
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        storage.commit_delivery(eyes, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        bridge.settle_queued_outward("s1", eyes).await;
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(row.run_not_after.as_deref(), Some(window.not_after.as_str()));
+        assert!(row.prompt.contains("Review time does not extend"), "{}", row.prompt);
+    }
+
+    /// A forced approval marked urgent notifies the user while it is still
+    /// queued (`under_review`); a veto withdraws it and settles it for the UI
+    /// (`ChoiceResolved`), so the notification loop stops; its gate_status and
+    /// the channel say why, and nothing parks or runs.
+    #[tokio::test]
+    async fn a_vetoed_forced_approval_is_withdrawn_and_its_urgent_alerts_are_settled() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, eyes, _, _) = outward_fixture(&data, &repo).await;
+        let mut ring = ring_for(&bridge).await;
+        let mut events = bridge.subscribe();
+        let out = bridge.action_gate_request("s1".into(), "hands".into(), GateRequest {
+            command: "python3 read_incident.py".into(), require_approval: true,
+            urgent_reason: Some("incident read".into()), ..GateRequest::default()
+        }).await.unwrap();
+        assert!(out.contains("QUEUED") && out.contains("the user is notified now"), "{out}");
+        let id = gate_id_in(&out);
+        let mut fired = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let SignalingEvent::GateUrgent { choice_id, under_review, .. } = event {
+                if choice_id == id { fired.push(under_review); }
+            }
+        }
+        assert_eq!(fired, vec![true], "notified once, marked as still under review");
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains("while the reviewer reads it")), "the audit row says review is pending");
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        storage.commit_delivery(eyes, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        storage
+            .insert_finding_for_gate("s1", "f-veto-127", "eyes", crate::storage::FindingSeverity::Blocking, "reads more than the incident needs", None, Some(&id))
+            .await
+            .unwrap();
+        drain(&mut ring);
+        bridge.settle_queued_outward("s1", eyes).await;
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(row.status, "withdrawn");
+        let mut resolved = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event {
+                SignalingEvent::ChoiceResolved { choice_id, picked } if choice_id == id => resolved.push(picked),
+                SignalingEvent::PendingChoice(p) if p.choice_id == id => panic!("a vetoed request must not park"),
+                SignalingEvent::GateUrgent { choice_id, .. } if choice_id == id => panic!("a vetoed request must not re-notify"),
+                _ => {}
+            }
+        }
+        assert_eq!(resolved, vec!["(withdrawn)".to_string()], "the UI's notification loop stops on this event");
+        assert!(gate_opened_in(&drain(&mut ring)).is_empty());
+        let status = bridge.gate_status(&id).await.unwrap();
+        assert!(status.starts_with("withdrawn") && status.contains("did not run"), "{status}");
+        let rows = storage.messages_for_session("s1", None).await.unwrap();
+        assert!(rows.iter().any(|m| m.content.contains(&format!("⛔ Queued reviewed request {id} withdrawn"))), "{:?}", rows.last().map(|m| &m.content));
+        // test `44fd3e56`: an UNCHANGED re-issue while the veto is open is
+        // refused — it does not become a new gate the old finding no longer
+        // names, so no later card can say "nothing blocking".
+        let again = bridge.action_gate("s1".into(), "hands".into(), "python3 read_incident.py".into(), true).await.unwrap_err().to_string();
+        assert!(again.contains("forced approval request held: open blocking finding f-veto-1") && again.contains(&id[..8]), "{again}");
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty() && storage.pending_gate_ids("s1").await.unwrap().is_empty());
+        // Rebutted (on the record), the same command queues for a FRESH read.
+        storage.disposition_finding("s1", "f-veto-127", crate::storage::FindingStatus::Rebutted, Some("the read is scoped to the incident"), "hands").await.unwrap();
+        let fresh = bridge.action_gate("s1".into(), "hands".into(), "python3 read_incident.py".into(), true).await.unwrap();
+        assert!(fresh.contains("QUEUED"), "{fresh}");
+        assert_ne!(gate_id_in(&fresh), id);
+        assert_eq!(storage.get_tray_entry(&gate_id_in(&fresh)).await.unwrap().unwrap().status, "queued");
+    }
+
+    /// The same guard for a listed data read (EYES on `44fd3e56`: it shared
+    /// the gap): a vetoed read's unchanged re-issue is refused while the
+    /// finding is open.
+    #[tokio::test]
+    async fn a_vetoed_listed_read_is_refused_until_the_finding_is_answered() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        list_reads(data.path());
+        let (bridge, storage, eyes, _, _) = outward_fixture(&data, &repo).await;
+        let mut ring = ring_for(&bridge).await;
+        let command = "bq query --use_legacy_sql=false 'select count(*) from ds.t'";
+        let out = bridge.action_gate("s1".into(), "hands".into(), command.into(), false).await.unwrap();
+        let id = gate_id_in(&out);
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(row.status, "queued");
+        storage.commit_delivery(eyes, &[(row.body_row_id.unwrap(), None)]).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        storage.insert_finding_for_gate("s1", "f-veto-read", "eyes", crate::storage::FindingSeverity::Blocking, "the export has not run", None, Some(&id)).await.unwrap();
+        drain(&mut ring);
+        bridge.settle_queued_outward("s1", eyes).await;
+        assert_eq!(storage.get_tray_entry(&id).await.unwrap().unwrap().status, "withdrawn");
+        let again = bridge.action_gate("s1".into(), "hands".into(), command.into(), false).await.unwrap_err().to_string();
+        assert!(again.contains("listed data read held: open blocking finding f-veto-r"), "{again}");
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty());
+        storage.disposition_finding("s1", "f-veto-read", crate::storage::FindingStatus::Fixed, Some("the export ran"), "hands").await.unwrap();
+        let fresh = bridge.action_gate("s1".into(), "hands".into(), command.into(), false).await.unwrap();
+        assert!(fresh.contains("QUEUED") && gate_id_in(&fresh) != id, "{fresh}");
+    }
+
+    /// A review notice the wire would cut is refused before anything is
+    /// queued (test `0929fd7e`): a forced 230 KB script, and an outward body
+    /// of the same size; a script that fits is queued and delivered whole.
+    #[tokio::test]
+    async fn a_review_notice_past_the_delivery_clamp_is_refused_before_it_queues() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _eyes, _, _) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let big = format!("python3 - <<'PY'\n# {}\nprint('x')\nPY\n", "a".repeat(230_000));
+        assert!(big.len() <= COMMAND_FILE_MAX_BYTES);
+        let refused = bridge.action_gate("s1".into(), "hands".into(), big.clone(), true).await.unwrap_err().to_string();
+        assert!(refused.contains("forced approval request held: its review notice is") && refused.contains("Nothing was queued"), "{refused}");
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty() && storage.pending_gate_ids("s1").await.unwrap().is_empty());
+        let path = repo.path().join("huge.md");
+        std::fs::write(&path, "b".repeat(230_000)).unwrap();
+        let publish = format!("gh issue comment 5 --body-file {}", posix_path(&path));
+        let refused = bridge.park_gated_command("s1", "hands", &publish).await.unwrap_err().to_string();
+        assert!(refused.contains("outward publish held: its review notice is"), "{refused}");
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty());
+        let fits = format!("python3 - <<'PY'\n# {}\nprint('x')\nPY\n", "c".repeat(150_000));
+        let out = bridge.action_gate("s1".into(), "hands".into(), fits.clone(), true).await.unwrap();
+        assert!(out.contains("QUEUED"), "{out}");
+        let row = storage.get_tray_entry(&gate_id_in(&out)).await.unwrap().unwrap();
+        let notice = message_by_id(&storage, row.body_row_id.unwrap()).await.content;
+        assert!(notice.contains(&fits) && crate::storage::body_delivered_whole(&notice));
+    }
+
+    /// No other reviewer in the roster: a forced approval parks straight for
+    /// the user, and both the reply and the CARD say the read was skipped —
+    /// never a silent skip that reads like a review (#127).
+    #[tokio::test]
+    async fn a_forced_approval_with_no_reviewer_parks_and_the_card_says_the_read_was_skipped() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
+        let storage = bridge.storage.lock().await.clone().unwrap();
+        let out = bridge.action_gate("s1".into(), "hands".into(), "printf 'solo'".into(), true).await.unwrap();
+        assert!(out.starts_with("action_gate: parked for the user's approval"), "{out}");
+        assert!(out.contains("no other reviewer in this roster — the forced approval request parks without a reviewer's read"), "{out}");
+        let id = gate_id_in(&out);
+        let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert!(row.body_row_id.is_none(), "nothing was queued");
+        assert!(row.prompt.contains("⚠ Review SKIPPED — note: no other reviewer in this roster"), "{}", row.prompt);
+        assert!(row.prompt.contains("The executor asked for your approval (require_approval)"), "{}", row.prompt);
+        // EYES `479680fc`: an identical re-issue returns THIS gate — nobody could
+        // read it, so "withdraw and re-issue" would only park it unread again.
+        let again = bridge.action_gate("s1".into(), "hands".into(), "printf 'solo'".into(), true).await.unwrap();
+        assert!(again.starts_with("action_gate: an identical command is ALREADY parked for approval"), "{again}");
+        assert!(again.contains("note: no other reviewer in this roster"), "{again}");
+        assert_eq!(gate_id_in(&again), id);
+        assert_eq!(storage.pending_gate_ids("s1").await.unwrap(), vec![id.clone()]);
+        // Without the flag the same command simply runs (no keyword gates it).
+        bridge.resolve_choice(&id, "Reject".into()).await.unwrap();
+        let ran = bridge.action_gate("s1".into(), "hands".into(), "printf 'solo'".into(), false).await.unwrap();
+        assert!(ran.contains("solo") && ran.contains("[action_gate → exit 0"), "{ran}");
+    }
+
+    #[tokio::test]
+    async fn forced_approval_cannot_silently_strengthen_an_unreviewed_pending_gate() {
+        let data = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        let (bridge, storage, _, _, _) = outward_fixture(&data, &repo).await;
+        let _ring = ring_for(&bridge).await;
+        let command = "echo pending without review";
+        let prior = bridge.park_gated_command("s1", "hands", command).await.unwrap();
+        let ParkOutcome::Parked { gate_id, .. } = prior else { panic!("ordinary gate") };
+        let error = bridge.action_gate("s1".into(), "hands".into(), command.into(), true).await.unwrap_err().to_string();
+        assert!(error.contains(&gate_id) && error.contains("withdraw"), "{error}");
+        assert_eq!(storage.pending_gate_ids("s1").await.unwrap(), vec![gate_id]);
+        assert!(storage.queued_gates_for_session("s1").await.unwrap().is_empty());
+    }
 
     /// A general policy listing one production and one staging read.
     fn list_reads(data: &std::path::Path) {

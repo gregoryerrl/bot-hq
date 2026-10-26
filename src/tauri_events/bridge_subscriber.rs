@@ -227,8 +227,8 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }
-        SignalingEvent::GateUrgent { session_id, choice_id, agent, reason, command } => {
-            let payload = GateUrgentEvent { session_id, choice_id, agent, reason, command };
+        SignalingEvent::GateUrgent { session_id, choice_id, agent, reason, command, under_review } => {
+            let payload = GateUrgentEvent { session_id, choice_id, agent, reason, command, under_review };
             emit_event(
                 GateUrgentEvent::EVENT_NAME,
                 serde_json::to_value(&payload).unwrap_or(Value::Null),

@@ -433,7 +433,16 @@ impl SignalingBridge {
         );
         let reviewer = self.session_reviewers(&session_id).iter().any(|slug| slug == &agent);
         let outcome = self
-            .park_gated_command_as(&session_id, &agent, &command, approve_after.as_deref(), reviewer, Some(&card), None)
+            .park_gated_command_as(
+                &session_id,
+                &agent,
+                &command,
+                approve_after.as_deref(),
+                reviewer,
+                Some(&card),
+                None,
+                super::action_gate::ReviewIntent::Routine,
+            )
             .await?;
         // The mark that lets approval pass the password — written by this
         // handler alone (0089).

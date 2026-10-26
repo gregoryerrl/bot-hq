@@ -27,6 +27,19 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- A forced approval (`action_gate` with `require_approval: true`) is read by
+  the reviewer before it reaches your tray, whatever the command's shape —
+  scripts included, which bot-hq does not parse. Three production reads
+  wrapped in Python scripts had reached the tray with no review turn (#127).
+  The card now says whether the review happened and by whom, or why it was
+  skipped (no other reviewer, a reviewer-down override, a roster change). An
+  urgent forced approval notifies you at once and again when it parks; review
+  never extends a run window. An explicit local approval now waits one review
+  turn too. An identical re-issue returns the same gate; one already parked
+  without a read is named in the reply instead of queued twice. A command a
+  reviewer vetoed is refused unchanged until the finding is answered (listed
+  reads too), and a review notice too large to reach the reviewer whole is
+  refused before anything queues.
 - Close-out turns no longer inherit the preceding turn's displayed age or
   unanswered tool indicator. Restarting host prompts remain system-attributed
   in chat; passive notices do not reset the display. Before new agent output,
