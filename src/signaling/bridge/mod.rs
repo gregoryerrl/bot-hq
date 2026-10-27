@@ -41,6 +41,7 @@ pub(crate) mod control_claim;
 pub(crate) mod control_events;
 pub(crate) mod control_watches;
 pub(crate) mod peer_relay;
+pub(crate) mod webview_lease;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
     GATE_HISTORY_DEFAULT,
@@ -552,6 +553,11 @@ pub struct SignalingBridge {
     app_state: std::sync::OnceLock<Weak<crate::core::AppState>>,
     #[cfg(test)]
     control_ticket_observer: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// Plan Batch 6 B: the webview lease — who may mutate the bot-hq window
+    /// right now, and the generation the window mirrors (`webview_js`).
+    pub(crate) webview_lease: std::sync::Mutex<crate::signaling::webview_js::LeaseState>,
+    #[cfg(test)]
+    webview_eval_override: std::sync::Mutex<Option<crate::signaling::webview_js::EvalOverride>>,
     #[cfg(test)]
     direct_spawn_barrier: std::sync::Mutex<Option<Arc<direct_commands::SpawnBarrier>>>,
     /// The `gh` an approved publish is read back with (`readback`, feedback
@@ -782,6 +788,9 @@ impl SignalingBridge {
             app_state: std::sync::OnceLock::new(),
             #[cfg(test)]
             control_ticket_observer: std::sync::Mutex::new(None),
+            webview_lease: std::sync::Mutex::new(Default::default()),
+            #[cfg(test)]
+            webview_eval_override: std::sync::Mutex::new(None),
             #[cfg(test)]
             direct_spawn_barrier: std::sync::Mutex::new(None),
             gh_program: std::sync::OnceLock::new(),
@@ -1100,21 +1109,42 @@ impl SignalingBridge {
     /// Called at spawn, once per agent, with the value written into that
     /// agent's own config file and nowhere else.
     pub fn register_mcp_token(&self, session_id: &str, agent: &str, token: &str) {
-        self.mcp_tokens
+        // The token and the webview lease change as ONE transition under the
+        // lease lock (order: lease, then tokens — the order every proof check
+        // under the lease lock uses), so a lease acquire can only see the
+        // registry before or after a replacement, never between its halves
+        // (eyes-2, c42ac1e9).
+        let mut lease = self.webview_lease.lock().unwrap_or_else(|p| p.into_inner());
+        let replaced = self
+            .mcp_tokens
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(format!("{session_id}:{agent}"), token.to_string());
+            .insert(format!("{session_id}:{agent}"), token.to_string())
+            .is_some_and(|previous| previous != token);
+        // A replaced runtime's admitted-but-unexecuted webview actions are
+        // retired work: move the generation they were stamped with.
+        if replaced {
+            self.credential_changed_locked(&mut lease, session_id, agent);
+        }
     }
 
     /// Revoke only the retiring runtime's registration. A delayed cleanup
     /// carrying its old token must never revoke a replacement's new token.
     pub fn revoke_mcp_token(&self, session_id: &str, agent: &str, retiring_token: &str) -> bool {
         use subtle::ConstantTimeEq;
-        let mut tokens = self.mcp_tokens.lock().unwrap_or_else(|p| p.into_inner());
-        let key = format!("{session_id}:{agent}");
-        let matches = tokens.get(&key).is_some_and(|current|
-            bool::from(current.as_bytes().ct_eq(retiring_token.as_bytes())));
-        if matches { tokens.remove(&key); }
+        // Same one-transition rule as `register_mcp_token`: lease lock first.
+        let mut lease = self.webview_lease.lock().unwrap_or_else(|p| p.into_inner());
+        let matches = {
+            let mut tokens = self.mcp_tokens.lock().unwrap_or_else(|p| p.into_inner());
+            let key = format!("{session_id}:{agent}");
+            let matches = tokens.get(&key).is_some_and(|current|
+                bool::from(current.as_bytes().ct_eq(retiring_token.as_bytes())));
+            if matches { tokens.remove(&key); }
+            matches
+        };
+        if matches {
+            self.credential_changed_locked(&mut lease, session_id, agent);
+        }
         matches
     }
 

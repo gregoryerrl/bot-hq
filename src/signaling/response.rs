@@ -21,12 +21,6 @@ pub(super) fn result_json<T: serde::Serialize>(value: &T, fallback: &str) -> Too
     ToolCallResult::text(serde_json::to_string(value).unwrap_or_else(|_| fallback.into()))
 }
 
-/// Stub `{"ok": true}` response shape — the standard "operation succeeded,
-/// nothing to return" payload used across the external MCP tool dispatch.
-pub(super) fn ok_response() -> ToolCallResult {
-    result_json(&serde_json::json!({ "ok": true }), "{}")
-}
-
 /// Build a JSON-RPC INTERNAL_ERROR with no op prefix — just the error's
 /// `Display` text. Used by internal jsonrpc.rs's dispatch, where the
 /// surrounding match arm already names which bridge method ran.

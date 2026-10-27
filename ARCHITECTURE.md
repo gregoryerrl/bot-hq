@@ -928,7 +928,7 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (53)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (55)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
@@ -941,7 +941,7 @@ since D37 — see "The phase-advance vote"),
 `cl_write_file`, `cl_edit_file`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`,
 `terminal_exec`, `terminal_read`,
-`webview_screenshot`, `webview_click`, `webview_type`, `webview_scroll`,
+`webview_screenshot`, `webview_lease`, `webview_release`, `webview_click`, `webview_type`, `webview_scroll`,
 `webview_press_key`.
 
 `app_control` requires the explicit `control_bot_hq` grant in BOTH the participant's
@@ -1138,6 +1138,77 @@ six rows on their own, a chain of genuine replies included — the earlier
 "unanswered" count, which any participant row in the target reset, did not end
 such a chain (eyes-2, 02:53Z). Receipts are the sender's own rows only; it
 cannot read the target's chat, and a reply reaches it only as a relay back.
+
+The `webview_*` tools (feedback #109; `signaling::webview_js`,
+`signaling::bridge::webview_lease`, the snippet files `src/signaling/webview/*.js`)
+treat the bot-hq window as what it is — one surface shared by the user and
+every agent of every session. The snippets are files included byte for byte
+and executed byte-identical by the frontend's jsdom fixture
+(`frontend/src/lib/webviewSnippets.test.ts`) through the one-line composition
+`(() => { const GUARD = <guard.js>; return (<action.js>)(<args>); })()`; each
+action is an arrow function that validates EVERYTHING before any effect — the
+lease generation and deadline it was admitted under, `expected_route` (a
+path-segment prefix of `location.pathname`: `/sessions/s1` never matches
+`/sessions/s10`), `expected_session_id` (the exact `/sessions/<id>` segment),
+then the selector (`invalid_selector`, `no_match`; `webview_press_key` with a
+selector that misses no longer falls back to the focused element), and the
+element's state before touching it (`disabled`, `readonly`, `not_clickable`,
+a file input) — and returns `{outcome: done|refused|unknown, ok, matched,
+route, session_id, reason?, detail?}`, where `done` reports the OBSERVED state
+after the dispatch (`applied`, `checked`, `selected`), not the request. The
+composition wraps the whole evaluation in `try/catch`: an exception is
+`outcome: unknown` / `reason: exception` (the action may have acted before it
+threw — on WebView2 an uncaught exception would come back as a bare JSON
+`null`, ExecuteScript's contract), and the host normalizes any callback
+without an `outcome` (`null`, a bare value, a foreign object) to `unknown` /
+`malformed_result` (`webview_js::normalize_result`). The result comes back
+through `eval_with_callback` on the main window (`run_on_main_thread`, 3 s): a
+callback that does not arrive is `outcome: unknown` / `reason: timeout` — the
+script was queued and may still run, never "did not happen"; a missing window
+is `no_webview`. The lease
+(`webview_lease {ttl_secs ≤ 60}` / `webview_release`; `SignalingBridge::
+webview_lease`) is advisory for readers (`webview_screenshot` is never blocked;
+its `context {route, session_id, lease_gen, sampled: "before capture"}` is a
+separate evaluation, labelled sampled, not the frame's atomic context) and
+exclusive for mutators: while a live holder exists every other caller's
+mutating tool is refused `leased` before anything is queued. Every mutating
+call, acquire and release needs the authenticated HTTP caller whose credential
+is CURRENT at admission (`stale_credential` otherwise — a request
+authenticated before its runtime was replaced is retired work, whatever the
+lease says; eyes-2, b7982bbd), and a holder is that incarnation — (session,
+agent) plus the token proof `token_proof_is_current` accepts — so a replaced
+runtime cannot act on its predecessor's lease and a lease whose holder was
+replaced is dead. Every acquire, renew, release or takeover bumps a generation
+under the lease lock and, under the same lock, queues `mirror.js` (monotonic:
+a late lower update never rolls the window back); so does every credential
+change — `register_mcp_token` replacing a token and `revoke_mcp_token`
+(`webview_credential_changed`, which also drops that participant's lease) —
+so an action the old runtime had admitted but not yet executed refuses at
+actuation even though nobody acquired anything; every admitted mutator carries
+the generation it was admitted under plus, for a holder, its deadline as Unix
+epoch milliseconds, and the snippet refuses `lease_lost` / `lease_expired` at
+actuation — so an action that sat in the main-thread queue past a takeover,
+past a release, past a replacement or past its own deadline never lands,
+whether or not anyone else moved the generation (eyes-2, 2026-10-27T03:40Z).
+A reloaded document forgets the mirror (reads 0): a `lease_lost` against
+`current_gen: 0` while the host's generation stands makes the dispatcher
+republish the generation (`webview_republish_generation`) and say so in
+`detail.recovery`, so the retry is admitted and the lease never looks
+permanently held. `webview_lease` returns after the
+window acknowledged the new generation (`established: true`: FIFO on the main
+thread means every action queued before the transfer has run) or says
+`established: false` when it did not answer in time, in which case the holder's
+own actions are refused `lease_lost` until the mirror catches up — fail closed.
+The jsdom fixture proves the guards on a real DOM (zero effects on refusal,
+including a stale generation, a passed deadline with the generation unchanged,
+a disabled or readonly control, an exception turned into `unknown`, observed
+rather than requested state); the Rust tests prove admission, ordering of the
+queued mirror and actions, credential binding (a replaced or revoked token
+refuses the old caller everywhere, moves the generation and mirrors it; the
+replacement acts as a fresh identity), expiry, the reload recovery, the
+unacknowledged transfer, the `null` callback and the timeout reply with a fake
+window. Neither is the live window; that smoke is separate. The tools stay
+ungated, as before.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

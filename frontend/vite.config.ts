@@ -22,6 +22,9 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // The `webview_*` MCP snippets live beside their Rust wrapper; the jsdom
+    // fixture (`lib/webviewSnippets.test.ts`) imports those exact bytes.
+    fs: { allow: [".", "../src/signaling/webview"] },
   },
   test: {
     globals: true,

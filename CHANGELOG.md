@@ -79,6 +79,23 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   controller sets it with `app_control admin set_session_relay`). Every admitted
   call, accepted or refused, is audited beside the application-control actions.
   No role is granted it by default.
+- The `webview_*` tools treat the bot-hq window as the shared surface it is.
+  Every action now answers for itself — `done`, `refused` (with the reason:
+  the window shows another route or session, the selector matched nothing or
+  was invalid, another agent holds the lease) or `unknown` when the window did
+  not answer in time (the action may still run) — instead of a blind
+  `{ok: true}`; `expected_route` and `expected_session_id` refuse an action
+  before it lands on a page the caller did not mean; a key press with a
+  selector that matches nothing no longer lands on whatever has focus; and
+  `webview_lease` / `webview_release` give one agent the exclusive right to
+  mutate the window for up to a minute, bound to its current credential and
+  rechecked at the moment each action would act, so a click queued past a
+  takeover, past a runtime replacement or past the lease's deadline never
+  lands. A disabled or readonly control is refused before it is touched, a
+  successful `webview_type` reports the value the element actually holds, and
+  a script that throws or answers without an outcome is reported as unknown
+  rather than as success. The screenshot reply names the route and session the
+  window showed just before the capture.
 
 ### Fixed
 

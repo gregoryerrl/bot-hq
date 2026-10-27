@@ -65,10 +65,6 @@ impl JsonRpcError {
         Self::new(Self::INTERNAL_ERROR, "Tauri AppHandle not yet initialized")
     }
 
-    /// The "main" webview window wasn't found on the `AppHandle`.
-    pub fn webview_missing() -> Self {
-        Self::new(Self::INTERNAL_ERROR, "main webview not found")
-    }
 }
 
 impl JsonRpcResponse {
@@ -1135,55 +1131,80 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         // Webview automation — agents test the bot-hq UI on their own.
         // These mirrored the deleted external_jsonrpc.rs's equivalents until the external
-        // driver was deleted (2026-08-17); this is the only copy now.
+        // driver was deleted (2026-08-17); this is the only copy now. Since Plan Batch 6 B
+        // (#109) every action answers with its own structured outcome and the window is
+        // a leased, shared resource — see `signaling::webview_js`.
         ToolDescriptor {
             name: "webview_screenshot",
-            description: "Capture the bot-hq main window to a PNG under `<data_dir>/.local/screenshots/<ts>.png`. Returns `{path}`. Open the file with your built-in Read tool (which supports PNG). Use this AS YOUR EYES on what the user sees. macOS Screen Recording permission required; in a headless/agent environment the capture may not render.",
+            description: "Capture the bot-hq main window to a PNG under `<data_dir>/.local/screenshots/<ts>.png`. Returns `{path, context}` — `context` is `{route, session_id, lease_gen, sampled: \"before capture\"}`, the window's route and `/sessions/<id>` segment read by a separate evaluation just before the capture (metadata, not the frame's atomic context; the window can move between the two). Open the file with your built-in Read tool (which supports PNG). Use this AS YOUR EYES on what the user sees. Read-only: never blocked by a lease. macOS Screen Recording permission required; in a headless/agent environment the capture may not render.",
+            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+        },
+        ToolDescriptor {
+            name: "webview_lease",
+            description: "Take (or renew) the exclusive right to MUTATE the bot-hq window for `ttl_secs` (1–60, default 30): while you hold it, every other caller's webview_click / webview_type / webview_scroll / webview_press_key is refused with `reason: \"leased\"` before anything runs; the window itself is shared with the USER, who is never blocked. Bound to you as the authenticated participant: a replaced runtime cannot act on its predecessor's lease, and the lease dies with the TTL or with webview_release. Each acquire/renew/release moves a generation the host mirrors into the window; your actions carry the generation and deadline they were admitted under and are refused AT THE MOMENT THEY WOULD ACT (`lease_lost`, `lease_expired`) when either moved — a click that sat in the queue past your deadline never lands. Returns `{status: acquired|renewed, generation, until_ms, established, mirror}`: `established: true` means the window acknowledged the generation and every action queued before this transfer has run; `false` means it did not answer in time — your actions are refused until it does (acquire again, or read the window first). Refused `leased` while another live holder exists, `unauthenticated` without the HTTP credential, `stale_credential` when your runtime was replaced since this request was authenticated (a replacement also moves the generation, so the old runtime's queued actions never land). Hold it only across a sequence that must not interleave with another agent's clicks, and release it after.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ttl_secs": { "type": "integer", "minimum": 1, "maximum": 60, "description": "How long the lease lasts; renew by calling again. Default 30." }
+                }
+            }),
+        },
+        ToolDescriptor {
+            name: "webview_release",
+            description: "Give up the webview lease you hold. Only the holder can (`not_holder` otherwise); a release moves the generation, so any of your actions still queued are refused rather than landing on someone else's turn. `status: free` when no lease was held.",
             input_schema: serde_json::json!({ "type": "object", "properties": {} }),
         },
         ToolDescriptor {
             name: "webview_click",
-            description: "Synthesize a click on the first DOM element matching the CSS selector in the bot-hq webview. Fire-and-forget — verify with a follow-up `webview_screenshot`. Examples: `a[href=\"/sessions/abc\"]`, `button[title^=\"Capture\"]`, `[data-testid=foo]`.",
+            description: "Click the first DOM element matching the CSS selector in the bot-hq webview, after every guard passed INSIDE the window: the lease generation and deadline you were admitted under, `expected_route` (a path-segment prefix of `location.pathname` — `/sessions/s1` matches `/sessions/s1` and `/sessions/s1/x`, never `/sessions/s10`), `expected_session_id` (the exact `/sessions/<id>` segment), then the selector. Returns `{outcome: done|refused|unknown, ok, matched, route, session_id, reason?, detail?}`: `refused` with reason `route` / `session` / `no_match` / `invalid_selector` / `disabled` / `not_clickable` (no click() — an SVG) / `leased` / `lease_lost` / `lease_expired` / `stale_credential` / `unauthenticated` / `no_webview` means NOTHING ran (a `lease_lost` whose `detail.recovery` says the window had been reloaded is retried after the host republished the generation); `unknown` with reason `timeout` (no answer in 3 s), `exception` (the script threw) or `malformed_result` (the window answered with no outcome) means the click MAY HAVE RUN or may still run — read the state (webview_screenshot) before repeating it. `done` means the click was dispatched, not that the app did what you expect. Always pass `expected_route` or `expected_session_id` when the action belongs to one session: the window is shared with the user and other agents and may show something else by the time you act. Examples: `a[href=\"/sessions/abc\"]`, `button[title^=\"Capture\"]`, `[data-testid=foo]`.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "CSS selector for the target element." }
+                    "selector": { "type": "string", "description": "CSS selector for the target element." },
+                    "expected_route": { "type": "string", "description": "Refuse unless location.pathname is this path or below it (segment boundary)." },
+                    "expected_session_id": { "type": "string", "description": "Refuse unless the window shows /sessions/<this id>." }
                 },
                 "required": ["selector"]
             }),
         },
         ToolDescriptor {
             name: "webview_type",
-            description: "Set the value of an input/textarea matched by the CSS selector + dispatch input/change events the React-friendly way (via the prototype value setter so React state actually updates). Element is also focused. A `<select>` takes an option's value or its visible label (bot-hq, HANDS); a checkbox takes true/false (clicked when it differs).",
+            description: "Set the value of an input/textarea matched by the CSS selector + dispatch input/change events the React-friendly way (via the prototype value setter so React state actually updates), after the same guards as webview_click (lease, `expected_route`, `expected_session_id`, selector) passed inside the window; the element is focused only then. A `<select>` takes an option's value or its visible label (refused `ambiguous_option` / `no_option` when not exactly one matches); a checkbox takes true/false (clicked when it differs; `bad_checkbox_value` otherwise); a disabled or readonly control and a file input are refused (`disabled`, `readonly`, `not_editable`) before anything is focused; anything else that is not an input or textarea is refused `not_editable`. Same `{outcome, ok, matched, route, session_id, reason?, detail?}` reply as webview_click, and `done` reports the OBSERVED state after the dispatch — `applied` (whether the element now holds what you asked; a number input sanitizes text to empty), `length`, `checked` or `selected` — not the request; `unknown` means it may have run or may still run.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "selector": { "type": "string", "description": "CSS selector for an input or textarea." },
-                    "text": { "type": "string", "description": "Text to set." }
+                    "selector": { "type": "string", "description": "CSS selector for an input, textarea, select or checkbox." },
+                    "text": { "type": "string", "description": "Text to set; an option's value or label for a select; true/false for a checkbox." },
+                    "expected_route": { "type": "string", "description": "Refuse unless location.pathname is this path or below it (segment boundary)." },
+                    "expected_session_id": { "type": "string", "description": "Refuse unless the window shows /sessions/<this id>." }
                 },
                 "required": ["selector", "text"]
             }),
         },
         ToolDescriptor {
             name: "webview_scroll",
-            description: "Scroll an element (if selector given) or the page. `y` is the destination scrollTop / scrollY in pixels.",
+            description: "Scroll an element (if selector given) or the page to `y` (scrollTop / scrollY in pixels), after the same guards as webview_click passed inside the window (a selector that matches nothing is refused `no_match`). Same `{outcome, ok, matched, route, session_id, reason?}` reply; `unknown` means it may have run or may still run.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "selector": { "type": "string", "description": "Optional CSS selector. Omit for window scroll." },
-                    "y": { "type": "integer", "description": "Destination in pixels." }
+                    "y": { "type": "integer", "description": "Destination in pixels." },
+                    "expected_route": { "type": "string", "description": "Refuse unless location.pathname is this path or below it (segment boundary)." },
+                    "expected_session_id": { "type": "string", "description": "Refuse unless the window shows /sessions/<this id>." }
                 },
                 "required": ["y"]
             }),
         },
         ToolDescriptor {
             name: "webview_press_key",
-            description: "Synthesize keydown + keypress + keyup on a target element (or document.activeElement if no selector). Key names follow DOM KeyboardEvent.key: `Enter`, `Tab`, `Escape`, `ArrowDown`, `a`, etc.",
+            description: "Synthesize keydown + keypress + keyup for `key` on the element matching `selector`, or — ONLY when no selector is given — on document.activeElement (or the document). A selector that matches nothing is refused `no_match`; it never falls back to whatever happens to have focus. Same guards (lease, `expected_route`, `expected_session_id`) and the same `{outcome, ok, matched, route, session_id, reason?, target, target_tag}` reply as webview_click; `unknown` means it may have run or may still run. Key names follow DOM KeyboardEvent.key: `Enter`, `Tab`, `Escape`, `ArrowDown`, `a`, etc.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "key": { "type": "string", "description": "DOM key name." },
-                    "selector": { "type": "string", "description": "Optional CSS selector for the target element." }
+                    "selector": { "type": "string", "description": "Optional CSS selector for the target element; without it the active element is the target." },
+                    "expected_route": { "type": "string", "description": "Refuse unless location.pathname is this path or below it (segment boundary)." },
+                    "expected_session_id": { "type": "string", "description": "Refuse unless the window shows /sessions/<this id>." }
                 },
                 "required": ["key"]
             }),

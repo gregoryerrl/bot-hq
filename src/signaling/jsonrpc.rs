@@ -6,7 +6,7 @@
 use crate::policy::{ViolationKind, ViolationOutcome};
 use crate::signaling::bridge::{ApprovalContext, SignalingBridge};
 use crate::signaling::protocol::*;
-use crate::signaling::response::{internal_err_no_prefix, ok_response, result_json};
+use crate::signaling::response::{internal_err_no_prefix, result_json};
 use crate::signaling::tool_args::{
     arg_feedback_id, arg_opt_str, arg_required_str, arg_required_str_array,
 };
@@ -2281,6 +2281,7 @@ async fn call_tool(
             Ok(result_json(&report, "{}"))
         }
         "webview_screenshot" => {
+            let context = bridge.webview_context().await;
             let handle = bridge
                 .app_handle()
                 .ok_or_else(JsonRpcError::app_handle_missing)?;
@@ -2305,34 +2306,55 @@ async fn call_tool(
                 )
             })?
             .map_err(internal_err_no_prefix)?;
+            // The route/session beside the frame are SAMPLED by a separate
+            // evaluation before the capture: metadata, not the frame's atomic
+            // context (eyes-2, Batch 6 B).
             Ok(result_json(
-                &json!({ "path": path.display().to_string() }),
+                &json!({ "path": path.display().to_string(), "context": context }),
                 "{}",
             ))
         }
-        other => match super::webview_js::webview_tool_js(other, &args)? {
-            Some(js) => {
-                eval_in_webview(bridge, &js)?;
-                Ok(ok_response())
+        "webview_lease" => {
+            let ttl = args.get("ttl_secs").and_then(Value::as_u64).unwrap_or(30);
+            if ttl == 0 || ttl > super::webview_js::LEASE_MAX_TTL.as_secs() {
+                return Err(JsonRpcError::new(JsonRpcError::INVALID_PARAMS, format!("ttl_secs must be 1..={}", super::webview_js::LEASE_MAX_TTL.as_secs())));
             }
-            None => Err(JsonRpcError::new(
-                JsonRpcError::METHOD_NOT_FOUND,
-                format!("unknown tool {other}"),
-            )),
-        },
+            let reply = bridge.webview_lease_acquire(&caller.session_id, &caller.agent, caller.token_proof.as_ref(), std::time::Duration::from_secs(ttl)).await;
+            Ok(result_json(&reply, "{}"))
+        }
+        "webview_release" => {
+            let reply = bridge.webview_lease_release(&caller.session_id, &caller.agent, caller.token_proof.as_ref()).await;
+            Ok(result_json(&reply, "{}"))
+        }
+        other if super::webview_js::is_mutating_tool(other) => {
+            // Admission under the lease, THEN the snippet — which rechecks the
+            // lease generation and deadline, the route, the session and the
+            // selector at actuation and answers for itself. A refusal here
+            // queues nothing.
+            let stamp = match bridge.webview_admit(&caller.session_id, &caller.agent, caller.token_proof.as_ref()) {
+                Ok(stamp) => stamp,
+                Err(refusal) => return Ok(result_json(&refusal, "{}")),
+            };
+            let js = super::webview_js::action_js(other, &args, &stamp)?;
+            let mut reply = bridge.webview_eval(js).await.into_reply(other);
+            // A reloaded document forgets the mirrored generation (reads 0)
+            // while the host's stands: republish it and say so, so the retry
+            // is admitted instead of the lease looking permanently held.
+            if reply["reason"] == "lease_lost" && reply["detail"]["current_gen"] == 0 && bridge.webview_generation() > 0 {
+                let acknowledged = bridge.webview_republish_generation().await;
+                reply["detail"]["recovery"] = json!(if acknowledged {
+                    "the window had been reloaded and forgot the lease generation; it has been republished — retry the action"
+                } else {
+                    "the window had been reloaded and forgot the lease generation; republishing it was not acknowledged — read the window (webview_screenshot) and retry"
+                });
+            }
+            Ok(result_json(&reply, "{}"))
+        }
+        other => Err(JsonRpcError::new(
+            JsonRpcError::METHOD_NOT_FOUND,
+            format!("unknown tool {other}"),
+        )),
     }
-}
-
-fn eval_in_webview(bridge: &Arc<SignalingBridge>, js: &str) -> Result<(), JsonRpcError> {
-    use tauri::Manager;
-    let handle = bridge
-        .app_handle()
-        .ok_or_else(JsonRpcError::app_handle_missing)?;
-    let window = handle
-        .get_webview_window("main")
-        .ok_or_else(JsonRpcError::webview_missing)?;
-    window.eval(js).map_err(internal_err_no_prefix)?;
-    Ok(())
 }
 
 fn parse_violation_kind(s: &str) -> Option<ViolationKind> {
@@ -2966,6 +2988,171 @@ mod tests {
         assert!(tool(&bridge, driver.clone(), "app_control", json!({"action":"admin","request":{"operation":"set_session_relay","session_id":"nope","accepts":true}})).await.unwrap().contains("does not exist"));
         let notice = storage.messages_for_session("s1", None).await.unwrap().into_iter().rev().find(|m| m.kind == "system_notice").unwrap();
         assert!(notice.content.contains("set_session_relay") && notice.content.contains("delegated controller hands of s1"), "{}", notice.content);
+    }
+
+    /// Plan Batch 6 B (#109): the webview tools answer with the snippet's own
+    /// result through a fake evaluator standing in for the window; the lease
+    /// admits the holder, refuses everyone else BEFORE anything is queued, is
+    /// bound to the caller's current credential, moves its generation on every
+    /// acquire/renew/release and mirrors it (queued in order with the actions),
+    /// reports whether the window acknowledged the transfer, dies with its TTL
+    /// or a replaced runtime, and a missing callback is `unknown`.
+    #[tokio::test]
+    async fn webview_tools_answer_truthfully_and_the_lease_serializes_mutators() {
+        use crate::signaling::webview_js::EvalOutcome;
+        let (bridge, _storage) = two_role_session().await;
+        let queued: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let script: Arc<std::sync::Mutex<Box<dyn Fn(&str) -> EvalOutcome + Send + Sync>>> = Arc::new(std::sync::Mutex::new(Box::new(|js: &str| {
+            // The fake "window": a mirror update is acknowledged with its generation; an action is "done".
+            if let Some(at) = js.find("\"gen\":") {
+                let gen: u64 = js[at + 6..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap();
+                if js.contains("window.__bhq_lease_gen = args.gen") { return EvalOutcome::Returned(json!({"outcome":"done","gen":gen})); }
+            }
+            EvalOutcome::Returned(json!({"outcome":"done","ok":true,"matched":true,"route":"/sessions/target","session_id":"target"}))
+        })));
+        {
+            let (queued, script) = (queued.clone(), script.clone());
+            bridge.override_webview_eval(Arc::new(move |js: String| { let out = (script.lock().unwrap())(&js); queued.lock().unwrap().push(js); out }));
+        }
+        // The action's arguments are the JSON between the last `)(` and the
+        // closing `); })()` of the composition.
+        let stamps = |js: &str| -> (u64, Option<u64>) {
+            let (body, _catch) = js.split_once("); } catch (e) {").unwrap_or_else(|| panic!("unexpected composition: {js}"));
+            let args = body.rsplit_once(")(").unwrap().1;
+            let v: Value = serde_json::from_str(args).unwrap_or_else(|e| panic!("{e}: {args}"));
+            (v["lease"]["gen"].as_u64().unwrap(), v["lease"]["until_ms"].as_u64())
+        };
+        bridge.register_mcp_token("s1", "hands", "hands-token");
+        bridge.register_mcp_token("s1", "eyes", "eyes-token");
+        let mut hands = caller();
+        hands.token_proof = bridge.mcp_token_proof("s1", "hands", Some("hands-token"));
+        let mut eyes = eyes_caller();
+        eyes.token_proof = bridge.mcp_token_proof("s1", "eyes", Some("eyes-token"));
+
+        // No lease held: anyone acts, stamped with the current generation and no deadline.
+        let reply = parsed(&tool(&bridge, eyes.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap());
+        assert_eq!((reply["outcome"].as_str(), reply["ok"].as_bool()), (Some("done"), Some(true)));
+        assert_eq!(stamps(&queued.lock().unwrap()[0]), (0, None));
+        assert!(queued.lock().unwrap()[0].contains("\"selector\":\"#b\""));
+        // A missing or non-string argument is the caller's error, nothing queued.
+        assert!(tool(&bridge, eyes.clone(), "webview_click", json!({})).await.is_err());
+        assert!(tool(&bridge, eyes.clone(), "webview_type", json!({"selector":"#t","text":"x","expected_route":7})).await.is_err());
+        assert_eq!(queued.lock().unwrap().len(), 1);
+
+        // The lease needs an authenticated caller.
+        let reply = parsed(&tool(&bridge, caller(), "webview_lease", json!({"ttl_secs":30})).await.unwrap());
+        assert_eq!(reply["reason"], "unauthenticated");
+        assert!(tool(&bridge, hands.clone(), "webview_lease", json!({"ttl_secs":0})).await.is_err());
+        assert!(tool(&bridge, hands.clone(), "webview_lease", json!({"ttl_secs":61})).await.is_err());
+        // hands acquires: generation 1, the mirror queued and acknowledged.
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_lease", json!({"ttl_secs":30})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64(), reply["established"].as_bool()), (Some("acquired"), Some(1), Some(true)));
+        let until_ms = reply["until_ms"].as_u64().unwrap();
+        assert!(queued.lock().unwrap().last().unwrap().contains("\"gen\":1"));
+        // eyes is refused before anything is queued; hands is admitted with its deadline.
+        let before = queued.lock().unwrap().len();
+        let refused = parsed(&tool(&bridge, eyes.clone(), "webview_type", json!({"selector":"#t","text":"hi"})).await.unwrap());
+        assert_eq!((refused["outcome"].as_str(), refused["reason"].as_str(), refused["holder"]["agent"].as_str(), refused["until_ms"].as_u64()), (Some("refused"), Some("leased"), Some("hands"), Some(until_ms)));
+        assert_eq!(queued.lock().unwrap().len(), before, "a refusal queues nothing");
+        parsed(&tool(&bridge, hands.clone(), "webview_press_key", json!({"key":"Enter","expected_session_id":"target"})).await.unwrap());
+        assert_eq!(stamps(queued.lock().unwrap().last().unwrap()), (1, Some(until_ms)));
+        // eyes cannot acquire or release; hands renews (generation 2) and releases (generation 3).
+        assert_eq!(parsed(&tool(&bridge, eyes.clone(), "webview_lease", json!({"ttl_secs":5})).await.unwrap())["reason"], "leased");
+        assert_eq!(parsed(&tool(&bridge, eyes.clone(), "webview_release", json!({})).await.unwrap())["reason"], "not_holder");
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_lease", json!({"ttl_secs":10})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64()), (Some("renewed"), Some(2)));
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_release", json!({})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64()), (Some("released"), Some(3)));
+        assert_eq!(parsed(&tool(&bridge, hands.clone(), "webview_release", json!({})).await.unwrap())["status"], "free");
+        // The mirror was queued in order with every action: 1, action, 2, 3.
+        let gens: Vec<u64> = queued.lock().unwrap().iter().filter(|js| js.contains("window.__bhq_lease_gen = args.gen")).map(|js| { let at = js.find("\"gen\":").unwrap(); js[at + 6..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap() }).collect();
+        assert_eq!(gens, vec![1, 2, 3]);
+        // Now eyes acquires (4). Then eyes' runtime is replaced (a new token):
+        // the OLD caller is retired — refused before anything is queued, for a
+        // mutator, an acquire and a release alike — the lease it held is
+        // dropped, and the generation moves (5) with its mirror queued, so an
+        // action of the old runtime still sitting in the window's queue
+        // refuses `lease_lost` at actuation (eyes-2, b7982bbd).
+        let reply = parsed(&tool(&bridge, eyes.clone(), "webview_lease", json!({"ttl_secs":30})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64()), (Some("acquired"), Some(4)));
+        let before = queued.lock().unwrap().len();
+        bridge.register_mcp_token("s1", "eyes", "eyes-token-2");
+        assert!(queued.lock().unwrap().last().unwrap().contains("\"gen\":5"), "a credential change moves the generation and mirrors it");
+        assert_eq!(queued.lock().unwrap().len(), before + 1);
+        for (tool_name, args) in [("webview_type", json!({"selector":"#t","text":"stale runtime"})), ("webview_lease", json!({"ttl_secs":5})), ("webview_release", json!({}))] {
+            let reply = parsed(&tool(&bridge, eyes.clone(), tool_name, args).await.unwrap());
+            assert_eq!((reply["outcome"].as_str(), reply["reason"].as_str()), (Some("refused"), Some("stale_credential")), "{tool_name}: {reply}");
+        }
+        assert_eq!(queued.lock().unwrap().len(), before + 1, "retired callers queue nothing");
+        // The replacement itself acts under the new credential as a fresh identity.
+        let mut eyes2 = eyes_caller();
+        eyes2.token_proof = bridge.mcp_token_proof("s1", "eyes", Some("eyes-token-2"));
+        assert_eq!(parsed(&tool(&bridge, eyes2.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap())["outcome"], "done");
+        assert_eq!(stamps(queued.lock().unwrap().last().unwrap()), (5, None));
+        // The successor holds the lease under its new credential (6); a cleanup for
+        // the SAME participant that arrives late — eyes-2's second interleaving,
+        // c42ac1e9 — leaves that holder alone (its credential is current) and only
+        // moves the generation (7), while a holder under a retired credential is
+        // the one a replacement clears (above).
+        let reply = parsed(&tool(&bridge, eyes2.clone(), "webview_lease", json!({"ttl_secs":30})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64()), (Some("acquired"), Some(6)));
+        bridge.webview_credential_changed("s1", "eyes");
+        assert!(queued.lock().unwrap().last().unwrap().contains("\"gen\":7"));
+        assert_eq!(parsed(&tool(&bridge, hands.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap())["reason"], "leased", "the successor still holds it");
+        assert_eq!(parsed(&tool(&bridge, eyes2.clone(), "webview_release", json!({})).await.unwrap())["status"], "released");
+        // Revoking a registration retires its work the same way (9).
+        bridge.register_mcp_token("s1", "eyes", "eyes-token-2");
+        assert_eq!(queued.lock().unwrap().len(), before + 5, "re-registering the same token changes nothing");
+        assert!(bridge.revoke_mcp_token("s1", "eyes", "eyes-token-2"));
+        assert!(queued.lock().unwrap().last().unwrap().contains("\"gen\":9"));
+        assert_eq!(parsed(&tool(&bridge, eyes2.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap())["reason"], "stale_credential");
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_lease", json!({"ttl_secs":1})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64()), (Some("acquired"), Some(10)));
+        // Expiry: after the TTL the lease is dead without any release.
+        bridge.register_mcp_token("s1", "eyes", "eyes-token-3");
+        let mut eyes3 = eyes_caller();
+        eyes3.token_proof = bridge.mcp_token_proof("s1", "eyes", Some("eyes-token-3"));
+        assert_eq!(parsed(&tool(&bridge, eyes3.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap())["reason"], "leased");
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(parsed(&tool(&bridge, eyes3.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap())["outcome"], "done");
+        assert_eq!(stamps(queued.lock().unwrap().last().unwrap()), (10, None), "an expired lease moves no generation until someone acquires");
+        // A holder whose runtime is replaced while it holds the lease: the replacement
+        // (one transition: token and lease together) clears it and the old caller's
+        // next acquire is refused rather than reinstalling the retired credential —
+        // eyes-2's first interleaving (c42ac1e9) has no gap to land in.
+        let reply = parsed(&tool(&bridge, eyes3.clone(), "webview_lease", json!({"ttl_secs":30})).await.unwrap());
+        assert_eq!((reply["status"].as_str(), reply["generation"].as_u64()), (Some("acquired"), Some(11)));
+        bridge.register_mcp_token("s1", "eyes", "eyes-token-4");
+        assert!(queued.lock().unwrap().last().unwrap().contains("\"gen\":12"));
+        assert_eq!(parsed(&tool(&bridge, eyes3.clone(), "webview_lease", json!({"ttl_secs":30})).await.unwrap())["reason"], "stale_credential");
+        assert_eq!(parsed(&tool(&bridge, hands.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap())["outcome"], "done", "the retired holder's lease is gone");
+        assert_eq!(stamps(queued.lock().unwrap().last().unwrap()), (12, None));
+
+        // A window that forgot the generation (reloaded: mirror 0) gets it republished with the refusal.
+        *script.lock().unwrap() = Box::new(|js: &str| if js.contains("window.__bhq_lease_gen = args.gen") { EvalOutcome::Returned(json!({"outcome":"done","gen":12})) } else { EvalOutcome::Returned(json!({"outcome":"refused","ok":false,"matched":false,"reason":"lease_lost","detail":{"admitted_gen":12,"current_gen":0}})) });
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_click", json!({"selector":"#b"})).await.unwrap());
+        assert_eq!(reply["reason"], "lease_lost");
+        assert!(reply["detail"]["recovery"].as_str().unwrap().contains("republished — retry"), "{reply}");
+        assert!(queued.lock().unwrap().last().unwrap().contains("\"gen\":12"), "the current generation was republished");
+
+        // A transfer the window did not acknowledge says so; a callback that never comes is unknown;
+        // a callback with no outcome (a bare null — WebView2 after an uncaught exception) is unknown too.
+        *script.lock().unwrap() = Box::new(|js: &str| if js.contains("window.__bhq_lease_gen = args.gen") { EvalOutcome::Returned(json!({"outcome":"done","gen":0})) } else { EvalOutcome::Timeout });
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_lease", json!({"ttl_secs":30})).await.unwrap());
+        assert_eq!((reply["generation"].as_u64(), reply["established"].as_bool()), (Some(13), Some(false)));
+        assert!(reply["note"].as_str().unwrap().contains("not acknowledged"));
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_scroll", json!({"y":10})).await.unwrap());
+        assert_eq!((reply["outcome"].as_str(), reply["reason"].as_str()), (Some("unknown"), Some("timeout")));
+        assert!(reply["matched"].is_null() && reply["detail"].as_str().unwrap().contains("may still run"));
+        *script.lock().unwrap() = Box::new(|_| EvalOutcome::Returned(crate::signaling::webview_js::normalize_result(Value::Null)));
+        let reply = parsed(&tool(&bridge, hands.clone(), "webview_scroll", json!({"y":10})).await.unwrap());
+        assert_eq!((reply["outcome"].as_str(), reply["reason"].as_str()), (Some("unknown"), Some("malformed_result")));
+        // No window at all is a refusal, not a success; no credential at all is refused before anything runs.
+        *script.lock().unwrap() = Box::new(|_| EvalOutcome::NoWebview);
+        assert_eq!(parsed(&tool(&bridge, hands.clone(), "webview_scroll", json!({"y":10})).await.unwrap())["reason"], "no_webview");
+        let n = queued.lock().unwrap().len();
+        assert_eq!(parsed(&tool(&bridge, caller(), "webview_scroll", json!({"y":10})).await.unwrap())["reason"], "unauthenticated");
+        assert_eq!(queued.lock().unwrap().len(), n);
     }
 
     #[tokio::test]
