@@ -99,6 +99,10 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- The application-control tool now advertises its event/watch actions and
+  typed cursors, filters and wake flag. Native clients can request a waking
+  watch, acknowledge it and page events with the expected argument types,
+  rather than sending undeclared fields as strings and failing to deserialize.
 - A managed helper now reasons at its parent's recorded effort unless the task
   names one (`effort`: low, medium, high, xhigh or max); until now every helper
   ran at the Claude CLI's built-in default while its parent ran at `max`, the

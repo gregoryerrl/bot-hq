@@ -2465,6 +2465,159 @@ mod tests {
         assert_eq!(v["result"]["serverInfo"]["name"], "bot-hq-signaling");
     }
 
+    /// #132: validate the schema on the MCP wire, including every action
+    /// and field Serde knows. New fields cannot hide behind old samples,
+    /// and new actions need both a sample and an advertised action.
+    #[tokio::test]
+    async fn app_control_advertised_schema_covers_every_rust_action_and_typed_argument() {
+        use crate::signaling::bridge::application_control::AppControlRequest;
+        use std::collections::BTreeSet;
+
+        // Serde generates this inventory from the enum itself. Capture its
+        // unknown-tag/field errors without parsing an English message or
+        // adding reflection/JSON-schema dependencies to production.
+        #[derive(Debug)]
+        struct SerdeNames(&'static [&'static str]);
+        impl std::fmt::Display for SerdeNames {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("captured AppControlRequest action/field names")
+            }
+        }
+        impl std::error::Error for SerdeNames {}
+        impl serde::de::Error for SerdeNames {
+            fn custom<T: std::fmt::Display>(message: T) -> Self {
+                panic!("expected Serde's unknown action/field names, got: {message}")
+            }
+            fn unknown_variant(_: &str, expected: &'static [&'static str]) -> Self {
+                Self(expected)
+            }
+            fn unknown_field(_: &str, expected: &'static [&'static str]) -> Self {
+                Self(expected)
+            }
+        }
+        let unknown = serde::de::value::MapDeserializer::<_, SerdeNames>::new(
+            [("action", "__collect_app_control_tags__")].into_iter(),
+        );
+        let tags = <AppControlRequest as serde::Deserialize>::deserialize(unknown).unwrap_err().0;
+        let rust_actions: BTreeSet<_> = tags.iter().copied().collect();
+        assert!(!rust_actions.is_empty());
+
+        // Only the schema vocabulary this descriptor uses: follow declared
+        // object properties/array items, leaving intentionally free-form
+        // admin requests and history queries to their actual Rust parsers.
+        fn check(schema: &Value, value: &Value, path: &str) {
+            let matches = |kind: &str| match kind {
+                "object" => value.is_object(), "array" => value.is_array(),
+                "string" => value.is_string(), "boolean" => value.is_boolean(),
+                "integer" => value.is_i64() || value.is_u64(), "null" => value.is_null(),
+                other => panic!("unhandled schema type {other} at {path}"),
+            };
+            let correct_type = match &schema["type"] {
+                Value::String(kind) => matches(kind),
+                Value::Array(kinds) => kinds.iter().any(|kind| matches(kind.as_str().unwrap())),
+                _ => panic!("missing type at {path}: {schema}"),
+            };
+            assert!(correct_type, "{path}: {value} does not match {schema}");
+            if let Some(options) = schema["enum"].as_array() {
+                assert!(options.contains(value), "{path}: {value} not in {options:?}");
+            }
+            if let Some(minimum) = schema["minimum"].as_i64() {
+                assert!(value.as_i64().unwrap() >= minimum, "{path}: below {minimum}");
+            }
+            if let Some(object) = value.as_object() {
+                for key in schema["required"].as_array().into_iter().flatten() {
+                    assert!(object.contains_key(key.as_str().unwrap()), "{path}: missing {key}");
+                }
+                for (key, child) in object {
+                    if let Some(property) = schema["properties"].get(key) {
+                        check(property, child, &format!("{path}.{key}"));
+                    } else {
+                        assert_ne!(schema["additionalProperties"], false, "{path}: undeclared key {key}");
+                    }
+                }
+            }
+            if let Some(items) = value.as_array() {
+                if let Some(minimum) = schema["minItems"].as_u64() {
+                    assert!(items.len() as u64 >= minimum, "{path}: too few items");
+                }
+                if let Some(maximum) = schema["maxItems"].as_u64() {
+                    assert!(items.len() as u64 <= maximum, "{path}: too many items");
+                }
+                for (index, item) in items.iter().enumerate() {
+                    check(&schema["items"], item, &format!("{path}[{index}]"));
+                }
+            }
+        }
+
+        let samples = [
+            json!({"action":"admin","request":{"operation":"models"}}),
+            json!({"action":"change_participant","session_id":"target","request_id":"change","revision":1,"request":{"kind":"add","role_id":1,"model_id":"model","label":"bench"}}),
+            json!({"action":"cancel_participant_change","session_id":"target","request_id":"change"}),
+            json!({"action":"create","session_id":"new","title":"bench","repo_path":"/tmp/bench","project":"bench","use_worktree":false,"participants":[{"roleId":1,"modelId":"model","effort":"high","ultracode":false,"color":"Cyan","label":"bench"}]}),
+            json!({"action":"start","session_id":"target"}),
+            json!({"action":"resume","session_id":"target"}),
+            json!({"action":"pause","session_id":"target"}),
+            json!({"action":"close","session_id":"target","archive":true}),
+            json!({"action":"reopen","session_id":"target"}),
+            json!({"action":"send","session_id":"target","request_id":"send","text":"continue"}),
+            json!({"action":"message_status","session_id":"target","message_id":1}),
+            json!({"action":"answer","choice_id":"choice","picked":"Approve","expected_choice_sha256":"hash","confirm_stale":true}),
+            json!({"action":"sessions","before_id":"target","include_closed":true}),
+            json!({"action":"session","session_id":"target"}),
+            json!({"action":"history","session_id":"target","query":{"source":"channel","message_id":1,"limit":5}}),
+            json!({"action":"tray","session_id":"target","before_id":10}),
+            json!({"action":"choice","choice_id":"choice","offset_bytes":5}),
+            json!({"action":"document","session_id":"target","slug":"apply","offset_bytes":5}),
+            json!({"action":"audit","session_id":"target","before_id":10}),
+            json!({"action":"events","since_id":50,"limit":5,"sessions":["target"],"kinds":["decision_pending"]}),
+            json!({"action":"watch","request_id":"watch","sessions":["target"],"kinds":["decision_pending"],"wake":true}),
+            json!({"action":"watch","request_id":"default","wake":false}),
+            json!({"action":"ack","request_id":"watch","up_to":55}),
+            json!({"action":"unwatch","request_id":"watch"}),
+            json!({"action":"watches"}),
+        ];
+        let bridge = SignalingBridge::new();
+        let reply = dispatch(req("tools/list", json!({}), 1), &caller(), &bridge).await.unwrap().unwrap();
+        let wire = serde_json::to_value(reply).unwrap();
+        let schema = &wire["result"]["tools"].as_array().unwrap().iter()
+            .find(|tool| tool["name"] == "app_control").unwrap()["inputSchema"];
+        for action in &rust_actions {
+            let probe = serde::de::value::MapDeserializer::<_, SerdeNames>::new(
+                [("action", *action), ("__collect_app_control_fields__", "probe")].into_iter(),
+            );
+            let fields = match <AppControlRequest as serde::Deserialize>::deserialize(probe) {
+                Err(names) => names.0,
+                // Serde's internally tagged unit visitor ignores extra keys.
+                // A later struct-shaped Watches must use its generated field
+                // list instead; this unit pattern would stop compiling.
+                Ok(AppControlRequest::Watches) => &[],
+                Ok(other) => panic!("{action} accepted the unknown-field probe: {other:?}"),
+            };
+            for field in fields {
+                assert!(schema["properties"].get(field).is_some(), "{action}: Rust field {field} is not advertised");
+            }
+        }
+        let advertised: BTreeSet<_> = schema["properties"]["action"]["enum"].as_array().unwrap()
+            .iter().map(|action| action.as_str().unwrap()).collect();
+        let sampled: BTreeSet<_> = samples.iter().map(|sample| sample["action"].as_str().unwrap()).collect();
+        assert_eq!(sampled, rust_actions, "every Rust action needs a request sample");
+        for sample in &samples {
+            serde_json::from_value::<AppControlRequest>(sample.clone()).unwrap_or_else(|e| panic!("{sample}: {e}"));
+            check(schema, sample, "app_control");
+        }
+        assert_eq!(advertised, rust_actions, "advertise every Rust action, and no others");
+        for cursor in ["since_id", "up_to"] {
+            assert_eq!(schema["properties"][cursor]["minimum"], 0, "{cursor} must be nonnegative");
+        }
+        for bad in [
+            json!({"action":"watch","request_id":"w","wake":"true"}),
+            json!({"action":"events","since_id":"50"}),
+            json!({"action":"ack","request_id":"w","up_to":"55"}),
+        ] {
+            assert!(serde_json::from_value::<AppControlRequest>(bad).is_err(), "keep backend types strict");
+        }
+    }
+
     #[tokio::test]
     async fn driver_read_facade_requires_both_grants_and_preserves_authorship() {
         use crate::agents::{CapabilitySet, ResolvedCapabilities};

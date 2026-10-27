@@ -809,7 +809,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                 "type":"object", "additionalProperties":false,
                 "required":["action"],
                 "properties": {
-                    "action":{"type":"string","enum":["sessions","session","history","tray","choice","document","audit","answer","send","message_status","start","resume","create","pause","close","reopen","admin","change_participant","cancel_participant_change"]},
+                    "action":{"type":"string","enum":["sessions","session","history","tray","choice","document","audit","answer","send","message_status","start","resume","create","pause","close","reopen","admin","change_participant","cancel_participant_change","events","watch","ack","unwatch","watches"]},
                     "session_id":{"type":"string"}, "slug":{"type":"string"}, "choice_id":{"type":"string"},
                     "before_id":{"type":["string","integer","null"]},
                     "include_closed":{"type":"boolean"}, "archive":{"type":"boolean"},
@@ -818,6 +818,10 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
                     "request_id":{"type":"string"}, "text":{"type":"string"}, "message_id":{"type":"integer"},
                     "picked":{"type":"string"}, "expected_choice_sha256":{"type":"string"}, "confirm_stale":{"type":"boolean"},
                     "offset_bytes":{"type":"integer","minimum":0}, "revision":{"type":"integer"},
+                    "since_id":{"type":"integer","minimum":0}, "up_to":{"type":"integer","minimum":0},
+                    "limit":{"type":"integer"}, "wake":{"type":"boolean"},
+                    "sessions":{"type":"array","items":{"type":"string"}},
+                    "kinds":{"type":"array","items":{"type":"string"}},
                     "request":{"type":"object","description":"For admin: operation plus the fields described above. For change_participant: the typed add/remove/switch_model request. Source actor is always authenticated, never an input."},
                     "query":{"type":"object","description":"HistoryRequest: source, record_id, message_id, before_id, offset_bytes, limit."}
                 }

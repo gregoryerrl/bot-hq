@@ -862,6 +862,40 @@ mod tests {
         })
     }
 
+    /// #132/#135: omitted targets means every matching non-controller
+    /// session, including one created after this waking watch was registered.
+    #[tokio::test]
+    async fn a_default_waking_watch_covers_a_session_created_after_the_watch() {
+        let r = rig().await;
+        let actor = r.storage.controller_actor("c", "hands").await.unwrap();
+        let initial = r.bridge.control_watch_upsert(&r.storage, &actor, "late", None, None, true).await.unwrap();
+        assert!(initial.targets.is_none() && initial.kinds.is_none());
+        assert!(initial.wake && initial.pending_since.is_none());
+
+        r.storage.create_session("late-target", "later work", None).await.unwrap();
+        r.storage.ensure_session_roster("late-target", 2).await.unwrap();
+        // rig grants the global HANDS role control. The later roster inherits
+        // it, so make this a non-controller target without revoking our actor.
+        sqlx::query("UPDATE session_participants SET capabilities = '[]' WHERE session_id = 'late-target'")
+            .execute(r.storage.pool()).await.unwrap();
+        assert!(!r.storage.controller_sessions_open().await.unwrap().iter().any(|s| s == "late-target"));
+
+        park_decision(&r.storage, "late-target", "late-choice").await;
+        r.journal.record(&decision("late-target", "late-choice")).await;
+
+        let armed = r.storage.control_watch(r.hands, "late").await.unwrap().unwrap();
+        let pending = armed.pending_since.expect("a later target must arm the watch");
+        let event = r.storage.control_event_by_id(pending).await.unwrap().unwrap();
+        assert_eq!((armed.id, armed.cursor), (initial.id, initial.cursor));
+        assert!(armed.targets.is_none());
+        assert_eq!(armed.pending_kind.as_deref(), Some("decision_pending"));
+        assert!(pending > initial.cursor);
+        assert_eq!(
+            (event.session_id.as_str(), event.kind.as_str(), event.ref_id.as_deref()),
+            ("late-target", "decision_pending", Some("late-choice")),
+        );
+    }
+
     /// The wake, end to end through the real bridge: a decision parked in the
     /// target arms the watch and fires once — a system row naming the watch
     /// and the event, linked as `watch:` so the journal files it `watch_wake`;
