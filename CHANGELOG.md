@@ -76,9 +76,9 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   (nothing the other session writes back reopens that), at most once a minute,
   and reaches a session that holds an application controller only after that
   session opted in (migration 0114; its user ticks it in Session Settings, its
-  controller sets it with `app_control admin set_session_relay`). Every call is
-  audited beside the application-control actions. No role is granted it by
-  default.
+  controller sets it with `app_control admin set_session_relay`). Every admitted
+  call, accepted or refused, is audited beside the application-control actions.
+  No role is granted it by default.
 
 ### Fixed
 

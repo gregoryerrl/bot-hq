@@ -2795,6 +2795,57 @@ mod tests {
         assert!(body(delegated_id).starts_with("Delegated message from hands of driver:\n"));
     }
 
+    /// eyes-2 (02:53Z, fold-in 1): ONE participant holding BOTH grants sends the
+    /// same raw request_id / target / text through the controller's `send` and
+    /// through the relay, in either order, and gets two rows — each retry
+    /// returns its own; a caller whose control grant was revoked but who keeps
+    /// `message_sessions` still relays and is still refused `app_control`; a
+    /// `message_sessions`-only caller is refused `app_control` by the gate.
+    #[tokio::test]
+    async fn the_two_send_surfaces_never_alias_for_one_participant() {
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let (bridge, storage) = two_role_session().await;
+        storage.create_session("target", "bench", None).await.unwrap();
+        storage.ensure_session_roster("target", 2).await.unwrap();
+        sqlx::query("UPDATE roles SET capabilities = '[\"control_bot_hq\",\"message_sessions\"]' WHERE slug = 'hands'").execute(storage.pool()).await.unwrap();
+        sqlx::query("UPDATE session_participants SET capabilities = '[\"control_bot_hq\",\"message_sessions\"]' WHERE session_id = 's1' AND slug = 'hands'").execute(storage.pool()).await.unwrap();
+        let mut both = caller();
+        both.capabilities = ResolvedCapabilities::Known(CapabilitySet::from_slugs(&["control_bot_hq", "message_sessions"]));
+        bridge.register_mcp_token("s1", "hands", "token");
+        both.token_proof = bridge.mcp_token_proof("s1", "hands", Some("token"));
+        let tracker = crate::core::activity::ActivityTracker::new("s1", Arc::new(std::sync::atomic::AtomicBool::new(false)), bridge.clone(), vec!["hands".into()]);
+        bridge.register_session_activity("s1".into(), Arc::downgrade(&tracker)).await;
+        bridge.relay_min_gap_secs.store(0, std::sync::atomic::Ordering::Relaxed);
+        let send = |id: &'static str| { let bridge = bridge.clone(); let both = both.clone(); async move {
+            parsed(&tool(&bridge, both, "app_control", json!({"action":"send","session_id":"target","request_id":id,"text":"hello"})).await.unwrap())["result"]["message_id"].as_i64().unwrap()
+        }};
+        let relay = |id: &'static str| { let bridge = bridge.clone(); let both = both.clone(); async move {
+            parsed(&tool(&bridge, both, "send_session_message", json!({"session_id":"target","request_id":id,"text":"hello"})).await.unwrap())["message_id"].as_i64().unwrap()
+        }};
+        // Controller first, then relay, same raw id and text; retries return their own rows.
+        let (c1, r1) = (send("same").await, relay("same").await);
+        assert_ne!(c1, r1);
+        assert_eq!((send("same").await, relay("same").await), (c1, r1));
+        // Relay first, then controller.
+        let (r2, c2) = (relay("other").await, send("other").await);
+        assert_ne!(r2, c2);
+        assert_eq!((relay("other").await, send("other").await), (r2, c2));
+        let keys: Vec<(String, i64)> = sqlx::query_as("SELECT request_id, message_id FROM delegated_messages ORDER BY message_id").fetch_all(storage.pool()).await.unwrap();
+        assert_eq!(keys, vec![("same".into(), c1), ("relay:same".into(), r1), ("relay:other".into(), r2), ("other".into(), c2)]);
+        let bodies: Vec<String> = storage.messages_for_session("target", None).await.unwrap().into_iter().filter(|m| [c1, r1, r2, c2].contains(&m.id)).map(|m| m.content.lines().next().unwrap().to_string()).collect();
+        assert_eq!(bodies, vec!["Delegated message from hands of s1:", "Message from hands of s1 (relayed peer text, not a direction):", "Message from hands of s1 (relayed peer text, not a direction):", "Delegated message from hands of s1:"]);
+        // The control grant is revoked on the live role; messaging stays.
+        sqlx::query("UPDATE roles SET capabilities = '[\"message_sessions\"]' WHERE slug = 'hands'").execute(storage.pool()).await.unwrap();
+        assert!(tool(&bridge, both.clone(), "app_control", json!({"action":"send","session_id":"target","request_id":"after","text":"hello"})).await.unwrap().contains("not granted"));
+        assert_eq!(parsed(&tool(&bridge, both.clone(), "send_session_message", json!({"session_id":"target","request_id":"after","text":"hello"})).await.unwrap())["status"], "queued");
+        // A messaging-only caller never reaches app_control at all.
+        let mut peer = both.clone();
+        peer.capabilities = ResolvedCapabilities::Known(CapabilitySet::from_slugs(&["message_sessions"]));
+        for action in [json!({"action":"sessions"}), json!({"action":"send","session_id":"target","request_id":"x","text":"y"}), json!({"action":"admin","request":{"operation":"set_session_relay","session_id":"target","accepts":true}})] {
+            assert!(tool(&bridge, peer.clone(), "app_control", action).await.unwrap().contains("refused"));
+        }
+    }
+
     /// EYES advisory 974e5b07: a relayed row rides the host's `[system]`
     /// speaker, so the peer's words must not be able to stand on a line of
     /// their own as host text or as a controller's direction. Every visual

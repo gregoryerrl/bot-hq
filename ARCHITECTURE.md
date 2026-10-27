@@ -1121,7 +1121,8 @@ Idempotency shares `delegated_messages` under a namespaced key
 both grants never gets a controller `send` back for a relay retry or the
 reverse; a retry re-summons an unread row and never writes a second.
 Refused, each refusal audited (`peer_send` / `peer_message_status` in
-`application_control_audit`): the caller's own session, a missing or closed
+`application_control_audit`; a call that fails the grant or Pause check is
+denied before the audit row, as for `app_control`): the caller's own session, a missing or closed
 target, a target that holds a controller (an enabled participant whose snapshot
 carries `control_bot_hq`) unless it opted in — `sessions.accepts_relay` (0114),
 set by its controller through `app_control admin set_session_relay` or by the
