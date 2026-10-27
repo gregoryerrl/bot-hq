@@ -99,6 +99,17 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- A managed helper now reasons at its parent's recorded effort unless the task
+  names one (`effort`: low, medium, high, xhigh or max); until now every helper
+  ran at the Claude CLI's built-in default while its parent ran at `max`, the
+  one way delegation could quietly lower the quality behind the parent's
+  output. Each helper's effort is recorded in the helpers document, a retry of
+  a batch recorded before the field existed still finds it, and Codex now
+  accepts `xhigh` (the level an ultracode parent records) for helpers and
+  participants alike instead of silently sending no effort. The brief every
+  helper reads also demands the exact search behind any claim of absence or
+  completeness, and the tool tells the parent to re-run — and widen — that
+  search: verifying citations catches a helper's wrong claims, not its misses.
 - A gated or direct host command now starts with SIGINT and SIGQUIT at their
   defaults whatever launched bot-hq. A process started as a shell background
   job (`cmd &` in a script) has those two signals ignored, the ignore survives

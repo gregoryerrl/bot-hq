@@ -246,17 +246,20 @@ pub fn debug_codex_command(cfg: &SpawnConfig, codex: &CodexSpawn) -> Vec<String>
     out
 }
 
-/// bot-hq's effort knob (`low|medium|high|max`, the claude vocabulary) on
-/// Codex's scale: the same four names exist — `model/list` on 0.163.0
+/// bot-hq's effort knob (`low|medium|high|xhigh|max`, the claude vocabulary)
+/// on Codex's scale: the same five names exist — `model/list` on 0.163.0
 /// advertises `low, medium, high, xhigh, max, ultra` for both `gpt-6-astra`
 /// and `gpt-6.1-sol` (measured, s-de77e2f0; an unadvertised value fails
 /// every `turn/start`) — and `ultra` (automatic task delegation) is never
-/// sent.
+/// sent. `xhigh` joined on 2026-10-27 (eyes-2, 6608e42e): it is what an
+/// ultracode parent records, and a managed helper inheriting it was sent no
+/// effort at all while its result still reported `xhigh`.
 pub fn codex_effort(effort: Option<&str>) -> Option<&'static str> {
     match effort?.trim().to_ascii_lowercase().as_str() {
         "low" => Some("low"),
         "medium" => Some("medium"),
         "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
         "max" => Some("max"),
         _ => None,
     }

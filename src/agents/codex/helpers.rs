@@ -262,6 +262,41 @@ for line in sys.stdin:
         assert!(done); assert_eq!(results,vec![false,true]);
     }
 
+    /// eyes-2 blocker 6608e42e: the effort a helper is given reaches the
+    /// actual `turn/start` — `xhigh` included, the level an ultracode parent
+    /// records, which `codex_effort` used to drop while the result still
+    /// reported it.
+    #[tokio::test]
+    async fn helper_turn_start_carries_the_configured_effort_including_xhigh() {
+        for effort in ["xhigh", "max", "low"] {
+            let dir=tempfile::tempdir().unwrap();
+            let mut cfg=fixture(dir.path(),&format!(r#"#!/usr/bin/env python3
+import sys,json
+def send(v): print(json.dumps(v),flush=True)
+for line in sys.stdin:
+ q=json.loads(line); method=q.get('method'); p=q.get('params',{{}})
+ if method=='initialize': send({{'id':q['id'],'result':{{'userAgent':'fixture/1'}}}})
+ elif method=='config/read': send({{'id':q['id'],'result':{{'config':{{'mcp_servers':{{}}}}}}}})
+ elif method=='thread/start': send({{'id':q['id'],'result':{{'thread':{{'id':'helper-thread'}},'sandbox':{{'type':'readOnly'}},'approvalPolicy':'never'}}}})
+ elif method=='mcpServerStatus/list': send({{'id':q['id'],'result':{{'data':[],'nextCursor':None}}}})
+ elif method=='experimentalFeature/list': send({{'id':q['id'],'result':{{'data':[{{'name':name,'enabled':False}} for name in ['view_image','shell_tool','hooks','apps','plugins','memories','multi_agent','multi_agent_v2']],'nextCursor':None}}}})
+ elif method=='turn/start':
+  assert p.get('effort')=='{effort}', p
+  send({{'id':q['id'],'result':{{'turn':{{'id':'turn1'}}}}}})
+  send({{'method':'turn/completed','params':{{'threadId':'helper-thread','turn':{{'id':'turn1','status':'completed'}}}}}})
+"#));
+            cfg.overrides.effort=Some(effort.into());
+            let mut handle=spawn_codex_helper(cfg,"fixture brief".into()).await.unwrap();
+            let done=tokio::time::timeout(Duration::from_secs(10),async {
+                while let Some(e)=handle.event_rx.recv().await {
+                    match e {AgentEvent::TurnComplete{is_error,..}=>return !is_error,AgentEvent::Exited(_)=>return false,_=>{}}
+                } false
+            }).await.unwrap();
+            handle.stop_and_wait(Duration::from_secs(5)).await.unwrap();
+            assert!(done,"effort {effort} did not reach turn/start as sent");
+        }
+    }
+
     #[tokio::test]
     async fn helper_refuses_resource_only_or_connected_servers_before_model_work() {
         for (field,value) in [

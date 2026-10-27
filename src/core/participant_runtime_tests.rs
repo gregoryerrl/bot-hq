@@ -331,6 +331,77 @@ async fn helpers_start_once_collect_transcripts_and_do_not_join_the_roster() {
     f.end().await;
 }
 
+/// EYES advisories ac2c2f31 / 1bea6602 (2026-10-27): a helper reasons at its
+/// PARENT's recorded effort unless the task picks one, so delegation never
+/// quietly lowers the effort behind the parent's output; and its brief demands
+/// the exact search behind every claim of absence, because citations catch
+/// wrong claims, not misses.
+#[tokio::test]
+async fn helpers_inherit_the_parents_effort_and_are_told_to_show_their_searches() {
+    let mut f=Fixture::with_database(false,false).await;
+    sqlx::query("UPDATE roles SET capabilities=json_insert(capabilities,'$[#]','delegate_tasks') WHERE id=?").bind(f.rows[0].role_id).execute(f.state.storage.pool()).await.unwrap();
+    sqlx::query("UPDATE session_participants SET capabilities=json_insert(capabilities,'$[#]','delegate_tasks'), effort_at_spawn='max' WHERE id=?").bind(f.rows[0].id).execute(f.state.storage.pool()).await.unwrap();
+    let (tx,mut spawned)=mpsc::unbounded_channel();
+    f.state.helpers.set_spawner(Arc::new(move |cfg,brief| {
+        let tx=tx.clone(); Box::pin(async move {
+            let (handle,seat)=fake_agent(&cfg.session_id,&cfg.agent_name);
+            let instructions=std::fs::read_to_string(&cfg.system_prompt_path).unwrap();
+            tx.send((cfg.overrides.effort.clone(),instructions,brief,seat)).unwrap(); Ok(handle)
+        })
+    }));
+    f.state.storage.post_to_channel("s1","user",None,"text","Investigate using helpers.",None).await.unwrap();
+    f.ring.send(SequencerCommand::UserMessage {mentions:vec![],restarts_rotation:true}).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3),f.seats[0].input.recv()).await.unwrap().unwrap();
+    // An effort outside the CLI's set is the caller's error, before any spawn.
+    let bad=serde_json::json!({"action":"start","request_id":"bad","tasks":[{"goal":"g","files":[],"expected_evidence":"e","model_id":"old","effort":"ultra"}],"timeout_secs":30});
+    assert!(helper_rpc(&f.state,bad).await.unwrap_err().to_string().contains("effort must be one of"));
+    // Two helpers in one batch: the first inherits `max`, the second picked `low`.
+    let request=serde_json::json!({"action":"start","request_id":"effort","tasks":[
+        {"goal":"inherit","files":["source.rs"],"expected_evidence":"path:line","model_id":"old"},
+        {"goal":"picked","files":["source.rs"],"expected_evidence":"path:line","model_id":"old","effort":"low"}],"timeout_secs":30});
+    helper_rpc(&f.state,request).await.unwrap();
+    let mut seen=std::collections::BTreeMap::new(); let mut seats=vec![];
+    for _ in 0..2 {
+        let (effort,instructions,brief,seat)=tokio::time::timeout(Duration::from_secs(3),spawned.recv()).await.unwrap().unwrap();
+        assert!(instructions.contains("state the exact search behind it") && instructions.contains("a claim without its search is an opinion"), "{instructions}");
+        let goal=serde_json::from_str::<serde_json::Value>(&brief).unwrap()["goal"].as_str().unwrap().to_string();
+        seen.insert(goal,effort); seats.push(seat);
+    }
+    assert_eq!(seen.get("inherit").cloned().flatten().as_deref(),Some("max"),"the parent's recorded effort is the default: {seen:?}");
+    assert_eq!(seen.get("picked").cloned().flatten().as_deref(),Some("low"),"a task's own pick wins: {seen:?}");
+    for seat in &seats {
+        seat.events.send(AgentEvent::Text("source.rs:1 evidence".into())).await.unwrap();
+        seat.events.send(AgentEvent::TurnComplete {stop_reason:None,subtype:Some("success".into()),is_error:false,api_error_status:None,context:crate::agents::spawn::ContextReport::none(crate::agents::spawn::ContextVerdict::NoUsage)}).await.unwrap();
+    }
+    let result=helper_rpc(&f.state,serde_json::json!({"action":"status","request_id":"effort","wait_secs":5})).await.unwrap();
+    assert_eq!(result["status"],"completed");
+    let efforts: Vec<_>=result["result"]["helpers"].as_array().unwrap().iter().map(|h|h["effort"].as_str().map(str::to_string)).collect();
+    assert!(efforts.contains(&Some("max".into())) && efforts.contains(&Some("low".into())), "the helpers document records each helper's effort: {efforts:?}");
+    f.end().await;
+}
+
+/// eyes-2 blocker 813b097d: a batch recorded before `HelperTask.effort`
+/// existed hashed `[[{goal,files,expected_evidence,model_id}],timeout]`; a
+/// retry of the identical request must still find it (and spawn nothing),
+/// while a request that now names an effort is different work.
+#[tokio::test]
+async fn a_retry_of_a_batch_recorded_before_the_effort_field_still_finds_it() {
+    use sha2::{Digest, Sha256};
+    let (f,mut spawned)=helper_fixture().await;
+    let legacy=r#"[[{"goal":"Inspect fixture","files":["source.rs"],"expected_evidence":"path:line","model_id":"old"}],30]"#;
+    let fingerprint=format!("{:x}",Sha256::digest(legacy.as_bytes()));
+    sqlx::query("INSERT INTO session_helper_batches(id,session_id,participant_id,request_id,fingerprint,owner_incarnation,owner_epoch,request_json,status,result_json,created_at,finished_at) VALUES('legacy-batch','s1',?,'legacy',?,'old-incarnation',1,?,'completed',?,'2026-10-26T15:00:00.000Z','2026-10-26T15:04:00.000Z')")
+        .bind(f.rows[0].id).bind(&fingerprint).bind(legacy).bind(r#"{"parent":"hands","helpers":[{"status":"completed","output":"legacy finding"}]}"#)
+        .execute(f.state.storage.pool()).await.unwrap();
+    let replay=helper_rpc(&f.state,helper_start("legacy")).await.unwrap();
+    assert_eq!((replay["batch_id"].as_str(),replay["status"].as_str()),(Some("legacy-batch"),Some("completed")),"{replay}");
+    assert_eq!(replay["result"]["helpers"][0]["output"],"legacy finding");
+    assert!(spawned.try_recv().is_err(),"a retry never spawns");
+    let mut with_effort=helper_start("legacy"); with_effort["tasks"][0]["effort"]="low".into();
+    assert!(helper_rpc(&f.state,with_effort).await.unwrap_err().to_string().contains("different batch"));
+    f.end().await;
+}
+
 #[tokio::test]
 async fn helpers_preserve_final_findings_after_long_commentary_and_file_results() {
     let (f,mut spawned)=helper_fixture().await;
