@@ -1034,9 +1034,71 @@ the catch-up from landing twice; a lagged receiver writes a `journal_gap` row
 with the count; a reader sees the discontinuity. The chatty kinds (`message`, `activity`) are journaled only
 while some enabled participant of an open session holds `control_bot_hq`
 (re-read every 30 s and on roster/session changes); attention kinds always are.
-Watches that wake a controller (an explicit, scoped acknowledgement; a wake
-modelled on the temporary halt's discipline), relay and shared-webview control
-remain pending.
+`watch` / `ack` / `unwatch` / `watches` (`control_watches`, 0113;
+`signaling::bridge::control_watches`) are a controller's standing
+subscriptions over that journal: `targets` (NULL = every other session that
+holds no controller — two controllers watching "everything" never see each
+other; the controller's own session is refused), `kinds` (NULL = the attention
+kinds `decision_pending`, `halt_declared`, `gate_urgent`, `health`,
+`session_closed`; `message`/`activity` wake only when named), `wake`, a
+`cursor` moved only by the explicit per-watch `ack` (forward, clamped to the
+journal's end; a read never acknowledges; a retry of `watch` keeps it), and a
+`pending_since` armed once with the first unacknowledged match. The journal
+task hands every row it writes to the wake engine; a wake is
+`fire_temporary_halt`'s discipline, not a `Summon` (a summons queues behind a
+declared halt): a system row in the controller's session naming the watch and
+the event (written with its `delegated_messages` link `watch:<watch>:<event>`
+in ONE transaction, so a losing attempt leaves no orphan notice and the
+journal files it `watch_wake` — a kind no watch can arm), the controller's own
+halt cleared by `halt_id`, the awaiting flag dropped, and the ring's
+`HostWake { participant, watch, pending }` — NEVER a `UserMessage`, which a
+paused ring reads as the user's release. The sequencer DROPS a `HostWake` read
+while paused (not held, so a Pause that lands after the bridge's checks wins
+and nothing replays on resume), withholds it while a turn is live or winding
+down, during boot, under an open gate, during a release or roster boundary,
+and while the session's halt slot in storage holds a halt (one declared after
+the wake's decision stands — the ring, which owns the deal, is the last
+authority); before any of that it validates the queued wake against the watch
+AS CLAIMED (present, wake on, same pending event, same undelivered claim, same
+participant) and the controller's current grant, and dedupes it by its own
+durable receipt — a notice already delivered to the controller in a dealt turn
+(`participant_deliveries`) is a wake already delivered, whatever a lost marker
+says — so a stale, duplicate, acknowledged, unwatched or revoked wake deals
+nothing; a receipt or notice it cannot READ withholds, never deals (unknown is
+not "not delivered"); otherwise it releases the ring with the participant
+named. Delivery is the receipt alone: after the deal the ring reports
+`watch_wake_consumed` only when the notice now has its `participant_deliveries`
+row, and the bridge marks the claim delivered only on that receipt — a drain
+that stopped or failed before the notice reached the controller leaves the
+claim standing for a later attempt; `watch_wake_withheld` hands a claim back,
+fenced by the attempt's lease stamp so a stale outcome cannot undo a
+successor's claim. A halt declared by a build
+before `halt_id` existed is cleared only if its whole observed slot still
+stands (`clear_session_halt_if_legacy`), never a newer one. A wake is decided, claimed,
+noticed and handed to the ring in that order; the claim is INTENT
+(`woke_for`), the ring's acknowledgement the delivery (`wake_delivered_at`),
+and one delivery attempt at a time holds a 60 s lease (`wake_attempt_at`) so
+the journal task, the scheduler tick and an API re-arm racing to resume the
+same undelivered wake make one attempt; a delivery cut off by a crash is
+resumed by the next retry without a second notice. The look that decides —
+the grant (a confirmed loss deletes the watch and journals `watch_dropped`; a
+read failure keeps it pending), a ring, no Pause, no busy tracker, no pending
+gate, the halt slot by id — is taken again after the notice, before the hand
+to the ring: a changed world withholds and hands the claim back, and the halt
+the decision found is the only halt it may clear — one declared after it, by
+anyone, stands and the wake waits for a later look. A refused wake stays
+pending and is retried on the controller's own session changes, on its ring's
+registration, on every scheduler tick (`retry_all_watches`, which also re-arms
+idle watches from their cursors by paging the journal to its end — a row that
+committed before the engine saw it is found there), at the journal's start and
+after a `journal_gap` (both of which also reconcile pending decisions and
+standing halts into the journal), and — for an attention-kind undelivered wake
+only, by the kind kept on the watch — by the boot respawn
+(`respawn_watching_controllers`), which runs once the journal reports its
+start, however long that takes; the temporary halts' respawn does not wait for
+it. One wake per watch per `WAKE_MIN_GAP` (60 s) rate-limits, without ending,
+the loop two controllers can build by naming each other's sessions with
+`message`/`activity`.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

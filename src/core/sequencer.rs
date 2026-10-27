@@ -1308,6 +1308,30 @@ pub enum SequencerCommand {
     /// The pump sends it after the backoff, having posted the nudge row the
     /// summoned participant will read.
     Summon { participant_id: i64 },
+    /// **A watch's wake (Plan 5c-2): a host release that is never human
+    /// input.** The control-event journal decided that `participant_id` — a
+    /// controller — should take a turn for the pending event `pending` of
+    /// watch `watch_id`, cleared the halt it had decided against, and sends
+    /// this. It is NOT a [`UserMessage`](Self::UserMessage): a fresh
+    /// `UserMessage` read while paused releases the pause, and a wake must
+    /// never do that. Read while paused it is DROPPED, not held (a Pause that
+    /// lands after the bridge's checks wins; the bridge is told and the wake
+    /// waits for a later look). Admitted only when the ring is idle — no live
+    /// or winding-down turn, no boot hold, no open gate — and the session's
+    /// halt slot is empty in storage (a halt declared after the wake's
+    /// decision stands; the ring, which owns the deal, is the authority that
+    /// sees it last). Then it releases like a user message naming the
+    /// participant. Before any of that the ring validates the queued wake
+    /// against the watch AS CLAIMED (present, wake on, same pending event,
+    /// same undelivered claim, same participant) and the controller's current
+    /// grant, and dedupes it by its own durable receipt — a notice already
+    /// delivered to the controller in a dealt turn is a wake already
+    /// delivered — so a stale, duplicate or cancelled wake deals nothing.
+    /// Either way the bridge hears the outcome (`watch_wake_consumed` /
+    /// `watch_wake_withheld`, the latter fenced by `attempt`, the claim's lease
+    /// stamp), which is what turns the wake's claim into a delivery — or hands
+    /// it back.
+    HostWake { participant_id: i64, watch_id: i64, pending: i64, attempt: String },
     /// Stop: hold the cycle where it stands, hand out no further turns.
     ///
     /// **The turn in flight stays in flight.** This is not [`halt`] and must not
@@ -2176,7 +2200,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
             }
         }
         if state.paused && !boundary_completion
-            && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume) {
+            && !matches!(cmd, SequencerCommand::Pause | SequencerCommand::Resume | SequencerCommand::HostWake { .. }) {
             debug!(
                 session = %deps.session_id,
                 held = state.held.len() + 1,
@@ -2265,6 +2289,111 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     continue;
                 }
                 release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation).await;
+            }
+            SequencerCommand::HostWake { participant_id, watch_id, pending, attempt } => {
+                // The wake as the bridge claimed it, read now: a watch removed,
+                // acknowledged, disabled or re-armed since, a claim handed back
+                // or already delivered, or a wake for the wrong participant,
+                // deals nothing.
+                let claim = match deps.storage.control_watch_by_id(watch_id).await {
+                    Ok(Some(w)) if w.wake && w.participant_id == participant_id && w.pending_since == Some(pending)
+                        && w.woke_for == Some(pending) && w.wake_delivered_at.is_none() => Ok(w),
+                    Ok(Some(w)) if w.wake_delivered_at.is_some() && w.woke_for == Some(pending) => Err("already delivered"),
+                    Ok(Some(_)) => Err("the wake is stale"),
+                    Ok(None) => Err("the watch is gone"),
+                    Err(_) => Err("watch read failed"),
+                };
+                let claim = match claim {
+                    Ok(claim) => claim,
+                    Err(why) => {
+                        debug!(session = %deps.session_id, watch_id, pending, why, "sequencer: a watch wake was not current");
+                        continue;
+                    }
+                };
+                // The ring's own receipt: a notice already dealt to the
+                // controller is a wake already delivered, whatever a lost
+                // marker says (a crash between the deal and the marker). An
+                // unreadable receipt, or a wake with no notice, is UNKNOWN —
+                // never "not delivered": it withholds (eyes-2 `4fe7a60d`).
+                let notice = match deps.storage.wake_notice_message_id(&claim, pending).await {
+                    Ok(Some(notice)) => notice,
+                    Ok(None) => {
+                        debug!(session = %deps.session_id, watch_id, pending, "sequencer: a watch wake without its notice; withheld");
+                        if let Some(bridge) = &deps.bridge {
+                            bridge.watch_wake_withheld(&deps.session_id, watch_id, pending, &attempt, "no notice").await;
+                        }
+                        continue;
+                    }
+                    Err(_) => {
+                        debug!(session = %deps.session_id, watch_id, pending, "sequencer: the watch wake's notice could not be read; withheld");
+                        if let Some(bridge) = &deps.bridge {
+                            bridge.watch_wake_withheld(&deps.session_id, watch_id, pending, &attempt, "notice lookup failed").await;
+                        }
+                        continue;
+                    }
+                };
+                match deps.storage.wake_notice_delivered(participant_id, notice).await {
+                    Ok(true) => {
+                        debug!(session = %deps.session_id, watch_id, pending, "sequencer: the watch wake's notice was already dealt; not again");
+                        if let Some(bridge) = &deps.bridge {
+                            bridge.watch_wake_consumed(&deps.session_id, watch_id, pending).await;
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(_) => {
+                        debug!(session = %deps.session_id, watch_id, pending, "sequencer: the watch wake's receipt could not be read; withheld");
+                        if let Some(bridge) = &deps.bridge {
+                            bridge.watch_wake_withheld(&deps.session_id, watch_id, pending, &attempt, "receipt read failed").await;
+                        }
+                        continue;
+                    }
+                }
+                let granted = deps.storage.controller_actor(&claim.session_id, &claim.slug).await.is_ok();
+                let standing_halt = match deps.storage.session_halt(&deps.session_id).await {
+                    Ok(halt) => halt.is_some(),
+                    // Unknown is not "no halt": the wake waits.
+                    Err(_) => true,
+                };
+                let withheld = if !granted {
+                    Some("the controller's grant is not current")
+                } else if state.paused || deps.activity.as_ref().is_some_and(|a| a.holds_wakes()) {
+                    Some("paused")
+                } else if state.boot_hold {
+                    Some("boot")
+                } else if state.winding_down.is_some() || state.has_live_turn() {
+                    Some("a turn is live")
+                } else if !state.open_gates.is_empty() {
+                    Some("a gate is open")
+                } else if state.pause_releases_pending != 0 || state.boundary.is_some() {
+                    Some("a release is in progress")
+                } else if standing_halt {
+                    Some("a halt stands")
+                } else {
+                    None
+                };
+                if let Some(why) = withheld {
+                    debug!(session = %deps.session_id, watch_id, pending, why, "sequencer: a watch wake was withheld");
+                    if let Some(bridge) = &deps.bridge {
+                        bridge.watch_wake_withheld(&deps.session_id, watch_id, pending, &attempt, why).await;
+                    }
+                    continue;
+                }
+                debug!(session = %deps.session_id, participant_id, watch_id, pending, "sequencer: a watch wake releases the ring");
+                release_ring(&deps, &mut rx, &mut state, vec![participant_id], true).await;
+                // Returning is not delivering: the drain may have stopped or
+                // failed before the notice reached the controller. Only the
+                // receipt says the wake was delivered; otherwise the claim stays
+                // for a later attempt, and an unreadable receipt decides nothing.
+                match deps.storage.wake_notice_delivered(participant_id, notice).await {
+                    Ok(true) => {
+                        if let Some(bridge) = &deps.bridge {
+                            bridge.watch_wake_consumed(&deps.session_id, watch_id, pending).await;
+                        }
+                    }
+                    Ok(false) => debug!(session = %deps.session_id, watch_id, pending, "sequencer: the watch wake's deal did not deliver the notice; the claim stays for a later attempt"),
+                    Err(_) => debug!(session = %deps.session_id, watch_id, pending, "sequencer: the watch wake's receipt could not be read after the deal; the claim stays"),
+                }
             }
             SequencerCommand::MessageStaged if state.boot_hold => {
                 // No holder during boot, but no boundary either: every pump is
@@ -6875,6 +7004,162 @@ mod tests {
         assert_eq!(seats[1].expect(3).await, vec!["go", "a spoke", "c spoke"], "then the rotation resumes at B");
         drop(tx);
         assert!(exited(task).await);
+    }
+
+    /// Plan 5c-2: a watch's `HostWake` is never human input. Read while
+    /// paused it is DROPPED — it does not release the pause and is not held
+    /// for the resume; while a turn is live it is withheld; while the storage
+    /// halt slot holds a halt (declared after the wake's decision) it is
+    /// withheld, the ring being the last authority on its own stop; a wake
+    /// that is not the watch's current claim (stale, acknowledged, unwatched,
+    /// already delivered) or whose controller lost the grant deals nothing;
+    /// idle, with nothing standing and the claim current, it deals the named
+    /// participant its turn and reports the delivery; a duplicate of a dealt
+    /// wake deals nothing more (eyes-2 `09ec1270`).
+    #[tokio::test]
+    async fn a_host_wake_is_dropped_under_pause_withheld_by_a_standing_halt_and_deals_when_idle() {
+        let (mut deps, storage, mut seats) = ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        // The bridge the callbacks reach, with this storage attached.
+        let bridge = crate::signaling::SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        deps.bridge = Some(Arc::clone(&bridge));
+        // B is a controller with a watch whose wake for event 7 is claimed.
+        sqlx::query("UPDATE roles SET capabilities = '[\"control_bot_hq\"]' WHERE slug = 'eyes'").execute(storage.pool()).await.unwrap();
+        sqlx::query("UPDATE session_participants SET capabilities = '[\"control_bot_hq\"]', role_id = (SELECT id FROM roles WHERE slug = 'eyes') WHERE id = ?").bind(b).execute(storage.pool()).await.unwrap();
+        let b_slug: String = sqlx::query_scalar("SELECT slug FROM session_participants WHERE id = ?").bind(b).fetch_one(storage.pool()).await.unwrap();
+        let watch = storage.upsert_control_watch("s1", b, &b_slug, "w", None, None, true, 0).await.unwrap();
+        for _ in 0..7 {
+            storage.insert_control_event(&crate::storage::NewControlEvent { session_id: "t".into(), kind: "decision_pending".into(), ..Default::default() }).await.unwrap();
+        }
+        assert!(storage.arm_control_watch(watch.id, 7, "decision_pending").await.unwrap());
+        assert!(storage.claim_control_watch_wake(watch.id, 7).await.unwrap());
+        let attempt = storage.control_watch_by_id(watch.id).await.unwrap().unwrap().wake_attempt_at.unwrap();
+        storage.post_wake_notice("s1", b, &format!("watch:{}:7", watch.id), "[System: watch w woke b]").await.unwrap().unwrap();
+        let wake = |pending: i64| SequencerCommand::HostWake { participant_id: b, watch_id: watch.id, pending, attempt: attempt.clone() };
+        post(&storage, "user", None, "hello").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        // Paused: the wake is dropped; a later Resume deals nothing from it.
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, wake(7)).await;
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+        send(&tx, SequencerCommand::Resume).await;
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+        // Not the current claim: a stale pending, or the watch acknowledged away.
+        send(&tx, wake(6)).await;
+        seats[1].quiet().await;
+        // A standing halt in storage: withheld, even though the ring itself is idle.
+        storage.declare_session_halt("s1", &b_slug, "waiting").await.unwrap();
+        send(&tx, wake(7)).await;
+        seats[1].quiet().await;
+        assert_eq!(storage.control_watch_by_id(watch.id).await.unwrap().unwrap().woke_for, None, "withheld: the claim was handed back to the engine");
+        storage.claim_control_watch_wake(watch.id, 7).await.unwrap();
+        let attempt2 = storage.control_watch_by_id(watch.id).await.unwrap().unwrap().wake_attempt_at.unwrap();
+        // A stale attempt's outcome cannot touch the new claim.
+        bridge.watch_wake_withheld("s1", watch.id, 7, &attempt, "stale").await;
+        assert_eq!(storage.control_watch_by_id(watch.id).await.unwrap().unwrap().woke_for, Some(7), "fenced by the lease stamp");
+        // The halt released in storage (as the bridge does before it sends): the wake deals B its turn.
+        storage.clear_session_halt("s1").await.unwrap();
+        send(&tx, SequencerCommand::HostWake { participant_id: b, watch_id: watch.id, pending: 7, attempt: attempt2.clone() }).await;
+        let dealt = seats[1].expect(2).await;
+        assert_eq!(dealt, vec!["[System: watch w woke b]", "hello"], "idle, unhalted, claim current: the wake deals the named participant its backlog, notice included");
+        seats[0].quiet().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let w = storage.control_watch_by_id(watch.id).await.unwrap().unwrap();
+        assert!(w.wake_delivered_at.is_some(), "the ring's acknowledgement is the delivery: {w:?}");
+        // A duplicate of the dealt wake (a resend after a lost marker) deals
+        // nothing more: the claim is delivered, and the ring's own receipt
+        // says the notice was dealt.
+        post(&storage, "participant", Some(&b_slug), "b spoke").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 1, ending: SPOKE }).await;
+        assert_eq!(seats[0].expect(3).await, vec!["[System: watch w woke b]", "hello", "b spoke"], "the rotation steps to A as after any completion");
+        post(&storage, "participant", Some("a"), "a spoke").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 2, ending: SPOKE }).await;
+        seats[1].expect(1).await;
+        post(&storage, "participant", Some(&b_slug), "b again").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 3, ending: SPOKE }).await;
+        seats[0].expect(1).await;
+        post(&storage, "participant", Some("a"), "a again").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 4, ending: SPOKE }).await;
+        seats[1].expect(1).await;
+        post(&storage, "participant", Some(&b_slug), "b done").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 5, ending: SPOKE }).await;
+        seats[0].expect(1).await;
+        post(&storage, "participant", Some("a"), "a done").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 6, ending: SPOKE }).await;
+        seats[1].expect(1).await;
+        storage.declare_session_halt("s1", &b_slug, "all done").await.unwrap();
+        send(&tx, SequencerCommand::HaltDeclared { participant_id: Some(b) }).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 7, ending: TurnEnding::Done }).await;
+        seats[0].quiet().await;
+        // Even with its marker wiped (a lost write), the receipt dedupes.
+        sqlx::query("UPDATE control_watches SET wake_delivered_at = NULL WHERE id = ?").bind(watch.id).execute(storage.pool()).await.unwrap();
+        storage.clear_session_halt("s1").await.unwrap();
+        send(&tx, SequencerCommand::HostWake { participant_id: b, watch_id: watch.id, pending: 7, attempt: attempt2.clone() }).await;
+        seats[1].quiet().await;
+        seats[0].quiet().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(storage.control_watch_by_id(watch.id).await.unwrap().unwrap().wake_delivered_at.is_some(), "the receipt restored the marker instead of dealing again");
+        // A deal that cannot deliver (B's stdin is gone): `release_ring`
+        // returns, the notice never reached B, so the marker stays NULL and
+        // the claim stays for a later attempt (eyes-2 `4fe7a60d`).
+        storage.ack_control_watch(watch.id, 7, 7).await.unwrap();
+        storage.insert_control_event(&crate::storage::NewControlEvent { session_id: "t".into(), kind: "gate_urgent".into(), ..Default::default() }).await.unwrap();
+        assert!(storage.arm_control_watch(watch.id, 8, "gate_urgent").await.unwrap());
+        assert!(storage.claim_control_watch_wake(watch.id, 8).await.unwrap());
+        let attempt_gone = storage.control_watch_by_id(watch.id).await.unwrap().unwrap().wake_attempt_at.unwrap();
+        storage.post_wake_notice("s1", b, &format!("watch:{}:8", watch.id), "[System: watch w woke b again]").await.unwrap().unwrap();
+        storage.clear_session_halt("s1").await.unwrap();
+        let seat_b = seats.remove(1);
+        drop(seat_b);
+        send(&tx, SequencerCommand::HostWake { participant_id: b, watch_id: watch.id, pending: 8, attempt: attempt_gone }).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let w = storage.control_watch_by_id(watch.id).await.unwrap().unwrap();
+        assert_eq!((w.woke_for, w.wake_delivered_at.clone()), (Some(8), None), "returning is not delivering: {w:?}");
+        assert!(storage.session_halt("s1").await.unwrap().is_some(), "the failed deal declared the host's halt");
+        // A revoked grant: a current claim still deals nothing (B's seat is
+        // gone, so a deal would also fail; the grant check comes first).
+        storage.ack_control_watch(watch.id, 8, 8).await.unwrap();
+        storage.insert_control_event(&crate::storage::NewControlEvent { session_id: "t".into(), kind: "health".into(), ..Default::default() }).await.unwrap();
+        assert!(storage.arm_control_watch(watch.id, 9, "health").await.unwrap());
+        assert!(storage.claim_control_watch_wake(watch.id, 9).await.unwrap());
+        let attempt3 = storage.control_watch_by_id(watch.id).await.unwrap().unwrap().wake_attempt_at.unwrap();
+        storage.post_wake_notice("s1", b, &format!("watch:{}:9", watch.id), "[System: watch w woke b once more]").await.unwrap().unwrap();
+        storage.clear_session_halt("s1").await.unwrap();
+        sqlx::query("UPDATE roles SET capabilities = '[]' WHERE slug = 'eyes'").execute(storage.pool()).await.unwrap();
+        send(&tx, SequencerCommand::HostWake { participant_id: b, watch_id: watch.id, pending: 9, attempt: attempt3.clone() }).await;
+        seats[0].quiet().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(storage.control_watch_by_id(watch.id).await.unwrap().unwrap().woke_for, None, "withheld for the grant: claim handed back");
+        // An unreadable receipt withholds too — never a deal on unknown evidence.
+        sqlx::query("UPDATE roles SET capabilities = '[\"control_bot_hq\"]' WHERE slug = 'eyes'").execute(storage.pool()).await.unwrap();
+        storage.claim_control_watch_wake(watch.id, 9).await.unwrap();
+        let attempt4 = storage.control_watch_by_id(watch.id).await.unwrap().unwrap().wake_attempt_at.unwrap();
+        sqlx::query("DROP TABLE participant_deliveries").execute(storage.pool()).await.unwrap();
+        send(&tx, SequencerCommand::HostWake { participant_id: b, watch_id: watch.id, pending: 9, attempt: attempt4 }).await;
+        seats[0].quiet().await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(storage.control_watch_by_id(watch.id).await.unwrap().unwrap().woke_for, None, "withheld on an unreadable receipt: claim handed back, nothing dealt");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// The pause gate names the exemption: a `HostWake` is never held.
+    #[test]
+    fn a_host_wake_is_exempt_from_the_pause_hold_and_never_a_user_message() {
+        let src = include_str!("sequencer.rs");
+        let prod = &src[..src.find("#[cfg(test)]").expect("tests follow production")];
+        assert!(prod.contains("SequencerCommand::Pause | SequencerCommand::Resume | SequencerCommand::HostWake { .. })"), "the pause hold exempts HostWake so it is dropped, never replayed");
+        let arm = prod.split("SequencerCommand::HostWake { participant_id, watch_id, pending, attempt } => {").nth(1).expect("the HostWake arm");
+        let arm = &arm[..arm.find("SequencerCommand::MessageStaged if state.boot_hold").expect("the next arm")];
+        assert!(arm.contains("state.paused") && arm.contains("holds_wakes()"), "a Pause is checked in the arm itself");
+        assert!(arm.contains("session_halt(&deps.session_id)"), "the storage halt slot is the ring's own authority check");
+        assert!(arm.contains("control_watch_by_id(watch_id)") && arm.contains("wake_notice_delivered(") && arm.contains("controller_actor("), "the claim, the receipt and the grant are checked before the deal");
+        assert!(arm.contains("watch_wake_withheld") && arm.contains("watch_wake_consumed"), "the bridge hears the outcome either way");
+        assert!(!arm.contains("UserMessage"), "a wake never becomes a UserMessage");
     }
 
     /// rc3 **D17**, the whole of it: a mention hands the next turn to the named

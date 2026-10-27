@@ -2169,6 +2169,9 @@ impl SignalingBridge {
                 let Some(bridge) = weak.upgrade() else { break };
                 bridge.run_due_scheduled_gates().await;
                 bridge.run_reviewed_auto_publications().await;
+                // Plan 5c-2: a watch wake deferred for busyness, a gate or the
+                // rate limit fires here once nothing else prompts it.
+                bridge.retry_all_watches().await;
             }
         });
     }

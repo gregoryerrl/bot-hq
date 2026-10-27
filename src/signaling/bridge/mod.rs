@@ -39,6 +39,7 @@ pub(crate) mod application_control;
 pub(crate) mod application_admin;
 pub(crate) mod control_claim;
 pub(crate) mod control_events;
+pub(crate) mod control_watches;
 pub use action_gate::{
     command_from_file, validate_run_timeout, validate_run_window, validate_urgent_reason, GateRequest,
     GATE_HISTORY_DEFAULT,
@@ -634,6 +635,9 @@ pub struct SignalingBridge {
     /// refuses like a wrong secret does; see [`SignalingBridge::mcp_token_matches`]
     /// for why no legitimate caller can be in that state.
     mcp_tokens: std::sync::Mutex<HashMap<String, String>>,
+    /// Plan 5c-2: the least time between two wakes of one watch, in seconds
+    /// (`control_watches::WAKE_MIN_GAP`); a test shortens it.
+    pub(crate) watch_min_gap_secs: std::sync::atomic::AtomicU64,
     /// This launch's secret for the hook routes (`/hooks/pre-push`,
     /// `/hooks/tool-gate`), minted by `main.rs` and written 0600 to
     /// `<data_dir>/.local/hook-token` for the hook subprocesses to present.
@@ -757,6 +761,7 @@ impl SignalingBridge {
             pending: Mutex::new(HashMap::new()),
             violations,
             data_dir,
+            watch_min_gap_secs: std::sync::atomic::AtomicU64::new(control_watches::WAKE_MIN_GAP.as_secs()),
             session_projects: Mutex::new(HashMap::new()),
             doc_seen: Mutex::new(HashMap::new()),
             cl_write_log: std::sync::Mutex::new(HashMap::new()),
@@ -897,6 +902,9 @@ impl SignalingBridge {
         // instead of stranding (P1 — the strand path the durable design exists
         // to close).
         self.rearm_queued_outward_for(&session_id).await;
+        // Plan 5c-2: a controller's watch whose pending wake was refused for
+        // want of a ring fires now that there is one.
+        self.rearm_watches_for(&session_id).await;
     }
 
     /// Host-only scheduling primitive. The returned owner is tied to this

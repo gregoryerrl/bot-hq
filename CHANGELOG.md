@@ -39,7 +39,28 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   dropped broadcasts, both ride every page as `markers` whatever the filters,
   and `truncated` flags a cursor older than the 7-day / 50,000-row retention. The
   chatty kinds are journaled only while some session holds the
-  application-control grant. Watches that wake a controller come next.
+  application-control grant.
+- Application control gained `watch`, `ack`, `unwatch` and `watches`
+  (migration 0113): a controller subscribes to the journal — by default every
+  other session without a controller, for the attention kinds (a decision
+  parked, a halt declared, an urgent gate, a participant's health, a session
+  closed) — and, with `wake`, the first unacknowledged matching event wakes it
+  once: a system row names the watch and the event, its own halt is released
+  (never a newer one) and its ring is dealt, provided it is idle, not paused,
+  holds no pending gate and is still granted; a revoked grant drops the watch.
+  Acknowledging is explicit and per watch (`ack`, forward only); a read never
+  acknowledges. A watch never covers the controller's own session and a wake's
+  own rows never arm a watch, so two controllers watching everything do not
+  wake each other; naming each other's sessions for messages can still loop,
+  rate-limited to one wake per watch per minute. The wake is handed to the
+  ring as its own command, never as a user message: a paused ring drops it,
+  a ring with a live turn, an open gate or a standing halt withholds it, and
+  the ring's own acknowledgement is what counts as delivery, so a Pause, a
+  newer halt, a new turn or a revocation that lands late always wins and a
+  wake whose delivery was cut off is resumed, never repeated. A dormant
+  controller whose pending event is an attention kind is respawned at boot
+  like a temporary halt, once the journal has re-armed the watches from what
+  it kept.
 
 ### Fixed
 

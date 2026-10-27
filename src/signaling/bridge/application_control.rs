@@ -83,6 +83,25 @@ pub(crate) enum AppControlRequest {
         kinds: Option<Vec<String>>,
         limit: Option<usize>,
     },
+    /// Plan 5c-2: a standing subscription over the journal, optionally waking
+    /// the controller (`bridge::control_watches`).
+    Watch {
+        request_id: String,
+        sessions: Option<Vec<String>>,
+        kinds: Option<Vec<String>>,
+        #[serde(default)]
+        wake: bool,
+    },
+    /// The explicit, per-watch, monotonic acknowledgement — the only thing
+    /// that moves a watch's cursor and re-arms its wake.
+    Ack {
+        request_id: String,
+        up_to: i64,
+    },
+    Unwatch {
+        request_id: String,
+    },
+    Watches,
 }
 
 impl AppControlRequest {
@@ -108,6 +127,10 @@ impl AppControlRequest {
             Self::Document { session_id, .. } => ("document", Some(session_id)),
             Self::Audit { session_id, .. } => ("audit", session_id.as_deref()),
             Self::Events { .. } => ("events", None),
+            Self::Watch { .. } => ("watch", None),
+            Self::Ack { .. } => ("ack", None),
+            Self::Unwatch { .. } => ("unwatch", None),
+            Self::Watches => ("watches", None),
         }
     }
 }
@@ -173,6 +196,10 @@ impl SignalingBridge {
                 self.control_message_ticket(actor.clone(), proof, session_id.clone())
                     .await?,
             ),
+            // A watch is the controller's own state: the ticket names its own session.
+            AppControlRequest::Watch { .. } | AppControlRequest::Ack { .. } | AppControlRequest::Unwatch { .. } => Some(
+                self.control_message_ticket(actor.clone(), proof, source_session.to_string()).await?,
+            ),
             AppControlRequest::Answer {
                 expected_choice_sha256,
                 ..
@@ -236,6 +263,32 @@ impl SignalingBridge {
                 self.control_answer(&choice_id, picked, confirm_stale, claim.as_ref().unwrap())
                     .await
             }
+            // No `?` in these arms: a refusal must still reach the audit finish below.
+            AppControlRequest::Watch { request_id, sessions, kinds, wake } => match claim.as_ref().unwrap().check(self) {
+                Err(e) => Err(e),
+                Ok(()) => self.control_watch_upsert(&storage, &actor, &request_id, sessions, kinds, wake).await.map(|watch| {
+                    json!({"status":"watching", "watch": watch,
+                        "note":"cursor is the last acknowledged journal id; pending_since the first unacknowledged matching event (the wake, if asked, fires once for it when you are idle, unpaused, ungated and still granted); ack {request_id, up_to} moves the cursor forward and re-arms. sessions omitted = every other session without a controller; kinds omitted = decision_pending, halt_declared, gate_urgent, health, session_closed."})
+                }),
+            },
+            AppControlRequest::Ack { request_id, up_to } => match claim.as_ref().unwrap().check(self) {
+                Err(e) => Err(e),
+                Ok(()) => self
+                    .control_watch_ack(&storage, &actor, &request_id, up_to)
+                    .await
+                    .map(|watch| json!({"status":"acknowledged", "watch": watch})),
+            },
+            AppControlRequest::Unwatch { request_id } => match claim.as_ref().unwrap().check(self) {
+                Err(e) => Err(e),
+                Ok(()) => self
+                    .control_watch_remove(&storage, &actor, &request_id)
+                    .await
+                    .map(|removed| json!({"status": if removed {"removed"} else {"absent"}, "request_id": request_id})),
+            },
+            AppControlRequest::Watches => storage
+                .control_watches_for(actor.participant_id)
+                .await
+                .map(|watches| json!({"watches": watches})),
             read => self.control_read(&storage, read).await,
         }
         .and_then(|value| {
@@ -427,6 +480,7 @@ impl SignalingBridge {
                 let next = (rows.len() == 20).then(|| rows.last().unwrap().id);
                 json!({"rows":rows,"next_before_id":next})
             }
+            Watch { .. } | Ack { .. } | Unwatch { .. } | Watches => anyhow::bail!("watch operations are routed by the facade"),
             Events { since_id, sessions, kinds, limit } => {
                 anyhow::ensure!(since_id >= 0, "since_id must be 0 or a journal id");
                 let page = storage

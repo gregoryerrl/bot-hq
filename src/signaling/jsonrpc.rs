@@ -2534,7 +2534,7 @@ mod tests {
         let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":last,"sessions":["target"],"kinds":["health"],"limit":10})).await.unwrap());
         assert_eq!(page["result"]["events"].as_array().unwrap().len(), 0, "{page}");
         assert_eq!(page["result"]["markers"][0]["kind"], "journal_gap");
-        assert_eq!(page["result"]["markers"][0]["detail"], "3 bridge events were dropped before the journal read them");
+        assert!(page["result"]["markers"][0]["detail"].as_str().unwrap().starts_with("3 bridge events were dropped before the journal read them"), "{page}");
         let gap_id = page["result"]["markers"][0]["id"].as_i64().unwrap();
         assert_eq!(page["result"]["next_since_id"], gap_id);
         assert_eq!(page["result"]["scanned"], 1);
@@ -2550,6 +2550,86 @@ mod tests {
         assert!(tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":-1})).await.unwrap().contains("since_id"));
         // Without the grant the read is refused like every other action.
         assert!(tool(&bridge, caller(), "app_control", json!({"action":"events","since_id":0})).await.unwrap().contains("refused"));
+    }
+
+    /// Plan 5c-2 through the dispatcher: `watch` creates a subscription that
+    /// refuses the caller's own session, unknown kinds and a ninth watch; a
+    /// retry keeps the cursor; `events` never acknowledges; `ack` does — per
+    /// watch, forward only, clamped to the journal's end; `watches` lists;
+    /// `unwatch` removes; every call is audited; no grant, no watch.
+    #[tokio::test]
+    async fn driver_watches_are_explicit_and_acknowledged_per_watch() {
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let (bridge, storage) = two_role_session().await;
+        sqlx::query("UPDATE roles SET capabilities = '[\"control_bot_hq\"]' WHERE slug = 'hands'").execute(storage.pool()).await.unwrap();
+        sqlx::query("UPDATE session_participants SET capabilities = '[\"control_bot_hq\"]' WHERE session_id = 's1' AND slug = 'hands'").execute(storage.pool()).await.unwrap();
+        let mut driver = caller();
+        driver.capabilities = ResolvedCapabilities::Known(CapabilitySet::from_slugs(&["control_bot_hq"]));
+        // Writes need the authenticated HTTP caller (the registered token's
+        // proof) and a live controller runtime (its tracker).
+        bridge.register_mcp_token("s1", "hands", "secret-token");
+        driver.token_proof = bridge.mcp_token_proof("s1", "hands", Some("secret-token"));
+        let tracker = crate::core::activity::ActivityTracker::new("s1", Arc::new(std::sync::atomic::AtomicBool::new(false)), bridge.clone(), vec!["hands".into()]);
+        bridge.register_session_activity("s1".into(), Arc::downgrade(&tracker)).await;
+        storage.create_session("target", "project work", None).await.unwrap();
+        storage.ensure_session_roster("target", 2).await.unwrap();
+        let journal = bridge.control_event_journal_for_tests();
+        // History before the watch never arms it.
+        journal.record(&SignalingEvent::AgentHealth { session_id: "target".into(), agent: "hands".into(), health: "stalled".into() }).await;
+
+        assert!(tool(&bridge, caller(), "app_control", json!({"action":"watch","request_id":"w1","wake":true})).await.unwrap().contains("refused"));
+        let refused = tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":"w1","sessions":["s1"],"wake":true})).await.unwrap();
+        assert!(refused.contains("own session"), "{refused}");
+        let refused = tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":"w1","kinds":["mystery"],"wake":true})).await.unwrap();
+        assert!(refused.contains("unknown event kind"), "{refused}");
+        let refused = tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":"w1","sessions":["nope"],"wake":true})).await.unwrap();
+        assert!(refused.contains("does not exist"), "{refused}");
+        let reply = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":"w1","wake":true})).await.unwrap());
+        assert_eq!(reply["result"]["status"], "watching");
+        let watch = &reply["result"]["watch"];
+        let start = watch["cursor"].as_i64().unwrap();
+        assert!(start > 0, "starts at the journal's end: {watch}");
+        assert_eq!((watch["pending_since"].is_null(), watch["wake"].as_bool(), watch["targets"].is_null(), watch["kinds"].is_null()), (true, Some(true), true, true));
+        // A retry with narrower filters keeps the cursor; the id is the same watch.
+        let again = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":"w1","sessions":["target"],"kinds":["decision_pending","health"],"wake":false})).await.unwrap());
+        assert_eq!(again["result"]["watch"]["id"], watch["id"]);
+        assert_eq!(again["result"]["watch"]["cursor"], start);
+        assert_eq!(again["result"]["watch"]["kinds"], json!(["decision_pending", "health"]));
+        // Events arrive; a read pages them and acknowledges nothing.
+        journal.record(&SignalingEvent::AgentHealth { session_id: "target".into(), agent: "hands".into(), health: "running".into() }).await;
+        journal.record(&SignalingEvent::AgentHealth { session_id: "target".into(), agent: "eyes".into(), health: "stalled".into() }).await;
+        let page = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"events","since_id":start})).await.unwrap());
+        let next = page["result"]["next_since_id"].as_i64().unwrap();
+        assert_eq!(page["result"]["events"].as_array().unwrap().len(), 2);
+        let listed = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"watches"})).await.unwrap());
+        assert_eq!(listed["result"]["watches"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["result"]["watches"][0]["cursor"], start, "a read moved nothing");
+        // Ack: forward only, clamped; backwards is a no-op.
+        let acked = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"ack","request_id":"w1","up_to":next})).await.unwrap());
+        assert_eq!((acked["result"]["status"].as_str(), acked["result"]["watch"]["cursor"].as_i64()), (Some("acknowledged"), Some(next)));
+        let acked = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"ack","request_id":"w1","up_to":0})).await.unwrap());
+        assert_eq!(acked["result"]["watch"]["cursor"], next);
+        let acked = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"ack","request_id":"w1","up_to":1_000_000})).await.unwrap());
+        assert_eq!(acked["result"]["watch"]["cursor"], next, "clamped to the journal's end");
+        assert!(tool(&bridge, driver.clone(), "app_control", json!({"action":"ack","request_id":"nope","up_to":1})).await.unwrap().contains("no such watch"));
+        // The cap: eight watches per controller.
+        for i in 2..=8 {
+            parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":format!("w{i}"),"wake":false})).await.unwrap());
+        }
+        assert!(tool(&bridge, driver.clone(), "app_control", json!({"action":"watch","request_id":"w9","wake":false})).await.unwrap().contains("at most 8"));
+        let removed = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"unwatch","request_id":"w8"})).await.unwrap());
+        assert_eq!(removed["result"]["status"], "removed");
+        let removed = parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"unwatch","request_id":"w8"})).await.unwrap());
+        assert_eq!(removed["result"]["status"], "absent");
+        assert_eq!(parsed(&tool(&bridge, driver.clone(), "app_control", json!({"action":"watches"})).await.unwrap())["result"]["watches"].as_array().unwrap().len(), 7);
+        for op in ["watch", "ack", "unwatch", "watches", "events"] {
+            let ok: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM application_control_audit WHERE operation = ? AND outcome = 'ok'")
+                .bind(op).fetch_one(storage.pool()).await.unwrap();
+            assert!(ok > 0, "{op} audited");
+        }
+        let failed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM application_control_audit WHERE operation = 'watch' AND outcome = 'failed'")
+            .fetch_one(storage.pool()).await.unwrap();
+        assert_eq!(failed, 4, "the three refused shapes and the ninth watch are audited as failed");
     }
 
     #[tokio::test]

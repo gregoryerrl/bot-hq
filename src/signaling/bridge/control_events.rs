@@ -50,6 +50,8 @@ pub struct ControlEventJournal {
     last_activity: Mutex<HashMap<String, String>>,
     presence: Mutex<Option<(bool, std::time::Instant)>>,
     inserts: AtomicU32,
+    /// The watches and their wake (Plan 5c-2): every row written goes to it.
+    watches: super::control_watches::WatchEngine,
 }
 
 fn cut(text: &str) -> String {
@@ -65,6 +67,7 @@ impl ControlEventJournal {
             last_activity: Mutex::new(HashMap::new()),
             presence: Mutex::new(None),
             inserts: AtomicU32::new(0),
+            watches: super::control_watches::WatchEngine::new(),
         })
     }
 
@@ -88,6 +91,17 @@ impl ControlEventJournal {
                 ..Default::default()
             })
             .await;
+        self.reconcile_attention(&storage).await;
+        // Plan 5c-2: every wake watch, from its own cursor — a row that
+        // committed before the engine saw it, or that a late start missed, is
+        // found here; a pending one is retried.
+        if let Some(bridge) = self.bridge.upgrade() {
+            self.watches.rearm_all(&bridge, &storage).await;
+        }
+    }
+
+    /// The reconciliation alone (the start's second half), for a live gap.
+    async fn reconcile_attention(&self, storage: &Storage) {
         let attention = |rows: Vec<AttentionRow>, kind: &str| {
             rows.into_iter()
                 .map(|r| NewControlEvent {
@@ -128,16 +142,24 @@ impl ControlEventJournal {
         self.insert(storage, row).await;
     }
 
-    /// The broadcast dropped `n` events before the task read them.
+    /// The broadcast dropped `n` events before the task read them: the gap
+    /// row, then the durable attention state the drop may have hidden is
+    /// reconciled (deduped by identity) and every wake watch re-armed, so a
+    /// default watcher asleep on a dropped `PendingChoice` or `AwaitingUser`
+    /// still wakes without a restart (eyes-2, 5c-2 review).
     pub async fn gap(&self, n: u64) {
         let Some(storage) = self.storage().await else { return };
         self.insert(&storage, NewControlEvent {
             session_id: JOURNAL_SESSION.into(),
             kind: "journal_gap".into(),
-            detail: Some(format!("{n} bridge events were dropped before the journal read them")),
+            detail: Some(format!("{n} bridge events were dropped before the journal read them; pending decisions and standing halts not yet journaled are re-listed below")),
             ..Default::default()
         })
         .await;
+        self.reconcile_attention(&storage).await;
+        if let Some(bridge) = self.bridge.upgrade() {
+            self.watches.rearm_all(&bridge, &storage).await;
+        }
     }
 
     /// Journal one bridge event, or nothing.
@@ -159,13 +181,15 @@ impl ControlEventJournal {
                     "user" => Some("user".to_string()),
                     _ => None,
                 };
-                let (source_session, source_slug) = match storage.delegated_message_source(*message_id).await {
-                    Ok(Some((session, slug))) => (Some(session), Some(slug)),
-                    _ => (None, None),
+                // A watch wake's notice is journaled as `watch_wake`, never as
+                // a message: a wake must never arm another watch.
+                let (source_session, source_slug, wake_notice) = match storage.delegated_message_source(*message_id).await {
+                    Ok(Some((session, slug, request_id))) => (Some(session), Some(slug), request_id.starts_with("watch:")),
+                    _ => (None, None, false),
                 };
                 NewControlEvent {
                     session_id: session_id.to_string(),
-                    kind: "message".into(),
+                    kind: if wake_notice { "watch_wake".into() } else { "message".into() },
                     agent,
                     ref_id: Some(message_id.to_string()),
                     detail: Some(kind),
@@ -301,13 +325,36 @@ impl ControlEventJournal {
     }
 
     async fn insert(&self, storage: &Storage, row: NewControlEvent) {
-        if let Err(e) = storage.insert_control_event(&row).await {
-            tracing::warn!(?e, kind = %row.kind, "control-event journal insert failed");
-            return;
-        }
+        let id = match storage.insert_control_event(&row).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(?e, kind = %row.kind, "control-event journal insert failed");
+                return;
+            }
+        };
         if self.inserts.fetch_add(1, Ordering::Relaxed) % SWEEP_EVERY == SWEEP_EVERY - 1 {
             self.sweep(storage).await;
         }
+        let event = crate::storage::ControlEvent {
+            id,
+            at: String::new(),
+            session_id: row.session_id,
+            kind: row.kind,
+            agent: row.agent,
+            ref_id: row.ref_id,
+            detail: row.detail,
+            source_session: row.source_session,
+            source_slug: row.source_slug,
+        };
+        if let Some(bridge) = self.bridge.upgrade() {
+            self.watches.on_event(&bridge, storage, &event).await;
+        }
+    }
+
+    /// The wake engine, for tests.
+    #[cfg(test)]
+    pub fn watches(&self) -> &super::control_watches::WatchEngine {
+        &self.watches
     }
 
     /// The retention sweep: rows older than [`CONTROL_EVENT_RETENTION_DAYS`]
@@ -335,6 +382,7 @@ impl ControlEventJournal {
 
     async fn forget_presence(&self) {
         *self.presence.lock().await = None;
+        self.watches.forget_controller_sessions().await;
     }
 }
 
@@ -342,11 +390,16 @@ impl SignalingBridge {
     /// Start the journal task: the restart marker and reconciliation, then
     /// every broadcast event until the bridge goes away. Started once by
     /// `main.rs` after storage is wired, like the scheduled-gate runner.
-    pub fn spawn_control_event_journal(self: &Arc<Self>) {
+    /// Returns a receiver that resolves once the start — the marker, the
+    /// reconciliation and the watch re-arm — has run, so the boot respawn can
+    /// read the watches' pending state after it, not beside it.
+    pub fn spawn_control_event_journal(self: &Arc<Self>) -> tokio::sync::oneshot::Receiver<()> {
         let journal = ControlEventJournal::new(self);
         let mut events = self.subscribe();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             journal.start().await;
+            let _ = ready_tx.send(());
             loop {
                 match events.recv().await {
                     Ok(event) => journal.record(&event).await,
@@ -358,6 +411,7 @@ impl SignalingBridge {
                 }
             }
         });
+        ready_rx
     }
 
     /// A journal handle driven by the test instead of the task.
@@ -578,8 +632,8 @@ mod tests {
     #[tokio::test]
     async fn the_task_journals_what_the_bridge_broadcasts() {
         let (bridge, storage, _journal) = fixture().await;
-        bridge.spawn_control_event_journal();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let ready = bridge.spawn_control_event_journal();
+        ready.await.expect("the start ran");
         bridge.notify_agent_health("t".to_string(), "hands", "stalled");
         let mut seen = false;
         for _ in 0..40 {

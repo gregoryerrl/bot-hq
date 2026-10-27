@@ -145,7 +145,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
         .build()?;
     let rt = runtime.handle().clone();
 
-    let (core, storage_arc, bridge_arc): (Arc<CoreAppState>, Arc<Storage>, Arc<SignalingBridge>) =
+    let (core, storage_arc, bridge_arc, journal_ready): (Arc<CoreAppState>, Arc<Storage>, Arc<SignalingBridge>, tokio::sync::oneshot::Receiver<()>) =
         runtime.block_on(async {
             let storage = Storage::open(&paths.db_path).await?;
             // Boot orphan sweep (2026-08-15): a restart over a mid-turn session
@@ -242,7 +242,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
             // The control-event journal a Driver pages with `app_control
             // events` (Plan 5c): the restart marker, the reconciliation of
             // pending decisions and standing halts, then every broadcast.
-            bridge.spawn_control_event_journal();
+            let journal_ready = bridge.spawn_control_event_journal();
             if let Err(e) = cl_startup_init(&storage, &bridge, &paths.data_dir).await {
                 tracing::warn!(?e, "cl startup init failed — index may be partial");
             }
@@ -310,7 +310,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                 });
             }
             let core = CoreAppState::new_shared(paths.clone(), storage, server).await;
-            Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc))
+            Ok::<_, anyhow::Error>((core, storage_arc, bridge_arc, journal_ready))
         })?;
     // Panic capture (hashes only, gated on the opt-in atomic) chains onto the
     // reaper hook installed above — capture first, then reap + print.
@@ -747,6 +747,17 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
             let core_for_wakes = Arc::clone(&core_for_setup);
             tokio::spawn(async move {
                 core_for_wakes.respawn_temporarily_halted_sessions().await;
+            });
+            // The controllers holding an armed watch (Plan 5c-2) come back
+            // once the control-event journal has started — its re-arm from
+            // the durable journal is what the selection reads — however long
+            // that takes: a slow start delays this pass, never skips it.
+            let core_for_watches = Arc::clone(&core_for_setup);
+            tokio::spawn(async move {
+                match journal_ready.await {
+                    Ok(()) => core_for_watches.respawn_watching_controllers().await,
+                    Err(_) => tracing::warn!("boot: the control-event journal never reported its start; controllers holding an armed watch stay dormant until viewed"),
+                }
             });
             tracing::info!("Tauri setup complete; webview launching");
             Ok(())

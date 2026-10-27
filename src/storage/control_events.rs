@@ -246,10 +246,12 @@ impl Storage {
         .await?)
     }
 
-    /// The controller that sent a delegated message, if `message_id` is one.
-    pub async fn delegated_message_source(&self, message_id: i64) -> Result<Option<(String, String)>> {
+    /// The controller that caused a delegated message row, and its request
+    /// id, if `message_id` is one — a `send`, or a watch wake's notice
+    /// (request id `watch:<watch id>:<event id>`).
+    pub async fn delegated_message_source(&self, message_id: i64) -> Result<Option<(String, String, String)>> {
         Ok(sqlx::query_as(
-            "SELECT d.source_session, p.slug FROM delegated_messages d \
+            "SELECT d.source_session, p.slug, d.request_id FROM delegated_messages d \
              JOIN session_participants p ON p.id = d.source_participant WHERE d.message_id = ?",
         )
         .bind(message_id)

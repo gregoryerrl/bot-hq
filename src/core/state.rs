@@ -747,6 +747,30 @@ impl AppState {
         }
     }
 
+    /// Plan 5c-2: a controller whose armed watch holds an undelivered wake for
+    /// an attention-kind event asked to be woken for it — the same request a
+    /// temporary halt makes — so a boot brings its roster back too; a
+    /// message-level watch starts nothing. Run AFTER the control-event journal
+    /// has started (its restart marker, reconciliation and watch re-arm), since
+    /// that is what arms the watches from the durable journal; `main.rs` waits
+    /// for that readiness without a bound, so a slow start delays this pass
+    /// rather than skipping it (eyes-2 `6cc35f72`).
+    pub async fn respawn_watching_controllers(&self) {
+        let ids = match self.storage.sessions_with_pending_attention_watch().await {
+            Ok(ids) => ids,
+            Err(e) => {
+                tracing::warn!(?e, "boot: could not list the controllers holding an armed watch");
+                return;
+            }
+        };
+        for id in ids {
+            match self.ensure_session_started(&id).await {
+                Ok(()) => tracing::info!(session_id = %id, "boot: respawned a controller holding an armed watch; its wake fires when its ring is up"),
+                Err(e) => tracing::warn!(session_id = %id, ?e, "boot: a controller holding an armed watch did not respawn"),
+            }
+        }
+    }
+
     /// **Reopen a closed session** (round 10, B4): clear the row's `closed_at`
     /// / `archived` / halt slot, spawn the roster (`--resume` off each
     /// participant's own claude session id, as any respawn does), and tell the
