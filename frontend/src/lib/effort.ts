@@ -15,7 +15,7 @@
  * per-run pick clears a role-default ultracode.
  */
 
-/** Effort levels claude-code accepts as `CLAUDE_CODE_EFFORT_LEVEL` values. */
+/** Effort levels accepted by participant controls and the launch --effort flag. */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
 /** The dropdown choice that is not an env value. */

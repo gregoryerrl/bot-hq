@@ -412,8 +412,10 @@ impl SignalingBridge {
                     crate::tauri_cmd::sessions::participant_views(storage, &session_id).await?;
                 let runtime = self.session_activity.lock().await.get(&session_id).and_then(Weak::upgrade)
                     .map(|a|json!({"activity":a.current().as_str(),"paused":a.is_paused()}));
+                let core = self.app_state.get().and_then(Weak::upgrade);
+                let controls = crate::tauri_cmd::participant_changes::controls_with_runtime(storage, &session_id, core.as_deref()).await?;
                 json!({"session": crate::tauri_cmd::sessions::SessionInfo::from(session), "participants": participants, "runtime":runtime,
-                    "halt": storage.session_halt(&session_id).await?, "controls": crate::tauri_cmd::participant_changes::controls(storage, &session_id).await?,
+                    "halt": storage.session_halt(&session_id).await?, "controls": controls,
                     "accepts_relay": storage.session_accepts_relay(&session_id).await?})
             }
             History { session_id, query } => {

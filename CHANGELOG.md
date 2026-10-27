@@ -27,6 +27,12 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Added
 
+- Session Settings can change an agent's effort after its current turn while
+  keeping the conversation. The Driver has the same control. Changes remain
+  requested until confirmed; Claude requires per-message support reported by
+  that process, and unverified gateways show an unavailable reason. Ultracode
+  is a separate supported flag. A failed change restores the previous setting;
+  if restoration cannot be confirmed, the affected runtime stops with a recap.
 - Saved models have a heart in Settings → Models. Favorites appear first in
   model pickers; the settings list stays in name order while hearts are toggled.
   Favorites survive ordinary model edits and can also be set by a Driver.

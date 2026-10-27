@@ -2,7 +2,8 @@ import type { ParticipantView } from "../lib/participants";
 import { Chip } from "./ui/Chip";
 
 /**
- * What a participant was actually spawned with — its effort posture, or
+ * A participant's latest confirmed effort posture, initially recorded at spawn
+ * and updated after live readback, or
  * ultracode.
  *
  * ## Why this exists, and why it reads a different field than you'd expect
@@ -64,7 +65,7 @@ export function SpawnBadge({
     | "spawn_knobs_recorded"
   >;
 }) {
-  // Nothing was recorded for this row, so nothing is known. Rendering "default"
+  // Nothing is confirmed for this row (legacy or failed live readback). Rendering "default"
   // here would assert a configuration this participant may not have run with.
   if (!p.spawn_knobs_recorded) return null;
 
@@ -87,8 +88,8 @@ export function SpawnBadge({
       className="ml-1"
       title={
         chosen
-          ? `Spawned with ${text} — picked for this session.`
-          : `Spawned with ${text} — the role's default.`
+          ? `Current effort: ${text} — picked for this session.`
+          : `Current effort: ${text} — the role's default.`
       }
     >
       {text}

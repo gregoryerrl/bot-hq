@@ -4632,8 +4632,8 @@ mod tests {
             "the reviewer role's override never reached its participant"
         );
         assert!(
-            crate::agents::spawn::debug_env(&for_reviewer)
-                .contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "xhigh".into())),
+            crate::agents::spawn::debug_command(&for_reviewer)
+                .windows(2).any(|a| a == ["--effort", "xhigh"]),
             "the override reached the SpawnConfig but not the command it builds"
         );
         assert_eq!(
@@ -4652,8 +4652,8 @@ mod tests {
             Some(crate::claude_config::DEFAULT_EFFORT),
             "an unconfigured role must floor to the default, not inherit _all's low"
         );
-        assert!(crate::agents::spawn::debug_env(&for_executor)
-            .contains(&("CLAUDE_CODE_EFFORT_LEVEL".into(), "medium".into())));
+        assert!(crate::agents::spawn::debug_command(&for_executor)
+            .windows(2).any(|a| a == ["--effort", "medium"]));
         assert!(crate::claude_config::overrides::disabled_mcp(&for_executor.overrides).is_empty());
 
         // A participant with no role has no per-role entry to find — same floor.

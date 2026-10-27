@@ -1896,6 +1896,8 @@ export type CspExtraOrigins = { "script-src": string[]; "style-src": string[]; "
  * classification per [`parse_diff_lines`].
  */
 export type DiffLine = { kind: string; text: string }
+export type EffortPair = { effort: string; ultracode: boolean }
+export type EffortStatus = { available: boolean; reason: string | null; current: EffortPair | null; ultracode_available: boolean }
 /**
  * Where the program file stands against the one that was launched.
  */
@@ -2134,7 +2136,7 @@ undelivered_peer_texts: number;
  * drift.
  */
 starving: boolean }
-export type ParticipantChangeRequest = { kind: "add"; role_id: number; model_id: string; label: string | null } | { kind: "remove"; participant_id: number } | { kind: "switch_model"; participant_id: number; model_id: string }
+export type ParticipantChangeRequest = { kind: "add"; role_id: number; model_id: string; label: string | null } | { kind: "remove"; participant_id: number } | { kind: "switch_model"; participant_id: number; model_id: string } | { kind: "set_effort"; participant_id: number; effort: string; ultracode: boolean }
 export type ParticipantChangeView = { id: string; request: ParticipantChangeRequest; status: string; error: string | null }
 /**
  * One row of the dialog's participant list: a role, optionally a model that
@@ -2162,7 +2164,7 @@ color: string | null;
  * ordinal (rc3 **D20**, migration 0053).
  */
 label: string | null }
-export type ParticipantSelectionView = { participant_id: number; model_id: string | null }
+export type ParticipantSelectionView = { participant_id: number; model_id: string | null; effort: EffortStatus | null }
 /**
  * One participant's composed system prompt — the ~48 KB of standing
  * instruction bot-hq assembled for it at spawn (rc3 **P1**).
@@ -2250,7 +2252,8 @@ effort: string | null;
  */
 ultracode: boolean | null; 
 /**
- * What this participant was ACTUALLY spawned with (migration 0061) — the
+ * Latest confirmed pair (initially migration 0061's spawn record, then
+ * updated after live effort readback) — the
  * pair left standing after the precedence chain and its exclusion rule.
  * 
  * **This is the field that answers the doc above `effort`.** That one is
@@ -2267,7 +2270,8 @@ ultracode: boolean | null;
  */
 effort_at_spawn: string | null; ultracode_at_spawn: boolean | null; 
 /**
- * Whether the two above describe a real spawn. Every post-floor spawn
+ * Whether the two above are confirmed. Unconfirmed live changes clear it.
+ * Every post-floor spawn
  * records a concrete effort (no-inherit, 2026-08-25), so a null pair now
  * means a pre-floor row — and without this flag that would be
  * indistinguishable from a row nothing ever spawned, and a badge would

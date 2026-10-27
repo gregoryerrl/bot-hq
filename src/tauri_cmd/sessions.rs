@@ -340,7 +340,8 @@ pub struct ParticipantView {
     pub effort: Option<String>,
     /// This participant's ultracode pick (rc3 D12), or `null` for Default.
     pub ultracode: Option<bool>,
-    /// What this participant was ACTUALLY spawned with (migration 0061) — the
+    /// Latest confirmed pair (initially migration 0061's spawn record, then
+    /// updated after live effort readback) — the
     /// pair left standing after the precedence chain and its exclusion rule.
     ///
     /// **This is the field that answers the doc above `effort`.** That one is
@@ -356,7 +357,8 @@ pub struct ParticipantView {
     /// mid-session.
     pub effort_at_spawn: Option<String>,
     pub ultracode_at_spawn: Option<bool>,
-    /// Whether the two above describe a real spawn. Every post-floor spawn
+    /// Whether the two above are confirmed. Unconfirmed live changes clear it.
+    /// Every post-floor spawn
     /// records a concrete effort (no-inherit, 2026-08-25), so a null pair now
     /// means a pre-floor row — and without this flag that would be
     /// indistinguishable from a row nothing ever spawned, and a badge would

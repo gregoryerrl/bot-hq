@@ -291,6 +291,8 @@ pub struct ControlRequest {
 #[derive(Debug, Clone, Serialize)]
 pub struct ControlRequestBody {
     pub subtype: &'static str,
+    #[serde(flatten)]
+    pub fields: serde_json::Map<String, Value>,
 }
 
 impl ControlRequest {
@@ -302,8 +304,19 @@ impl ControlRequest {
             request_id: request_id.into(),
             request: ControlRequestBody {
                 subtype: "interrupt",
+                fields: Default::default(),
             },
         }
+    }
+
+    pub(crate) fn settings(request_id: String, mut body: Value) -> Self {
+        let subtype = match body["subtype"].as_str() {
+            Some("get_settings") => "get_settings",
+            Some("apply_flag_settings") => "apply_flag_settings",
+            _ => unreachable!("only typed settings controls are constructed"),
+        };
+        body.as_object_mut().unwrap().remove("subtype");
+        Self { typ: "control_request", request_id, request: ControlRequestBody { subtype, fields: body.as_object().unwrap().clone() } }
     }
 }
 

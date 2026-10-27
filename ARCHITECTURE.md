@@ -2008,7 +2008,7 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   per-participant model, effort, ultracode and resume id live on
   `session_participants` (rc3 D10), which also carries **`effort_at_spawn` /
   `ultracode_at_spawn` / `spawn_knobs_recorded`** (0061) — what a participant was
-  ACTUALLY spawned with, recorded because the effective value cannot be recovered
+  last confirmed with (initially at spawn, then after live effort readback), because the effective value cannot be recovered
   from the user's `effort`/`ultracode` CHOICE (usually "inherit") and must not be
   re-derived later, which would answer "what it would be spawned with now".
   `spawn_knobs_recorded` separates "no override in force" from "predates 0061",
@@ -2126,6 +2126,20 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   which history was omitted. Channel `origin=user` is not proof of human
   authorship: it can also carry host/plugin text or command output.
   Session Settings invokes this worker through typed request/status/cancel commands.
+  `set_effort {participant_id,effort,ultracode}` uses the same durable request,
+  revision, authority and turn boundary, branching before replacement. It keeps
+  the process/conversation/account/grants/cursors and context reading. Claude
+  launches with `--effort` and its inherited force-effort env removed; live
+  support requires its own `per_turn_effort_active` plus `get_settings.applied`.
+  Only effort/Ultracode keys are merged into launch settings, preserving hooks.
+  Gateways remain unavailable until verified. Codex reads the next-turn pair
+  without interrupting a command. Readback publishes chosen and effective knobs
+  atomically; helper inheritance, retry and relaunch use confirmed settings.
+  A failed sent update restores and reads back the old pair; an unconfirmed
+  restore stops the affected runtime and holds the session. Shared process
+  status exposes available/current/requested states to the UI and Driver.
+  `session:participant_changed.context_reset=false` refreshes effort metadata
+  without clearing the context meter; replacement events use true.
   It shows saved role/model choices, last-active and capacity guards, a context-usage
   warning and durable operation status. Publication emits `session:participant_changed`
   before starting the replacement pump; the frontend refreshes the roster and drops

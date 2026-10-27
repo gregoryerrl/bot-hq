@@ -47,6 +47,31 @@ beforeEach(() => {
 });
 
 describe("Session Settings live agent controls", () => {
+  it("requests effort at the turn boundary, clears Ultracode, and keeps current separate from requested", async () => {
+    controls.selections[0].effort = { available: true, reason: null, current: { effort: "xhigh", ultracode: true }, ultracode_available: true };
+    mount();
+    const picker = await screen.findByLabelText("Effort for Builder · Old");
+    await waitFor(() => expect(picker).toHaveValue("ultracode"));
+    fireEvent.change(picker, { target: { value: "low" } });
+    fireEvent.click(screen.getByRole("button", { name: "Change effort for Builder · Old" }));
+    await screen.findByText("Requested effort: low. Awaiting confirmation.");
+    expect(sent()[0][1]).toMatchObject({ revision: 7, request: { kind: "set_effort", participant_id: 1, effort: "low", ultracode: false } });
+    expect(screen.getByText(/Current effort: ultracode/)).toBeVisible();
+    expect(picker).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Cancel pending change" })).toBeEnabled();
+  });
+
+  it("shows unsupported reasons and offers only confirmed runtime options", async () => {
+    controls.selections[0].effort = { available: false, reason: "Live effort has not been verified for this gateway", current: null, ultracode_available: false };
+    controls.selections[1].effort = { available: true, reason: null, current: { effort: "high", ultracode: false }, ultracode_available: false };
+    mount();
+    expect(await screen.findByText("Live effort has not been verified for this gateway")).toBeVisible();
+    expect(screen.getByLabelText("Effort for Builder · Old")).toBeDisabled();
+    const native = screen.getByLabelText("Effort for Reviewer · Old");
+    expect(within(native).queryByRole("option", { name: "Ultracode" })).toBeNull();
+    expect(within(native).getAllByRole("option")).toHaveLength(5);
+  });
+
   it("adds the selected role/model through the panel with revision and stable request identity", async () => {
     mount();
     await screen.findByRole("option", { name: "Reviewer" });

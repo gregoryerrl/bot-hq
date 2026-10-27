@@ -203,7 +203,7 @@ impl Storage {
         let Some(row) = read_change(&mut tx, id).await?.filter(|r| r.session_id == session && r.status == "failed") else { return Ok(false) };
         let target = match row.request()? {
             ParticipantChangeRequest::Remove { participant_id } | ParticipantChangeRequest::SwitchModel { participant_id, .. } => participant_id,
-            ParticipantChangeRequest::Add { .. } => return Ok(false),
+            ParticipantChangeRequest::Add { .. } | ParticipantChangeRequest::SetEffort { .. } => return Ok(false),
         };
         if target != participant_id { return Ok(false); }
         let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND closed_at IS NULL AND archived = 0 AND roster_revision = ?) \
@@ -306,6 +306,7 @@ impl Storage {
         } else { None };
         let now = now_utc();
         let (changed_id, action) = match &request {
+            ParticipantChangeRequest::SetEffort { .. } => anyhow::bail!("effort changes publish only after native readback; they never prepare a replacement"),
             ParticipantChangeRequest::Add { label, .. } => {
                 let role = role.as_ref().context("new participant has no role")?;
                 let model = model.as_ref().context("new participant has no model")?;

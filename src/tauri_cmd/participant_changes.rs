@@ -32,6 +32,7 @@ impl TryFrom<ParticipantChange> for ParticipantChangeView {
 pub struct ParticipantSelectionView {
     pub participant_id: i64,
     pub model_id: Option<String>,
+    pub effort: Option<crate::agents::effort::EffortStatus>,
 }
 
 #[derive(Debug, Serialize, Type)]
@@ -61,6 +62,7 @@ pub(crate) async fn controls(
         .map(|p| ParticipantSelectionView {
             participant_id: p.id,
             model_id: p.model_id,
+            effort: None,
         })
         .collect();
     Ok(SessionParticipantControls {
@@ -76,13 +78,23 @@ pub(crate) async fn controls(
     })
 }
 
+pub(crate) async fn controls_with_runtime(storage: &Storage, session: &str, core: Option<&AppState>) -> Result<SessionParticipantControls, AppError> {
+    let mut view = controls(storage, session).await?;
+    if let Some(core) = core {
+        for (id, status) in core.participant_effort_status(session).await {
+            if let Some(p) = view.selections.iter_mut().find(|p| p.participant_id == id) { p.effort = Some(status); }
+        }
+    }
+    Ok(view)
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn get_session_participant_controls(
-    storage: tauri::State<'_, Arc<Storage>>,
+    core: tauri::State<'_, Arc<AppState>>,
     session_id: String,
 ) -> Result<SessionParticipantControls, AppError> {
-    controls(&storage, &session_id).await
+    controls_with_runtime(&core.storage, &session_id, Some(&core)).await
 }
 
 #[tauri::command]

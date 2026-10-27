@@ -823,6 +823,7 @@ impl ParticipantInput {
 
 /// Driver handle for one running agent subprocess.
 pub struct AgentHandle {
+    pub effort_control: super::effort::EffortControl,
     incarnation: Arc<crate::agents::incarnation::Incarnation>,
     stopped: Option<StopObserver>,
     pub name: String,
@@ -956,6 +957,7 @@ impl AgentHandle {
     ) -> Self {
         Self {
             name,
+            effort_control: Default::default(),
             stopped: None,
             event_rx,
             input_tx: ParticipantInput::new(session_id, input_tx),
@@ -1093,7 +1095,9 @@ async fn spawn_with_command(cfg: SpawnConfig, mut cmd: Command) -> Result<AgentH
     let stdout = child.stdout.take().context("subprocess missing stdout")?;
     let stderr = child.stderr.take().context("subprocess missing stderr")?;
 
-    tokio::spawn(events::pump_events(stdout, event_tx.clone()));
+    let replies = super::effort::ClaudeReplies::new();
+    let effort_control = super::effort::EffortControl::claude(replies.clone(), control_tx.clone(), cfg.config.base_url.is_some());
+    tokio::spawn(events::pump_events_with_controls(stdout, event_tx.clone(), Some(replies)));
     tokio::spawn(events::pump_stderr(stderr, cfg.agent_name.clone()));
     tokio::spawn(input::pump_inputs(
         stdin,
@@ -1142,6 +1146,7 @@ async fn spawn_with_command(cfg: SpawnConfig, mut cmd: Command) -> Result<AgentH
 
     Ok(AgentHandle {
         name: cfg.agent_name,
+        effort_control,
         stopped: Some(stopped_rx),
         event_rx,
         input_tx: ParticipantInput::new(cfg.session_id, input_tx),
@@ -1209,11 +1214,13 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
     // what every caller holds — each respawned incarnation is bridged onto it —
     // so this is the input whose session id has to be right.
     let session_id: Arc<str> = Arc::from(cfg.session_id.as_str());
+    let effort_control;
     // The connector, by the model row's runtime (0102): the Codex driver
     // fills the same handle, so the supervisor and the pump never know which.
     match cfg.config.runtime() {
         crate::agents::runtime::Runtime::Codex => {
             let first = crate::agents::codex::spawn::spawn_codex_agent(cfg.clone()).await?;
+            effort_control = first.effort_control.clone();
             tokio::spawn(async move { let result = supervise(
                 cfg,
                 policy,
@@ -1227,6 +1234,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         }
         crate::agents::runtime::Runtime::ClaudeCode => {
             let first = spawn_agent(cfg.clone()).await?;
+            effort_control = first.effort_control.clone();
             tokio::spawn(async move { let result = supervise(
                 cfg,
                 policy,
@@ -1242,6 +1250,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
 
     Ok(AgentHandle {
         name,
+        effort_control,
         stopped: Some(stopped_rx),
         event_rx: out_event_rx,
         input_tx: ParticipantInput::new(session_id, out_input_tx),
@@ -1270,6 +1279,7 @@ async fn supervise<S, Fut>(
     Fut: std::future::Future<Output = Result<AgentHandle>> + Send,
 {
     let agent = cfg.agent_name.clone();
+    let effort_control = first.effort_control.clone();
     let mut incarnation = first;
     let mut consecutive_transient: u32 = 0;
     let mut pending_nudge: Option<String> = None;
@@ -1384,6 +1394,7 @@ async fn supervise<S, Fut>(
         }
 
         incarnation.wait_stopped().await?;
+        effort_control.disconnected().await;
         let transient = last_error_status
             .map(is_transient_api_error)
             .unwrap_or(false);
@@ -1408,8 +1419,13 @@ async fn supervise<S, Fut>(
                  left off — re-issue the action you were about to take. Do NOT repeat work you \
                  already completed or committed."
             ));
+            if let Some(pair) = effort_control.retry_pair() {
+                cfg.overrides.effort = Some(pair.effort);
+                cfg.overrides.ultracode = Some(pair.ultracode);
+            }
             match spawn_next(cfg.clone()).await {
                 Ok(next) => {
+                    effort_control.replace_runtime(&next.effort_control).await;
                     incarnation = next;
                     continue;
                 }
@@ -1550,8 +1566,8 @@ pub(crate) fn ensure_claude_runnable(_bin: &str) -> Result<()> {
 /// pick, else the role's default (`per_role[slug]` — `resolve_agent_overrides`
 /// no longer lets effort/ultracode fall through to `_all`), else
 /// [`crate::claude_config::DEFAULT_EFFORT`]. Every spawn therefore emits a
-/// concrete `CLAUDE_CODE_EFFORT_LEVEL`, so the user's own settings.json knob
-/// never reaches an agent. `pick_effort` / `pick_ultracode` are the
+/// concrete `--effort` flag, which beats the user/project effort setting
+/// while permitting a verified live per-message update. `pick_effort` / `pick_ultracode` are the
 /// participant's D12 columns, and they WIN — a choice made for this run beats
 /// a standing default.
 ///
@@ -1559,7 +1575,7 @@ pub(crate) fn ensure_claude_runnable(_bin: &str) -> Result<()> {
 ///
 /// claude-code treats max-effort and ultracode as mutually exclusive (ultracode
 /// implies xhigh + workflow orchestration; `max` is a distinct effort posture,
-/// and emitting BOTH — env `CLAUDE_CODE_EFFORT_LEVEL=max` plus `"ultracode":
+/// and emitting BOTH — `--effort max` plus `"ultracode":
 /// true` in `--settings` — is undefined). Each surface's UI already stops a user
 /// picking both, but a **cross-layer** overlay can still resolve to both:
 /// persistent `max` under a per-run ultracode, or the reverse. Whichever knob was
@@ -1603,7 +1619,7 @@ pub fn reconcile_spawn_knobs(
     if persistent.ultracode == Some(true) {
         // Ultracode pins effort to xhigh at runtime; record and emit the pair
         // explicitly so a role that never receives `--settings` (no edit_files)
-        // still spawns at a truthful CLAUDE_CODE_EFFORT_LEVEL, and so the
+        // still spawns with a truthful --effort flag, and so the
         // user's own settings.json effort cannot collide with the flag.
         persistent.effort = Some("xhigh".into());
     } else if persistent.effort.is_none() {
@@ -2048,13 +2064,20 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         cmd.env("ANTHROPIC_BASE_URL", base);
     }
 
-    // Per-agent override env (effort / auto-memory / CLAUDE.md suppression).
+    // A forced effort env ignores successful live controls. Remove an inherited
+    // host value too; --effort keeps the participant choice above user/project
+    // settings while allowing a cache-preserving per-message update.
+    cmd.env_remove("CLAUDE_CODE_EFFORT_LEVEL");
+    if let Some(effort) = &agent_override.effort {
+        cmd.args(["--effort", effort]);
+    }
+    // Per-agent override env (auto-memory / CLAUDE.md suppression).
     // Applied to ALL agents. The skill/plugin `--settings` fragments above are
     // editing-participant-only (a read-only one's `--settings` holds only the
     // handoff hook, the model row's keys and the attribution policy), but these
     // ENV overrides are the lever to keep it lean now that nothing runs --bare.
     for (k, v) in crate::claude_config::overrides::env_vars(&agent_override) {
-        cmd.env(k, v);
+        if k != "CLAUDE_CODE_EFFORT_LEVEL" { cmd.env(k, v); }
     }
 
     // Always pin the subprocess cwd. A repo-less session must not inherit
@@ -2072,7 +2095,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
 /// The environment `build_command` would hand the child, as owned strings.
 ///
 /// The sibling of [`debug_command`] for the half that does not ride on argv:
-/// effort and the auto-memory/CLAUDE.md switches are env vars, so a test that
+/// the auto-memory/CLAUDE.md switches are env vars, so a test that
 /// only reads args cannot see them. Exists so a spawn assembled in
 /// `core::session` can be asserted through the ACTUAL command rather than
 /// through the `SpawnConfig` field it was built from — the difference between
@@ -2735,13 +2758,10 @@ mod tests {
             "hook must survive merge"
         );
 
-        // Effort override is injected as env.
+        // Effort uses the mutable CLI flag; the force env is explicitly removed.
         let cmd = build_command(&c);
-        let has_effort = cmd.as_std().get_envs().any(|(k, v)| {
-            k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL")
-                && v == Some(std::ffi::OsStr::new("high"))
-        });
-        assert!(has_effort, "effort env should be set from override");
+        assert_eq!(effort_flag(&c).as_deref(), Some("high"));
+        assert!(cmd.as_std().get_envs().any(|(k, v)| k == "CLAUDE_CODE_EFFORT_LEVEL" && v.is_none()));
     }
 
     /// The persistent half of a cross-layer overlay, resolved the way the spawn
@@ -2769,16 +2789,9 @@ mod tests {
         resolve_agent_overrides(&store, Some("hands"))
     }
 
-    /// `CLAUDE_CODE_EFFORT_LEVEL` as the built command carries it. `None` means
-    /// the variable is not set AT ALL — a different answer from "set to
-    /// something else", and the difference is what the exclusion turns on.
-    fn effort_env(cfg: &SpawnConfig) -> Option<String> {
-        build_command(cfg)
-            .as_std()
-            .get_envs()
-            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CODE_EFFORT_LEVEL"))
-            .and_then(|(_, v)| v)
-            .map(|v| v.to_string_lossy().to_string())
+    /// The actual CLI flag, rather than the override struct that should feed it.
+    fn effort_flag(cfg: &SpawnConfig) -> Option<String> {
+        debug_command(cfg).windows(2).find(|a| a[0] == "--effort").map(|a| a[1].clone())
     }
 
     /// The `--settings` JSON a role holding `edit_files` always gets (it carries
@@ -2872,7 +2885,7 @@ mod tests {
 
     /// The no-inherit floor (2026-08-25): nothing picked, nothing configured
     /// for the role → `DEFAULT_EFFORT`, never `None`. This is what guarantees
-    /// every spawn emits a concrete `CLAUDE_CODE_EFFORT_LEVEL` and the user's
+    /// every spawn emits a concrete `--effort` and the user's
     /// own settings.json knob stops reaching agents.
     #[test]
     fn nothing_picked_nothing_configured_floors_to_default_effort() {
@@ -2902,7 +2915,7 @@ mod tests {
     /// chosen to prevent.
     #[test]
     fn the_reconciled_pair_is_what_reaches_the_child() {
-        // Ultracode wins: env carries the implied xhigh (never the cleared max
+        // Ultracode wins: --effort carries the implied xhigh (never the cleared max
         // — and never nothing, so a role that gets no --settings still spawns
         // at a truthful level), --settings carries ultracode.
         let mut o = persistent_for_hands(|o| o.effort = Some("max".into()));
@@ -2910,21 +2923,21 @@ mod tests {
         let mut c = cfg();
         c.overrides = o.clone();
         assert_eq!(
-            effort_env(&c).as_deref(),
+            effort_flag(&c).as_deref(),
             Some("xhigh"),
-            "ultracode must reach the env as its implied xhigh, not as the cleared max"
+            "ultracode must reach --effort as its implied xhigh, not as the cleared max"
         );
         assert!(
             settings_fragment(&c).contains("ultracode"),
             "the surviving ultracode must reach --settings"
         );
 
-        // Max wins: env carries max, --settings carries no ultracode.
+        // Max wins: --effort carries max, --settings carries no ultracode.
         let mut o = persistent_for_hands(|o| o.ultracode = Some(true));
         reconcile_spawn_knobs(&mut o, Some("max"), None);
         let mut c = cfg();
         c.overrides = o;
-        assert_eq!(effort_env(&c).as_deref(), Some("max"), "the surviving max must reach the env");
+        assert_eq!(effort_flag(&c).as_deref(), Some("max"), "the surviving max must reach --effort");
         assert!(
             !settings_fragment(&c).contains("ultracode"),
             "a cleared ultracode must not reach --settings; got {}",
@@ -2964,6 +2977,67 @@ mod tests {
 
     // ---- supervisor retry logic (fake incarnations, no real subprocess) ----
 
+    #[cfg(unix)]
+    #[test]
+    fn inherited_force_effort_is_removed_from_the_actual_child_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        // A subprocess gives this test an inherited host value without racing
+        // the rest of the suite by mutating this test runner's environment.
+        const PROBE: &str = "BOT_HQ_TEST_INHERITED_EFFORT";
+        if std::env::var_os(PROBE).is_none() {
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "agents::spawn::tests::inherited_force_effort_is_removed_from_the_actual_child_environment", "--nocapture"])
+                .env(PROBE, "1").env("CLAUDE_CODE_EFFORT_LEVEL", "max").output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stdout));
+            return;
+        }
+        assert_eq!(std::env::var("CLAUDE_CODE_EFFORT_LEVEL").unwrap(), "max");
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("fake-claude");
+        std::fs::write(&bin, "#!/bin/sh\nprintf '%s' \"${CLAUDE_CODE_EFFORT_LEVEL-unset}\"\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut config = cfg();
+        config.claude_bin = Some(bin.to_string_lossy().into());
+        config.working_dir = Some(dir.path().into());
+        config.overrides.effort = Some("low".into());
+        let mut command = build_command(&config).into_std();
+        let output = command.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"unset");
+        assert_eq!(effort_flag(&config).as_deref(), Some("low"));
+    }
+
+    #[tokio::test]
+    async fn confirmed_effort_survives_same_conversation_supervisor_retry() {
+        use super::super::effort::{EffortControl, EffortPair};
+        let (mut first, events, _inputs) = fake_incarnation();
+        first.effort_control = EffortControl::codex(Arc::new(Mutex::new(EffortPair { effort: "high".into(), ultracode: false })));
+        let outer = first.effort_control.clone();
+        outer.apply(&EffortPair { effort: "low".into(), ultracode: false }).await.unwrap();
+        let (out, _out_rx) = mpsc::channel(16);
+        let (_input, inputs) = mpsc::channel(1);
+        let (_control, controls) = mpsc::channel(1);
+        let (_stop, stopped) = oneshot::channel();
+        let (next, next_events, mut next_inputs) = fake_incarnation();
+        let next = Arc::new(Mutex::new(Some(next)));
+        let task = tokio::spawn(supervise(cfg(), instant_policy(1), first, out, inputs, controls, stopped, move |cfg| {
+            assert_eq!(cfg.resume_session_id.as_deref(), Some("same-conversation"));
+            assert_eq!(cfg.overrides.effort.as_deref(), Some("low"));
+            assert_eq!(cfg.overrides.ultracode, Some(false));
+            let mut child = next.lock().unwrap().take().unwrap();
+            child.effort_control = EffortControl::codex(Arc::new(Mutex::new(EffortPair { effort: cfg.overrides.effort.clone().unwrap(), ultracode: false })));
+            async move { Ok(child) }
+        }));
+        events.send(AgentEvent::Init { session_id: Some("same-conversation".into()), api_key_source: None }).await.unwrap();
+        events.send(errored_turn(529)).await.unwrap(); drop(events);
+        next_inputs.recv().await.unwrap();
+        assert_eq!(outer.status().await.current.unwrap().effort, "low");
+        outer.apply(&EffortPair { effort: "max".into(), ultracode: false }).await.unwrap();
+        assert_eq!(outer.status().await.current.unwrap().effort, "max");
+        drop(next_events); task.await.unwrap().unwrap();
+        assert!(!outer.status().await.available);
+    }
+
     /// A fake `AgentHandle` whose event stream the test drives directly. Push
     /// events via `ev_tx`; close the incarnation by dropping it. Observe the
     /// resume-nudge (and any peer input) via `in_rx`.
@@ -2978,6 +3052,7 @@ mod tests {
         let (kill_tx, _kill_rx) = oneshot::channel::<()>();
         let handle = AgentHandle {
             name: "fake".into(),
+            effort_control: Default::default(),
             // No OS process exists in this pure event-stream fixture.
             stopped: Some(tokio::sync::watch::channel(Some(Ok(()))).1),
             event_rx: ev_rx,

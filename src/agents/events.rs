@@ -10,6 +10,13 @@ use tracing::{debug, warn};
 /// Pump stdout-like stream until EOF; send translated events to `tx`.
 /// Generic over the reader type so this is testable with `tokio::io::duplex`.
 pub async fn pump_events<R: AsyncRead + Unpin>(reader: R, tx: mpsc::Sender<AgentEvent>) {
+    pump_events_with_controls(reader, tx, None).await;
+}
+
+pub(crate) async fn pump_events_with_controls<R: AsyncRead + Unpin>(reader: R, tx: mpsc::Sender<AgentEvent>, replies: Option<super::effort::ClaudeReplies>) {
+    struct Close(Option<super::effort::ClaudeReplies>);
+    impl Drop for Close { fn drop(&mut self) { if let Some(replies) = &self.0 { replies.close(); } } }
+    let _close = Close(replies.clone());
     let buf = BufReader::new(reader);
     let mut lines = buf.lines();
     // Per-turn carry: the most recent `assistant` event's point-in-time usage.
@@ -22,6 +29,11 @@ pub async fn pump_events<R: AsyncRead + Unpin>(reader: R, tx: mpsc::Sender<Agent
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+                if let Some(replies) = &replies {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        replies.observe(&value);
+                    }
                 }
                 match serde_json::from_str::<StreamEvent>(trimmed) {
                     Ok(ev) => {

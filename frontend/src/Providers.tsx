@@ -205,8 +205,8 @@ function GlobalEventSync() {
     [invalidate, clearHealth, clearActivity, clearContext, clearChat],
   );
   const onParticipantChanged = useCallback(
-    (p: { session_id: string; agent: string }) => {
-      useContextStore.getState().clearAgent(p.session_id, p.agent);
+    (p: { session_id: string; agent: string; context_reset?: boolean }) => {
+      if (p.context_reset !== false) useContextStore.getState().clearAgent(p.session_id, p.agent);
       for (const command of ["list_session_participants", "get_session_participant_controls", "get_session"]) {
         void queryClient.invalidateQueries({ queryKey: [command, { sessionId: p.session_id }] });
       }

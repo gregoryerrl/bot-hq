@@ -5,6 +5,7 @@ import { participantLabel, useSessionParticipants } from "../lib/participants";
 import type { ParticipantChangeRequest, ParticipantChangeView, SessionParticipantControls } from "../lib/participantChanges";
 import { Button } from "../components/ui/Button";
 import { fieldClass } from "../components/ui/field";
+import { EFFORT_LEVELS, ULTRACODE, effortChoiceOf, pickToFields } from "../lib/effort";
 
 type SavedRole = { id: number; display_name: string; default_model_id: string | null; archived: boolean };
 type SavedModel = { id: string; display_name: string; runtime: string };
@@ -23,6 +24,7 @@ export function SessionRosterEditor({ sessionId }: { sessionId: string }) {
   const [model, setModel] = useState("");
   const [label, setLabel] = useState("");
   const [picks, setPicks] = useState<Record<number, string>>({});
+  const [effortPicks, setEffortPicks] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState<ChangeArgs | null>(null);
   const inFlight = useRef(false);
@@ -78,6 +80,9 @@ export function SessionRosterEditor({ sessionId }: { sessionId: string }) {
             const selected = state.data?.selections.find((s) => s.participant_id === p.id)?.model_id ?? "";
             const pick = picks[p.id] ?? selected;
             const last = p.participation_mode === "active" && activeTurns <= 1;
+            const effort = state.data?.selections.find((s) => s.participant_id === p.id)?.effort;
+            const effective = effortChoiceOf(effort?.current ?? undefined) ?? "";
+            const effortPick = effortPicks[p.id] ?? effective;
             return <li key={p.id} className="space-y-1">
               <p><span className="text-on-surface">{name}</span> · {p.participation_mode}{!p.enabled && " · disabled"}</p>
               {p.enabled && <div className="flex flex-wrap items-center gap-2">
@@ -87,6 +92,22 @@ export function SessionRosterEditor({ sessionId }: { sessionId: string }) {
                 </select>
                 <Button size="sm" disabled={disabled || !pick || pick === selected} onClick={() => void submit({ kind: "switch_model", participant_id: p.id, model_id: pick })}>Change model</Button>
                 <Button size="sm" tone="error" aria-label={`Remove ${name}`} disabled={disabled || last || active.length <= 1} title={last ? "Keep at least one active agent" : "History and pending gates are kept"} onClick={() => void submit({ kind: "remove", participant_id: p.id })}>Remove</Button>
+              </div>}
+              {p.enabled && <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex min-w-0 flex-1 items-center gap-2">Effort
+                    <select aria-label={`Effort for ${name}`} className={`${fieldClass} min-w-0 flex-1`} value={effortPick} disabled={disabled || !effort?.available} onChange={(e) => setEffortPicks({ ...effortPicks, [p.id]: e.target.value })}>
+                      {!effortPick && <option value="">Unavailable</option>}
+                      {EFFORT_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                      {effort?.ultracode_available && <option value={ULTRACODE}>Ultracode</option>}
+                    </select>
+                  </label>
+                  <Button size="sm" aria-label={`Change effort for ${name}`} disabled={disabled || !effort?.available || !effortPick || effortPick === effective} onClick={() => {
+                    const pair = pickToFields(effortPick);
+                    if (pair.effort) void submit({ kind: "set_effort", participant_id: p.id, effort: pair.effort, ultracode: pair.ultracode === true });
+                  }}>Change effort</Button>
+                </div>
+                <p>{effort?.available ? `Current effort: ${effective}. Changes keep this conversation and apply after the current turn.` : effort?.reason ?? "Start or resume this agent to check live effort support."}</p>
               </div>}
             </li>;
           })}
@@ -112,6 +133,7 @@ export function SessionRosterEditor({ sessionId }: { sessionId: string }) {
       {state.data?.closed && <p className="font-code-sm text-code-sm">Reopen this session to change its agents.</p>}
       {active.length >= (state.data?.max_participants ?? 8) && <p className="font-code-sm text-code-sm">This session has reached its limit of {state.data?.max_participants ?? 8} agents.</p>}
       {current && <div role="status" className="space-y-1 font-code-sm text-code-sm">
+        {pending && current.request.kind === "set_effort" && <p>Requested effort: {current.request.ultracode ? "Ultracode" : current.request.effort}. Awaiting confirmation.</p>}
         <p>{current.status === "pending" ? "Agent change waiting for the current turn to finish." : current.status === "applying" ? "Applying agent change…" : current.status === "applied" ? "Agent change applied." : current.status === "cancelled" ? "Agent change cancelled." : "Agent change failed."}</p>
         {current.error && <p className="text-error">{current.error}</p>}
         {current.status === "pending" && <Button size="sm" disabled={cancel.isPending} onClick={async () => {

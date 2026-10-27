@@ -174,7 +174,7 @@ pub fn inheritance(surface: Surface) -> Inheritance {
         Surface::Effort => Inheritance {
             inherited_by: agents(&[]),
             skipped_by: agents(&[EVERY_AGENT]),
-            note: "Overridden by bot-hq via CLAUDE_CODE_EFFORT_LEVEL — every spawn resolves the participant's pick, else its role's default (Roles tab), else medium. This knob applies to your own claude only.".into(),
+            note: "Bot-hq uses --effort: the participant's pick, else its role's default (Roles tab), else medium. Its live control uses per-message effort when the process supports it. This knob applies to your own claude only.".into(),
             overridable: true,
         },
         Surface::Model => Inheritance {

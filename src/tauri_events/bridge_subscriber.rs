@@ -197,9 +197,9 @@ fn route<EB: EmitFn + ?Sized>(ev: SignalingEvent, emitter: &BatchEmitter, emit_e
                 serde_json::to_value(&payload).unwrap_or(Value::Null),
             );
         }
-        SignalingEvent::ParticipantChanged { session_id, agent } => {
+        SignalingEvent::ParticipantChanged { session_id, agent, context_reset } => {
             emit_event(ParticipantChangedEvent::EVENT_NAME,
-                serde_json::to_value(ParticipantChangedEvent { session_id, agent }).unwrap_or(Value::Null));
+                serde_json::to_value(ParticipantChangedEvent { session_id, agent, context_reset }).unwrap_or(Value::Null));
         }
         SignalingEvent::SessionActivity {
             session_id,
@@ -407,8 +407,8 @@ mod tests {
         let emitter = BatchEmitter::new(|_| {}, test_storage().await);
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
-        route(SignalingEvent::ParticipantChanged { session_id: "s1".into(), agent: "eyes-2".into() }, &emitter,
+        route(SignalingEvent::ParticipantChanged { session_id: "s1".into(), agent: "eyes-2".into(), context_reset: true }, &emitter,
             &move |name: &str, payload: Value| captured.lock().unwrap().push((name.to_string(), payload)));
-        assert_eq!(*events.lock().unwrap(), vec![("session:participant_changed".into(), serde_json::json!({"session_id":"s1", "agent":"eyes-2"}))]);
+        assert_eq!(*events.lock().unwrap(), vec![("session:participant_changed".into(), serde_json::json!({"session_id":"s1", "agent":"eyes-2", "context_reset":true}))]);
     }
 }

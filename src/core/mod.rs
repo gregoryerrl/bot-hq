@@ -21,6 +21,7 @@ pub mod sequencer;
 pub mod roster_boundary;
 pub mod session;
 pub mod participant_runtime;
+mod participant_effort;
 pub mod state;
 pub mod telemetry;
 pub mod term_text;

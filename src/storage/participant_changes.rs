@@ -14,6 +14,7 @@ pub enum ParticipantChangeRequest {
     Add { role_id: i64, model_id: String, label: Option<String> },
     Remove { participant_id: i64 },
     SwitchModel { participant_id: i64, model_id: String },
+    SetEffort { participant_id: i64, effort: String, ultracode: bool },
 }
 
 /// Supplied by the authenticated host caller, never accepted as UI payload.
@@ -72,7 +73,7 @@ pub(super) async fn selection_fingerprint(conn: &mut SqliteConnection, request: 
                 .bind(participant_id).fetch_one(&mut *conn).await?;
             (Some(model_id), role)
         }
-        ParticipantChangeRequest::Remove { .. } => (None, None),
+        ParticipantChangeRequest::Remove { .. } | ParticipantChangeRequest::SetEffort { .. } => (None, None),
     };
     if let Some(id) = model {
         let mut model: Model = sqlx::query_as("SELECT * FROM models WHERE id = ?")
@@ -142,12 +143,16 @@ pub(super) async fn validate_request(
                 if taken { anyhow::bail!("that participant label or handle is already used in this session"); }
             }
         }
-        ParticipantChangeRequest::Remove { participant_id } | ParticipantChangeRequest::SwitchModel { participant_id, .. } => {
+        ParticipantChangeRequest::Remove { participant_id } | ParticipantChangeRequest::SwitchModel { participant_id, .. }
+        | ParticipantChangeRequest::SetEffort { participant_id, .. } => {
             let (is_enabled, mode, current_model): (bool, String, Option<String>) = sqlx::query_as(
                 "SELECT enabled, participation_mode, model_id FROM session_participants WHERE id = ? AND session_id = ?",
             ).bind(participant_id).bind(session_id).fetch_optional(&mut *conn).await?
                 .context("participant does not belong to this session")?;
             if !is_enabled { anyhow::bail!("the participant has already been removed"); }
+            if let ParticipantChangeRequest::SetEffort { effort, ultracode, .. } = request {
+                crate::agents::effort::EffortPair { effort: effort.clone(), ultracode: *ultracode }.validate()?;
+            }
             match request {
                 ParticipantChangeRequest::Remove { .. } if enabled <= 1 || active - i64::from(mode == MODE_ACTIVE) < 1 => {
                     anyhow::bail!("cannot remove the session's last active participant");
@@ -163,6 +168,32 @@ pub(super) async fn validate_request(
 }
 
 impl Storage {
+    pub(crate) async fn fail_participant_effort_on(conn: &mut SqliteConnection, session: &str, id: &str,
+        record: bool, observed: Option<&crate::agents::effort::EffortPair>, reason: &str) -> Result<()> {
+        let Some(row) = read_change(conn, id).await?.filter(|r| r.session_id == session && r.status == "applying") else { return Ok(()) };
+        let ParticipantChangeRequest::SetEffort { participant_id, .. } = row.request()? else { anyhow::bail!("not an effort change") };
+        if record {
+            sqlx::query("UPDATE session_participants SET effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = ? WHERE session_id = ? AND id = ?")
+                .bind(observed.map(|p| p.effort.as_str())).bind(observed.map(|p| p.ultracode)).bind(observed.is_some())
+                .bind(session).bind(participant_id).execute(&mut *conn).await?;
+        }
+        sqlx::query("UPDATE session_participant_changes SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND session_id = ?")
+            .bind(reason).bind(now_utc()).bind(id).bind(session).execute(conn).await?;
+        Ok(())
+    }
+    /// No row is changed until native readback succeeds. Publication owns only
+    /// the chosen and confirmed knobs; the roster trigger advances revision.
+    pub(crate) async fn publish_participant_effort_on(conn: &mut SqliteConnection, session: &str, id: &str) -> Result<bool> {
+        let Some(row) = read_change(conn, id).await?.filter(|r| r.session_id == session && r.status == "applying") else { return Ok(false) };
+        let request = row.request()?;
+        let ParticipantChangeRequest::SetEffort { participant_id, effort, ultracode } = &request else { anyhow::bail!("not an effort change") };
+        validate_request(conn, session, row.expected_revision, &request).await?;
+        sqlx::query("UPDATE session_participants SET effort = ?, ultracode = ?, effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = 1 WHERE session_id = ? AND id = ? AND enabled <> 0")
+            .bind(effort).bind(ultracode).bind(effort).bind(ultracode).bind(session).bind(participant_id).execute(&mut *conn).await?;
+        sqlx::query("UPDATE session_participant_changes SET status = 'applied', finished_at = ? WHERE id = ? AND session_id = ?")
+            .bind(now_utc()).bind(id).bind(session).execute(conn).await?;
+        Ok(true)
+    }
     pub async fn latest_participant_change(&self, session_id: &str) -> Result<Option<ParticipantChange>> {
         Ok(sqlx::query_as(&format!("SELECT {COLUMNS} FROM session_participant_changes WHERE session_id = ? ORDER BY rowid DESC LIMIT 1"))
             .bind(session_id).fetch_optional(&self.pool).await?)

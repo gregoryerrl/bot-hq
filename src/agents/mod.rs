@@ -8,6 +8,7 @@ pub mod capability;
 pub mod codex;
 pub mod capability_prompt;
 pub mod events;
+pub mod effort;
 pub mod general_rules;
 pub mod handoff;
 pub mod helpers;

@@ -283,7 +283,7 @@ impl ControlEventJournal {
                 detail: Some(cut(reason)),
                 ..Default::default()
             },
-            SignalingEvent::ParticipantChanged { session_id, agent } => {
+            SignalingEvent::ParticipantChanged { session_id, agent, .. } => {
                 self.forget_presence().await;
                 NewControlEvent {
                     session_id: session_id.clone(),
@@ -470,7 +470,7 @@ mod tests {
         journal.record(&SignalingEvent::HaltsCleared { session_id: "t".into() }).await;
         journal.record(&SignalingEvent::AgentHealth { session_id: "t".into(), agent: "hands".into(), health: "stalled".into() }).await;
         journal.record(&SignalingEvent::GateUrgent { session_id: "t".into(), choice_id: "g1".into(), agent: "hands".into(), reason: "prod".into(), command: "rm".into(), under_review: false }).await;
-        journal.record(&SignalingEvent::ParticipantChanged { session_id: "t".into(), agent: "eyes".into() }).await;
+        journal.record(&SignalingEvent::ParticipantChanged { session_id: "t".into(), agent: "eyes".into(), context_reset: true }).await;
         journal.record(&SignalingEvent::DocChanged { session_id: "t".into() }).await;
         journal.record(&SignalingEvent::FindingsChanged { session_id: "t".into() }).await;
         journal.record(&SignalingEvent::AgentAdvancePhase { session_id: "t".into(), agent: "hands".into(), target: "Verify".into() }).await;
@@ -553,7 +553,7 @@ mod tests {
         sqlx::query("UPDATE session_participants SET capabilities = '[\"control_bot_hq\"]' WHERE session_id = 't' AND slug = 'eyes'").execute(storage.pool()).await.unwrap();
         journal.record(&SignalingEvent::MessagePersisted { session_id: Arc::from("t"), message_id: text }).await;
         assert_eq!(rows(&storage).await.len(), 1, "cached: not yet");
-        journal.record(&SignalingEvent::ParticipantChanged { session_id: "t".into(), agent: "eyes".into() }).await;
+        journal.record(&SignalingEvent::ParticipantChanged { session_id: "t".into(), agent: "eyes".into(), context_reset: true }).await;
         journal.record(&SignalingEvent::MessagePersisted { session_id: Arc::from("t"), message_id: text }).await;
         assert_eq!(rows(&storage).await.iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(), ["halt_declared", "participant_changed", "message"]);
     }

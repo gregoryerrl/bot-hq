@@ -289,7 +289,7 @@ impl AppState {
         Ok(row)
     }
 
-    fn owns_change(
+    pub(super) fn owns_change(
         handle: &crate::core::session::SessionHandle,
         context: &LiveContext,
         run: &ChangeRun,
@@ -299,7 +299,7 @@ impl AppState {
             && handle.change_run.as_ref().is_some_and(|r| r.id == run.id)
     }
 
-    async fn check_change_owner(
+    pub(super) async fn check_change_owner(
         &self,
         session: &str,
         run: &ChangeRun,
@@ -328,7 +328,7 @@ impl AppState {
 
     /// Close/restart owns this same per-session barrier while joining the
     /// worker. Cancellation must therefore beat waiting for that barrier.
-    async fn publication_guard(
+    pub(super) async fn publication_guard(
         &self,
         session: &str,
         run: &ChangeRun,
@@ -351,6 +351,7 @@ impl AppState {
             ParticipantChangeRequest::Add { .. } => return Ok(None),
             ParticipantChangeRequest::Remove { participant_id }
             | ParticipantChangeRequest::SwitchModel { participant_id, .. } => participant_id,
+            ParticipantChangeRequest::SetEffort { .. } => anyhow::bail!("effort changes do not replace a runtime"),
         };
         let participant = self
             .storage
@@ -440,6 +441,10 @@ impl AppState {
         if claimed.is_none() {
             boundary.release().await.map_err(anyhow::Error::msg)?;
             return Ok(());
+        }
+        if let ParticipantChangeRequest::SetEffort { participant_id, effort, ultracode } = row.request()? {
+            return self.run_effort_change(row, run, context, boundary, control, participant_id,
+                crate::agents::effort::EffortPair { effort, ultracode }).await;
         }
         context.hold_watchdog().await;
         let mut previous = None;
@@ -762,7 +767,7 @@ impl AppState {
         Ok(())
     }
 
-    async fn change_notice(&self, session: &str, text: &str) {
+    pub(super) async fn change_notice(&self, session: &str, text: &str) {
         crate::core::post_system_notice(
             &self.storage,
             Some(&self.bridge),
@@ -773,7 +778,7 @@ impl AppState {
         )
         .await;
     }
-    async fn change_recap(&self, session: &str, text: &str) {
+    pub(super) async fn change_recap(&self, session: &str, text: &str) {
         self.change_notice(session, text).await;
         self.bridge
             .declare_host_halt(session, text.to_string())

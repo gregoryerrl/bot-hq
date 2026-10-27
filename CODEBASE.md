@@ -94,6 +94,7 @@ request body for non-Anthropic gateways when a model has a `base_url`.
 | `tests/helper_claude_live_test.rs` | IGNORED native Claude helper inventory and outside/symlink read-boundary probe; explicit model/account selection, no live bot-hq server | — |
 | `tests/helper_codex_live_test.rs` | IGNORED native pair of Codex helpers, dynamic reads/outside refusal, inherited-MCP trap and unchanged shared hook file | — |
 | `src/agents/events.rs` | stdout/stderr pumps; `translate` stream-json → `AgentEvent`; context-window arithmetic (`parse_context_usage`) | L |
+| `src/agents/effort.rs` | process-scoped live effort/readback controls; Claude response correlation and capability checks; Codex next-turn pair; confirmed picks for supervisor retries | M |
 | `src/agents/protocol.rs` | stream-json wire types both directions | M |
 | `src/agents/input.rs` | `pump_inputs` stdin writer (messages + control/interrupt) | S |
 | `src/agents/prompts.rs` | layer-3 hardcoded role prose (`HANDS_ROLE`/`EYES_ROLE`, keyed by ROLE SLUG) — seeds `roles.description_prompt`; live prose is the DB row | L |
@@ -220,6 +221,7 @@ check.
 | `src/core/session.rs` | `open_session`/`spawn_existing_session` → `spawn_session_handle` (the big glue fn); `compose_system_prompt`, `resolve_role_prose`, `resolve_roster_facts`, `read_system_prompt`, `participant_spawn_config`, `participant_capabilities`, `resolve_participant_overrides`, `mcp_config_json`; `resolve_participant_config` (model: explicit → role default → legacy `agent_configs` → hardcoded); `spawn_ring`, `boot_then_start`, `RingKick`; `SessionHandle` | XL |
 | `src/core/spawn_draft_tests.rs` | async draft/publication wire tests for both connectors: close/rollback during probe, frozen input settings, staged metadata/token/notices and operation-owned publication | — |
 | `src/core/participant_runtime.rs` | host-owned live change worker: reserve/claim, retire, stage, publish or restore; cancellation and process shutdown receipts | M |
+| `src/core/participant_effort.rs` | same-conversation effort changes at the roster boundary; atomic confirmed publication, verified rollback, and unconfirmed-runtime quarantine; shared UI/controller live status | M |
 | `src/core/helpers.rs` | managed helper start/status/cancel, owned batches, platform-aware Claude/Codex selection and dispatch, transcript/result collection; `HELPER_INSTRUCTIONS` (the brief: citations, and the exact search behind every absence claim), `HELPER_EFFORTS` and the parent-effort default (a task's `effort` pick, else the parent's `effort_at_spawn`, recorded per helper; an omitted effort is skipped from the serialized task so pre-upgrade batch fingerprints still match) | M |
 | `src/core/live_participant.rs` | candidate prompt/config/pump construction, frozen-frontier/window-budgeted history excerpts with authorship and truncation, dynamic activity/watchdog/reviewer roster refresh | M |
 | `src/core/participant_runtime_tests.rs` | injected connector tests through the runtime worker, real ring, storage and close path | — |
@@ -724,7 +726,7 @@ without polling.
 | `frontend/src/components/PendingTray.tsx`, `frontend/src/components/ChoicePrompt.tsx` | topbar bell; one tray question | S |
 | `frontend/src/components/ContextMeter.tsx`, `frontend/src/components/SessionFindingsBanner.tsx`, `frontend/src/components/SessionPhaseChip.tsx`, `frontend/src/components/PhasePill.tsx`, `frontend/src/components/HealthDot.tsx`, `frontend/src/components/BacklogChip.tsx`, `frontend/src/components/RelativeTime.tsx` | badges/chips (BacklogChip = per-participant unread-backlog / starvation chip, threshold shared with the ring's anti-starvation summons; RelativeTime = an "x ago" `<time>` that re-renders on the shared tick, with the absolute local time in its title) | S |
 | `frontend/src/components/ParticipantChip.tsx` | one roster participant in the session header as ONE nowrap unit (hue dot, the `ROLE · Model` label that opens its composed prompt, its badges as children) — the row wraps between chips, never inside one (the 2026-10-19 visual pass); `accountTagOf` is the short account tag (`default`, `acct-2`) a chip carries when the participants bill different accounts | S |
-| `frontend/src/components/SpawnBadge.tsx` | what a participant was ACTUALLY spawned with (migration 0061) — reads the recorded `*_at_spawn` pair, never `effort`/`ultracode`, which are the user's CHOICE and are "inherit" on almost every row. `spawn_knobs_recorded` separates "no override in force" from "predates 0061" | S |
+| `frontend/src/components/SpawnBadge.tsx` | a participant's latest confirmed runtime effort (initially migration 0061, then live readback) — reads the recorded `*_at_spawn` pair, never `effort`/`ultracode`, which are the user's CHOICE and are "inherit" on almost every row. `spawn_knobs_recorded` separates "no override in force" from "predates 0061" | S |
 | `frontend/src/stores/runtime.ts` | `SessionRuntime` hand-mirror + `busyBySlot`/`seedRuntimeStores` | S |
 | `frontend/src/stores/activity.ts` | activity + per-slot busy, `isLocked` (D33) | S |
 | `frontend/src/stores/health.ts`, `frontend/src/stores/context.ts`, `frontend/src/stores/chat.ts`, `frontend/src/stores/trayStaging.ts` | agent health/attention; context occupancy; messages + watermarks; staged tray picks (D34) | S |
@@ -776,7 +778,7 @@ every other FE area imports.
 | `frontend/src/app/RolesPanel.tsx` | role CRUD, capability grid, participation mode | L |
 | `frontend/src/app/ModelsPanel.tsx` | saved-model registry + connection test | M |
 | `frontend/src/app/SessionPolicyPanel.tsx`, `frontend/src/components/PolicyForm.tsx`, `frontend/src/components/GatedKeywordList.tsx` | session gear drawer; shared policy editor; gated keyword rows | M / S / S |
-| `frontend/src/app/SessionRosterEditor.tsx`, `frontend/src/lib/participantChanges.ts`, `src/tauri_cmd/participant_changes.rs` | live add/remove/model controls, checked request/status types, thin host worker commands; pending cancellation and durable status | M / S / S |
+| `frontend/src/app/SessionRosterEditor.tsx`, `frontend/src/lib/participantChanges.ts`, `src/tauri_cmd/participant_changes.rs` | live add/remove/model/effort controls, checked request/status types, thin host worker commands; pending cancellation and durable status | M / S / S |
 | `frontend/src/app/ViolationsPanel.tsx`, `frontend/src/app/FeedbackPanel.tsx`, `frontend/src/app/MeasurementView.tsx` | violations viewer; feedback triage; CL retrieval stats | M / S / S |
 | `frontend/src/app/PromptcodesPanel.tsx` | Settings → Promptcodes: `{code, prompt}` pairs the composer's `/` picker expands (`app_settings` key `promptcodes`) | M |
 | `frontend/src/components/UpdateBanner.tsx` | dismissible update banner | S |

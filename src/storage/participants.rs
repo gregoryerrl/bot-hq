@@ -160,8 +160,8 @@ pub struct Participant {
     /// [`participant_display_name`] for what it overrides and what it leaves
     /// alone.
     pub label: Option<String>,
-    /// What this participant was ACTUALLY spawned with — the pair left standing
-    /// after `reconcile_spawn_knobs`, recorded at spawn (migration 0061).
+    /// Latest confirmed runtime pair: initially reconcile_spawn_knobs at spawn
+    /// (0061), updated only after successful live effort readback.
     ///
     /// **Not the same question as `effort` / `ultracode` above.** Those are the
     /// user's CHOICE, and "inherit" was the choice on 94 of 94 rows when this
@@ -170,7 +170,7 @@ pub struct Participant {
     /// it would be spawned with NOW"). Same call `slot0_model_at_spawn` made.
     pub effort_at_spawn: Option<String>,
     pub ultracode_at_spawn: Option<bool>,
-    /// Whether the pair above describes a real spawn. Every post-floor spawn
+    /// Whether the pair above is confirmed (spawn or live readback). Every post-floor spawn
     /// records a concrete effort (no-inherit, 2026-08-25), so a NULL pair means
     /// a pre-floor row; the flag still separates that from a row nothing ever
     /// spawned.

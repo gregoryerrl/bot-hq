@@ -1408,6 +1408,148 @@ async fn driver_queued_writes_lose_to_pause_revocation_and_runtime_replacement()
     }
 }
 
+fn effort_request(id: i64) -> ParticipantChangeRequest {
+    ParticipantChangeRequest::SetEffort { participant_id: id, effort: "low".into(), ultracode: false }
+}
+
+async fn install_effort_fixture(f: &Fixture, mode: &'static str) {
+    use crate::agents::{effort::{ClaudeReplies, EffortControl}, protocol::ControlRequest};
+    let replies = ClaudeReplies::new();
+    replies.observe(&serde_json::json!({"type":"system","subtype":"init","per_turn_effort_active":true}));
+    let (tx, mut rx) = mpsc::channel::<ControlRequest>(8);
+    let control = EffortControl::claude(replies.clone(), tx, false);
+    let activity = f.state.sessions.lock().await["s1"].activity.clone();
+    let storage = f.state.storage.clone();
+    let role = f.rows[0].role_id;
+    tokio::spawn(async move {
+        let mut actual = "high".to_string(); let mut writes = 0;
+        while let Some(request) = rx.recv().await {
+            let mut body = serde_json::json!({});
+            if request.request.subtype == "apply_flag_settings" {
+                writes += 1;
+                actual = request.request.fields["settings"]["effortLevel"].as_str().unwrap().to_string();
+                if writes == 1 {
+                    if mode == "pause" { activity.set_paused(true); activity.set_paused(false); }
+                    if mode == "revoke" { sqlx::query("UPDATE roles SET capabilities='[]' WHERE id=?").bind(role).execute(storage.pool()).await.unwrap(); }
+                    if mode == "close" { storage.close_session("s1", false).await.unwrap(); }
+                    if mode == "unknown" { replies.observe(&serde_json::json!({"type":"system","subtype":"per_turn_effort_changed","per_turn_effort_active":false})); }
+                }
+            } else {
+                body = serde_json::json!({"applied":{"effort":actual,"ultracode":false,"ultracodeAvailable":true}});
+            }
+            replies.observe(&serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":request.request_id,"response":body}}));
+        }
+    });
+    f.state.sessions.lock().await.get_mut("s1").unwrap().participants[0].handle.effort_control = control;
+    f.state.storage.set_spawn_knobs(f.rows[0].id, Some("high"), Some(false)).await.unwrap();
+}
+
+#[tokio::test]
+async fn effort_change_keeps_runtime_identity_and_publishes_confirmed_and_relaunch_choices() {
+    let f = Fixture::new(false).await; install_effort_fixture(&f, "normal").await;
+    let mut events = f.state.bridge.subscribe();
+    let before = f.state.storage.participant_by_id(f.rows[0].id).await.unwrap().unwrap();
+    let identity = f.state.sessions.lock().await["s1"].participants[0].handle.incarnation().id().to_string();
+    let revision = f.state.storage.roster_revision("s1").await.unwrap();
+    let (services, mut spawned) = services(false);
+    f.start("effort", effort_request(before.id), services).await;
+    assert_eq!(f.done("effort").await.status, "applied");
+    let mut notified = false;
+    while let Ok(event) = events.try_recv() {
+        if let crate::signaling::SignalingEvent::ParticipantChanged { agent, context_reset, .. } = event {
+            assert_eq!(agent, f.rows[0].slug); assert!(!context_reset); notified = true;
+        }
+    }
+    assert!(notified, "the actual publication event preserves the meter");
+    assert!(spawned.try_recv().is_err(), "effort never spawns a replacement");
+    let after = f.state.storage.participant_by_id(before.id).await.unwrap().unwrap();
+    assert_eq!((after.effort.as_deref(), after.ultracode, after.effort_at_spawn.as_deref(), after.ultracode_at_spawn, after.spawn_knobs_recorded), (Some("low"), Some(false), Some("low"), Some(false), true));
+    assert_eq!((after.claude_session_id, after.model_id, after.account_dir_at_spawn, after.capabilities), (before.claude_session_id, before.model_id, before.account_dir_at_spawn, before.capabilities));
+    assert!(f.state.storage.roster_revision("s1").await.unwrap() > revision);
+    assert_eq!(f.state.sessions.lock().await["s1"].participants[0].handle.incarnation().id(), identity);
+    assert!(f.state.bridge.mcp_token_matches("s1", &f.rows[0].slug, Some("token-hands")));
+    assert!(!*f.seats[0].stopped.borrow() && !*f.seats[1].stopped.borrow());
+    let view = crate::tauri_cmd::participant_changes::controls_with_runtime(&f.state.storage, "s1", Some(&f.state)).await.unwrap();
+    assert_eq!(view.selections[0].effort.as_ref().unwrap().current.as_ref().unwrap().effort, "low");
+    let runtime = f.state.sessions.lock().await;
+    assert_eq!(runtime["s1"].participants[0].handle.effort_control.retry_pair().unwrap().effort, "low");
+    drop(runtime);
+    f.end().await;
+}
+
+#[tokio::test]
+async fn effort_changes_wait_for_the_live_turn_and_can_be_cancelled_before_sending() {
+    for cancel in [false, true] {
+        let mut f = Fixture::new(false).await; install_effort_fixture(&f, "normal").await;
+        f.state.storage.post_to_channel("s1", "user", None, "text", "work", None).await.unwrap();
+        f.ring.send(SequencerCommand::UserMessage { mentions:vec![], restarts_rotation:true }).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), f.seats[0].input.recv()).await.unwrap().unwrap();
+        let epoch = f.state.sessions.lock().await["s1"].participants[0].turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
+        let (services, mut spawned) = services(false);
+        let row = f.start("effort", effort_request(f.rows[0].id), services.clone()).await;
+        let replay = f.state.start_participant_change("s1", "effort", row.expected_revision, effort_request(f.rows[0].id), services).await.unwrap();
+        assert_eq!(replay.id, row.id);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(f.state.storage.participant_change("s1", "effort").await.unwrap().unwrap().status, "pending");
+        assert_eq!(f.state.participant_effort_status("s1").await[0].1.current.as_ref().unwrap().effort, "high");
+        if cancel { assert!(f.state.cancel_participant_change("s1", "effort").await.unwrap()); }
+        f.ring.send(SequencerCommand::TurnComplete { participant_id:f.rows[0].id, epoch, ending:crate::core::sequencer::TurnEnding::Spoke }).await.unwrap();
+        assert_eq!(f.done("effort").await.status, if cancel { "cancelled" } else { "applied" });
+        assert!(spawned.try_recv().is_err());
+        assert!(!*f.seats[0].stopped.borrow());
+        assert_eq!(f.state.participant_effort_status("s1").await[0].1.current.as_ref().unwrap().effort, if cancel { "high" } else { "low" });
+        f.end().await;
+    }
+}
+
+#[tokio::test]
+async fn effort_publication_loses_to_pause_and_driver_revocation_then_restores_readback() {
+    for mode in ["pause", "revoke", "close"] {
+        let f = driver_fixture(false).await; install_effort_fixture(&f, mode).await;
+        let revision = f.state.storage.roster_revision("s1").await.unwrap();
+        let result = driver_rpc(&f.state, serde_json::json!({"action":"change_participant","session_id":"s1","request_id":"effort","revision":revision,"request":{"kind":"set_effort","participant_id":f.rows[0].id,"effort":"low","ultracode":false}})).await.unwrap();
+        assert!(result["result"].is_object(), "{result}");
+        assert_eq!(f.done("effort").await.status, "failed");
+        let after = f.state.storage.participant_by_id(f.rows[0].id).await.unwrap().unwrap();
+        assert_eq!(after.effort_at_spawn.as_deref(), Some("high"));
+        assert_ne!(after.effort.as_deref(), Some("low"));
+        assert_eq!(f.state.participant_effort_status("s1").await[0].1.current.as_ref().unwrap().effort, "high");
+        assert!(!*f.seats[0].stopped.borrow());
+        f.end().await;
+    }
+}
+
+#[tokio::test]
+async fn unconfirmed_effort_stops_the_runtime_and_clears_the_confirmation_badge() {
+    let f = Fixture::new(false).await; install_effort_fixture(&f, "unknown").await;
+    let (services, mut spawned) = services(false);
+    f.start("effort", effort_request(f.rows[0].id), services).await;
+    assert_eq!(f.done("effort").await.status, "failed");
+    let after = f.state.storage.participant_by_id(f.rows[0].id).await.unwrap().unwrap();
+    assert!(!after.spawn_knobs_recorded);
+    assert_ne!(after.effort.as_deref(), Some("low"));
+    assert!(f.state.storage.session_halt("s1").await.unwrap().is_some());
+    assert!(spawned.try_recv().is_err());
+    tokio::time::timeout(Duration::from_secs(2), async { while !*f.seats[0].stopped.borrow() { tokio::task::yield_now().await; } }).await.unwrap();
+    f.end().await;
+}
+
+#[tokio::test]
+async fn driver_effort_change_and_session_read_share_the_confirmed_runtime_state() {
+    let f = driver_fixture(false).await; install_effort_fixture(&f, "normal").await;
+    let revision = f.state.storage.roster_revision("s1").await.unwrap();
+    let request = serde_json::json!({"action":"change_participant","session_id":"s1","request_id":"effort","revision":revision,"request":{"kind":"set_effort","participant_id":f.rows[0].id,"effort":"low","ultracode":false}});
+    driver_rpc(&f.state, request.clone()).await.unwrap();
+    let row = f.done("effort").await;
+    assert_eq!(row.status, "applied");
+    assert_eq!(row.origin().unwrap(), ParticipantChangeOrigin::Agent { session_id:"s1".into(), participant_id:f.rows[0].id });
+    driver_rpc(&f.state, request).await.unwrap(); // idempotent reply, no second apply
+    let state = driver_rpc(&f.state, serde_json::json!({"action":"session","session_id":"s1"})).await.unwrap();
+    assert_eq!(state["result"]["controls"]["selections"][0]["effort"]["current"]["effort"], "low");
+    assert_eq!(state["result"]["controls"]["latest_change"]["status"], "applied");
+    f.end().await;
+}
+
 impl Fixture {
     async fn new(codex: bool) -> Self {
         Self::with_database(codex, false).await
@@ -1701,7 +1843,7 @@ async fn worker_switches_both_connectors_without_restarting_peers_and_receives_n
         assert_eq!(f.done("switch").await.status, "applied");
         let mut changed = vec![];
         while let Ok(event) = changes.try_recv() {
-            if let crate::signaling::SignalingEvent::ParticipantChanged { session_id, agent } = event {
+            if let crate::signaling::SignalingEvent::ParticipantChanged { session_id, agent, .. } = event {
                 assert_eq!(session_id, "s1"); changed.push(agent);
             }
         }

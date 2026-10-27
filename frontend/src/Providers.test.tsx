@@ -104,6 +104,20 @@ describe("Providers — the slot-shaped runtime wire", () => {
     expect(client!.getQueryState(key)?.isInvalidated).toBe(true);
   });
 
+  it("refreshes effort metadata without dropping the existing context meter", async () => {
+    let client: import("@tanstack/react-query").QueryClient | undefined;
+    function Probe() { client = useQueryClient(); return null; }
+    render(<Providers><Probe /></Providers>);
+    await waitFor(() => expect(handlers.has("session:participant_changed")).toBe(true));
+    const reading = { usedTokens: 900, contextWindow: 1000 };
+    useContextStore.setState({ bySession: { s1: { hands: reading } } });
+    const key = ["list_session_participants", { sessionId: "s1" }];
+    client!.setQueryData(key, []);
+    emit("session:participant_changed", { session_id: "s1", agent: "hands", context_reset: false });
+    expect(useContextStore.getState().bySession.s1.hands).toEqual(reading);
+    expect(client!.getQueryState(key)?.isInvalidated).toBe(true);
+  });
+
   it("refreshes configuration queries after a delegated settings change", async () => {
     let client: import("@tanstack/react-query").QueryClient | undefined;
     function Probe() { client = useQueryClient(); return null; }

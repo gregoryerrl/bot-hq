@@ -193,6 +193,7 @@ impl AgentContextEvent {
 pub struct ParticipantChangedEvent {
     pub session_id: String,
     pub agent: String,
+    pub context_reset: bool,
 }
 impl ParticipantChangedEvent {
     pub const EVENT_NAME: &'static str = "session:participant_changed";

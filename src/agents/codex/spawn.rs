@@ -394,11 +394,16 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
 
     let translator = translator_for(&cfg, &home);
     let effort = codex_effort(cfg.overrides.effort.as_deref()).map(str::to_string);
+    let turn_effort = Arc::new(std::sync::Mutex::new(crate::agents::effort::EffortPair {
+        effort: effort.clone().unwrap_or_else(|| crate::claude_config::DEFAULT_EFFORT.into()), ultracode: false,
+    }));
+    let effort_control = crate::agents::effort::EffortControl::codex(turn_effort.clone());
     let driver = Driver {
         client: Arc::new(client),
         thread_id,
         translator,
         effort,
+        turn_effort: Some(turn_effort),
         agent_name: cfg.agent_name.clone(),
         rendered,
         cwd: cfg.working_dir.as_ref().map(|d| d.display().to_string()),
@@ -410,6 +415,7 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
     };
     let event_tx_for_lifecycle = event_tx.clone();
     let agent_name = cfg.agent_name.clone();
+    let lifecycle_effort = effort_control.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = driver.run(incoming, event_tx, input_rx, control_rx) => {}
@@ -428,12 +434,15 @@ pub async fn spawn_codex_agent(cfg: SpawnConfig) -> Result<AgentHandle> {
         if let Some(pid) = child_pid {
             CHILD_PIDS.lock().unwrap_or_else(|p| p.into_inner()).remove(&pid);
         }
+        lifecycle_effort.disconnected().await;
         let _ = stopped_tx.send(Some(result));
         let _ = event_tx_for_lifecycle.send(AgentEvent::Exited("codex app-server ended".into())).await;
     });
 
-    Ok(AgentHandle::from_parts(cfg.agent_name, cfg.session_id, event_rx, input_tx, control_tx, kill_tx)
-        .with_stop_observer(stopped_rx))
+    let mut handle = AgentHandle::from_parts(cfg.agent_name, cfg.session_id, event_rx, input_tx, control_tx, kill_tx)
+        .with_stop_observer(stopped_rx);
+    handle.effort_control = effort_control;
+    Ok(handle)
 }
 
 fn kill_group(pid: Option<u32>) {
@@ -637,6 +646,7 @@ struct Driver {
     thread_id: String,
     translator: Translator,
     effort: Option<String>,
+    turn_effort: Option<Arc<std::sync::Mutex<crate::agents::effort::EffortPair>>>,
     agent_name: String,
     rendered: RenderedHook,
     cwd: Option<String>,
@@ -1038,7 +1048,8 @@ impl Driver {
             "threadId": self.thread_id,
             "input": [{ "type": "text", "text": text }],
         });
-        if let Some(effort) = &self.effort {
+        let current_effort = self.turn_effort.as_ref().map(|pair| pair.lock().unwrap_or_else(|p| p.into_inner()).effort.clone());
+        if let Some(effort) = current_effort.as_ref().or(self.effort.as_ref()) {
             params["effort"] = json!(effort);
         }
         let result = self.client.request("turn/start", params).await?;
@@ -1339,6 +1350,7 @@ mod tests {
         events: mpsc::Receiver<AgentEvent>,
         input: mpsc::Sender<OutgoingUserMessage>,
         control: mpsc::Sender<ControlRequest>,
+        effort: crate::agents::effort::EffortControl,
     }
 
     fn harness() -> Harness {
@@ -1353,11 +1365,14 @@ mod tests {
         let (event_tx, events) = mpsc::channel(64);
         let (input, input_rx) = mpsc::channel(8);
         let (control, control_rx) = mpsc::channel(8);
+        let turn_effort = Arc::new(std::sync::Mutex::new(crate::agents::effort::EffortPair { effort: "high".into(), ultracode: false }));
+        let effort = crate::agents::effort::EffortControl::codex(turn_effort.clone());
         let driver = Driver {
             client: Arc::new(client),
             thread_id: "thr".into(),
             translator: Translator::new("gpt-6-astra", ""),
             effort: Some("high".into()),
+            turn_effort: Some(turn_effort),
             agent_name: "eyes".into(),
             rendered: RenderedHook::new(Path::new("/h"), &std::env::current_exe().unwrap(), Path::new("/data")),
             cwd: Some("/tmp/repo".into()),
@@ -1368,7 +1383,7 @@ mod tests {
             session_id: "s-test".into(),
         };
         tokio::spawn(driver.run(incoming, event_tx, input_rx, control_rx));
-        Harness { fake: Fake { lines: tokio::io::BufReader::new(s_read).lines(), writer: s_write }, events, input, control }
+        Harness { fake: Fake { lines: tokio::io::BufReader::new(s_read).lines(), writer: s_write }, events, input, control, effort }
     }
 
     thread_local! {
@@ -1447,6 +1462,36 @@ mod tests {
         h.fake.turn_completed("t1").await;
         assert!(matches!(next_event(&mut h).await, AgentEvent::Text(t) if t == "hi back"));
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error: false, context, .. } if context.verdict == ContextVerdict::NoUsage));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changing_effort_mid_turn_keeps_the_command_alive_and_updates_only_the_next_turn() {
+        let (_server, pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("first")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        assert_eq!(start["params"]["effort"], "high");
+        h.fake.answer(&start, json!({"turn":{"id":"t1","status":"inProgress","items":[]}})).await;
+        let command = start_command(pid, &own);
+        h.fake.write(json!({"method":"item/started","params":{"item":{"type":"commandExecution","id":"cmd","command":"sleep 400","processId":command.to_string(),"status":"inProgress"}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        h.effort.apply(&crate::agents::effort::EffortPair { effort: "low".into(), ultracode: false }).await.unwrap();
+        h.fake.silent_for(std::time::Duration::from_millis(500)).await;
+        assert!(alive(pid) && alive(command), "an effort change must not interrupt or reap commands");
+        h.fake.turn_completed("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error:false, .. }));
+        assert!(alive(command), "normal completion must not take the interrupted-command cleanup branch");
+        h.input.send(OutgoingUserMessage::text("second")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let next = h.fake.read().await;
+        assert_eq!(next["method"], "turn/start");
+        assert_eq!(next["params"]["threadId"], start["params"]["threadId"]);
+        assert_eq!(next["params"]["effort"], "low");
+        h.fake.answer(&next, json!({"turn":{"id":"t2","status":"inProgress","items":[]}})).await;
     }
 
     /// P2: a page that arrives mid-turn is steered in; when the steer fails
