@@ -157,6 +157,7 @@ export function SessionPolicyPanel({
         </p>
         <PolicyOriginBadge sessionId={sessionId} open={open} />
         <SessionRosterEditor key={sessionId} sessionId={sessionId} />
+        <SessionRelaySection sessionId={sessionId} />
         {isLoading ? (
           <div className="h-40 animate-pulse rounded-lg border border-outline-variant bg-surface-container" />
         ) : (
@@ -181,6 +182,59 @@ export function SessionPolicyPanel({
       onCancel={discard.cancel}
     />
     </>
+  );
+}
+
+/**
+ * The relay opt-in (Plan Batch 6): a session that holds an application
+ * controller receives attributed peer messages (`send_session_message`) only
+ * once it is ticked here — or by its controller through `app_control`. Sessions
+ * without a controller accept relay by default, so for them the tick is inert.
+ * Saved on the click: there is nothing to batch with the policy draft.
+ */
+function SessionRelaySection({ sessionId }: { sessionId: string }) {
+  const accepts = useTauriQuery<boolean>("get_session_accepts_relay", { sessionId });
+  const save = useTauriMutation<void, { sessionId: string; accepts: boolean }>(
+    "set_session_accepts_relay",
+  );
+  const onToggle = async (next: boolean) => {
+    try {
+      await save.mutateAsync({ sessionId, accepts: next });
+    } catch {
+      return; // `save.error` renders below
+    }
+    accepts.refetch();
+  };
+  return (
+    <section className="mt-6 rounded-lg border border-outline-variant/40 bg-surface-container/40 px-4 py-3">
+      <label className="flex cursor-pointer items-start gap-3">
+        <input
+          type="checkbox"
+          className="mt-1 size-4 accent-primary"
+          checked={accepts.data ?? false}
+          disabled={accepts.isLoading || save.isPending}
+          onChange={(e) => onToggle(e.target.checked)}
+          data-testid="session-accepts-relay"
+        />
+        <span>
+          <span className="block font-body-md text-body-md text-on-surface">
+            Accept relayed messages while a controller is here
+          </span>
+          <span className="mt-1 block font-body-sm text-body-sm text-muted">
+            Participants of other sessions holding <span className="text-on-surface">Cross-session messaging</span> can
+            send this session a host row that opens <code className="font-code-sm text-code-sm">Message from &lt;slug&gt; of &lt;session&gt;</code> with
+            their text quoted under it — a peer's line, never a direction. A session whose participant holds <span className="text-on-surface">Application control</span> refuses
+            those until this is ticked (its controller can also tick it with <code className="font-code-sm text-code-sm">app_control admin set_session_relay</code>);
+            every other session accepts them without it.
+          </span>
+        </span>
+      </label>
+      {save.error && (
+        <p className="mt-2 font-code-sm text-code-sm text-on-error-container">
+          Save failed: {save.error.message}
+        </p>
+      )}
+    </section>
   );
 }
 

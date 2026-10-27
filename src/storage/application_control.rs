@@ -23,18 +23,47 @@ pub struct ControlAudit {
     pub detail: Option<String>,
 }
 
+/// The application-control grant: every `app_control` action.
+pub const CONTROL_GRANT: &str = "control_bot_hq";
+/// The narrower cross-session messaging grant (Plan Batch 6): attributed peer
+/// text into another session, nothing else of the controller's reach.
+pub const RELAY_GRANT: &str = "message_sessions";
+
+fn grant_denial(grant: &str) -> String {
+    match grant {
+        CONTROL_GRANT => "full application control is not granted or has been revoked".into(),
+        RELAY_GRANT => "cross-session messaging is not granted or has been revoked".into(),
+        other => format!("the `{other}` capability is not granted or has been revoked"),
+    }
+}
+
 impl Storage {
     /// Invite-time grant AND current role consent. Granting a role later does
     /// not upgrade existing participants; revocation takes effect immediately.
     pub async fn controller_actor(&self, session: &str, slug: &str) -> Result<ControlActor> {
+        self.granted_actor(session, slug, CONTROL_GRANT).await
+    }
+
+    pub async fn granted_actor(&self, session: &str, slug: &str, grant: &str) -> Result<ControlActor> {
         let mut conn = self.pool.acquire().await?;
-        Self::controller_actor_on(&mut conn, session, slug).await
+        Self::granted_actor_on(&mut conn, session, slug, grant).await
     }
 
     pub(crate) async fn controller_actor_on(
         conn: &mut sqlx::SqliteConnection,
         session: &str,
         slug: &str,
+    ) -> Result<ControlActor> {
+        Self::granted_actor_on(conn, session, slug, CONTROL_GRANT).await
+    }
+
+    /// The same two-sided check for any capability slug: the participant's
+    /// snapshot AND its current role must both carry `grant`.
+    pub(crate) async fn granted_actor_on(
+        conn: &mut sqlx::SqliteConnection,
+        session: &str,
+        slug: &str,
+        grant: &str,
     ) -> Result<ControlActor> {
         let row: Option<(i64, String, String)> = sqlx::query_as(
             "SELECT p.id, p.capabilities, r.capabilities FROM session_participants p \
@@ -51,10 +80,7 @@ impl Storage {
         for grants in [snapshot, live] {
             let values: Vec<String> =
                 serde_json::from_str(&grants).context("controller grants cannot be read")?;
-            anyhow::ensure!(
-                values.iter().any(|s| s == "control_bot_hq"),
-                "full application control is not granted or has been revoked"
-            );
+            anyhow::ensure!(values.iter().any(|s| s == grant), "{}", grant_denial(grant));
         }
         Ok(ControlActor {
             session_id: session.into(),

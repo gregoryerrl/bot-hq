@@ -2,7 +2,7 @@ import { render, screen, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SessionPolicyPanel } from "./SessionPolicyPanel";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type InvokeArgs } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const mockInvoke = vi.mocked(invoke);
@@ -112,6 +112,43 @@ describe("SessionPolicyPanel roster (rc3 D10)", () => {
     await screen.findByRole("dialog", { name: /session settings/i });
 
     expect(screen.queryByText(/participants \(turn order\)/i)).toBeNull();
+  });
+});
+
+describe("SessionPolicyPanel — the relay opt-in (Plan Batch 6)", () => {
+  beforeEach(() => mockInvoke.mockReset());
+
+  it("reads the session's flag and saves a tick at once, outside the policy draft", async () => {
+    let accepts = false;
+    mockInvoke.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      switch (cmd) {
+        case "list_session_participants":
+          return ROSTER;
+        case "get_session_policy":
+          return {};
+        case "get_session_tool_gate":
+          return [];
+        case "get_session_accepts_relay":
+          return accepts;
+        case "set_session_accepts_relay":
+          accepts = (args as Record<string, unknown>).accepts as boolean;
+          return null;
+        default:
+          return null;
+      }
+    });
+    renderPanel();
+    const box = (await screen.findByTestId("session-accepts-relay")) as HTMLInputElement;
+    await vi.waitFor(() => expect(box.disabled).toBe(false));
+    expect(box.checked).toBe(false);
+    fireEvent.click(box);
+    await vi.waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_session_accepts_relay", { sessionId: "s1", accepts: true }),
+    );
+    await vi.waitFor(() => expect((screen.getByTestId("session-accepts-relay") as HTMLInputElement).checked).toBe(true));
+    // The tick is its own save: the policy draft stays clean.
+    expect(screen.queryByText("Unsaved")).not.toBeInTheDocument();
+    expect(screen.getByText(/Accept relayed messages while a controller is here/)).toBeInTheDocument();
   });
 });
 

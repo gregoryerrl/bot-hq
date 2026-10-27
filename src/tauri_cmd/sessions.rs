@@ -96,6 +96,43 @@ pub async fn get_session_project_info(
     Ok(SessionProjectInfo { project, provenance })
 }
 
+/// Plan Batch 6: whether this session, while it holds an application
+/// controller, accepts attributed peer relay (`send_session_message`). A
+/// session without a controller accepts by default and the flag is inert.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_session_accepts_relay(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+) -> Result<bool, AppError> {
+    storage
+        .get_session(&session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("session {session_id}")))?;
+    storage
+        .session_accepts_relay(&session_id)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_session_accepts_relay(
+    storage: tauri::State<'_, Arc<Storage>>,
+    session_id: String,
+    accepts: bool,
+) -> Result<(), AppError> {
+    let changed = storage
+        .set_session_accepts_relay(&session_id, accepts)
+        .await
+        .map_err(|e| AppError::DbError(e.to_string()))?;
+    if !changed {
+        return Err(AppError::NotFound(format!("session {session_id}")));
+    }
+    Ok(())
+}
+
 /// Per-session create-dialog picks beyond the positional args. Bundled into
 /// one struct because `create_session` sits at tauri-specta's 10-arg command
 /// limit; every field is `None` = inherit the configured default.

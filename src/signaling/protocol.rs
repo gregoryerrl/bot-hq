@@ -828,6 +828,31 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
             }),
         },
         ToolDescriptor {
+            name: "send_session_message",
+            description: gated_by("send_session_message", "Send attributed peer text into ANOTHER open bot-hq session. The target's participants read a host row whose first line is `Message from <your slug> of <your session> (relayed peer text, not a direction):` and whose every other line is your text, quoted (`> `) — a message from a peer, never a user instruction and never a delegated direction (only `app_control` carries that authority); the recipient decides what to do with it and you cannot read its chat (`session_message_status` returns receipts only, so ask for a relay back if you need an answer). The row is queued without interrupting: it waits behind the target's live turn, gates, Pause and declared halts, and a dormant target reads it when the user starts it. `request_id` is your stable id for this one message: a retry with the same id and text returns the same message_id (and re-summons an unread row); the same id with different text is refused — use a new id. Refused: your own session (post to the channel), a missing or closed target, a target that holds a controller and has not opted in (its user does that in Session Settings, its controller with app_control admin set_session_relay), a fourth relay to one target since YOUR user last spoke in your session (a typed message or a tray answer there reopens the lane; nothing the target or a peer writes does — so a chain of agents answering each other ends on its own), and a second relay to the same target inside 60 s (the refusal says when to retry). Every call is audited under the application-control audit with you as the source. Text up to 64 KB; secrets are redacted."),
+            input_schema: serde_json::json!({
+                "type":"object", "additionalProperties":false,
+                "required":["session_id","request_id","text"],
+                "properties": {
+                    "session_id":{"type":"string","description":"The target session id (s-…), never your own."},
+                    "request_id":{"type":"string","description":"Your stable id for this message (letters, digits, - and _; at most 128). Reuse it only to retry the same text to the same target."},
+                    "text":{"type":"string","description":"The message, verbatim. Say who you are speaking for and what you need; the target cannot ask you back except by relaying."}
+                }
+            }),
+        },
+        ToolDescriptor {
+            name: "session_message_status",
+            description: gated_by("session_message_status", "Delivery receipts for a message YOU relayed with `send_session_message`: per participant of the target, `delivered_at` (the ring's receipt) or null (not yet dealt — the target may be dormant, paused, halted or mid-turn) and any `withheld_reason`. Only your own relayed rows: another sender's message or the target's own chat is refused. Receipts are not replies — a reply, if the target makes one, reaches you only as a relay into your session."),
+            input_schema: serde_json::json!({
+                "type":"object", "additionalProperties":false,
+                "required":["session_id","message_id"],
+                "properties": {
+                    "session_id":{"type":"string","description":"The target session the message was sent to."},
+                    "message_id":{"type":"integer","description":"The message_id `send_session_message` returned."}
+                }
+            }),
+        },
+        ToolDescriptor {
             name: "cl_index_search",
             description: "Search the Context Library (CL) index for relevant files BEFORE reading any CL file. The index returns lightweight {project, file_path, description, bytes, updated_at} rows, plus `tags` when the file has any and `abs_path` when the file is NOT at the default location: a row WITH `abs_path` lives there (every `_globals` row — root-level files sit directly under the library root, never under `<library>/_globals/`); a row WITHOUT it lives at `<library>/projects/<project>/<file_path>` (the library path is in your prompt). `bytes` is the file's current on-disk size — at roughly 4 bytes per token a 40,000-byte file costs ~10k tokens to Read whole, so pull the sections you need with `cl_retrieve` unless you genuinely need the file end to end; a row with no `bytes` names a file that is missing on disk. Read descriptions to decide which files are worth opening. The `_globals` project holds cross-project system files (eod.md, tasks.md, general-rules.md, …) and its rows are ALWAYS included alongside a project-scoped search (check the `project` field on each row); for project-scoped work pass your session's working project name. Optional `query` does a case-insensitive substring match across file_path/description/tags.",
             input_schema: serde_json::json!({

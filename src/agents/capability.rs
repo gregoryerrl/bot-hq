@@ -48,6 +48,9 @@ pub enum Capability {
     // Explicit application-wide delegation; never part of a preset.
     ControlBotHq,
     DelegateTasks,
+    /// Plan Batch 6: attributed peer text into other open sessions — no
+    /// answers, no lifecycle, no settings. Never part of a preset.
+    MessageSessions,
 }
 
 impl Capability {
@@ -70,7 +73,7 @@ impl Capability {
     /// below. `all_lists_every_variant_exactly_once` and `capability_prompt`'s
     /// `all_covers_every_capability_the_presets_and_the_tool_map_name` then
     /// cross-check this array against three independent sources.
-    pub const ALL: [Capability; 18] = {
+    pub const ALL: [Capability; 19] = {
         use Capability::*;
         [
             ReadChannel,
@@ -91,6 +94,7 @@ impl Capability {
             WriteContextLibrary,
             ControlBotHq,
             DelegateTasks,
+            MessageSessions,
         ]
     };
 
@@ -108,6 +112,7 @@ impl Capability {
             WriteContextLibrary => "Knowledge",
             ControlBotHq => "Application control",
             DelegateTasks => "Execution",
+            MessageSessions => "Application control",
         }
     }
 
@@ -133,6 +138,7 @@ impl Capability {
             WriteContextLibrary => "Write the Context Library",
             ControlBotHq => "Full control of bot-hq",
             DelegateTasks => "Sub-agent development",
+            MessageSessions => "Cross-session messaging",
         }
     }
 
@@ -159,6 +165,7 @@ impl Capability {
             WriteContextLibrary => "Add to or edit the Context Library.",
             ControlBotHq => "Delegate user-level application control across projects and sessions, including approving its own commands and changing enforcement settings. New participants only; unchecking revokes existing controllers immediately. Grant only to a role you intend to drive bot-hq.",
             DelegateTasks => "Run up to two managed read-only helpers using a selected saved model/account. Helpers consume that account's usage; the parent integrates and verifies their work. New participants only. Helpers stop with the parent's turn. Native delegation is disabled for all newly started agents; this checkbox grants managed helpers only.",
+            MessageSessions => "Send attributed messages into other open sessions and read their delivery receipts — peer text, never a direction: no approvals, no start/resume/close, no settings. A session that holds a controller receives them only after it opts in; one message per target per minute and at most three unanswered. New participants only.",
         }
     }
 
@@ -183,6 +190,7 @@ impl Capability {
             WriteContextLibrary => "write_context_library",
             ControlBotHq => "control_bot_hq",
             DelegateTasks => "delegate_tasks",
+            MessageSessions => "message_sessions",
         }
     }
 
@@ -207,6 +215,7 @@ impl Capability {
             "write_context_library" => WriteContextLibrary,
             "control_bot_hq" => ControlBotHq,
             "delegate_tasks" => DelegateTasks,
+            "message_sessions" => MessageSessions,
             _ => return None,
         })
     }
@@ -238,6 +247,7 @@ pub fn required_for(tool: &str) -> Option<Capability> {
         "helper_result" => ReadChannel,
         "app_control" => ControlBotHq,
         "delegate_tasks" => DelegateTasks,
+        "send_session_message" | "session_message_status" => MessageSessions,
         "ask_user_choice" => AskUser,
         "mark_awaiting_user" | "halt" => Halt,
         "request_approval" => ParkApproval,
@@ -651,13 +661,13 @@ mod tests {
                 ReadChannel | PostChannel | AskUser | ParkApproval | SupersedeQuestion | Halt
                 | CloseSession | FileFinding | ApproveFinding
                 | DispositionFinding | OverrideReviewerBlock | EditFiles | RunBash | GatedBash
-                | RunTerminal | WriteContextLibrary | ControlBotHq | DelegateTasks => {}
+                | RunTerminal | WriteContextLibrary | ControlBotHq | DelegateTasks | MessageSessions => {}
             }
             assert!(seen.insert(cap), "{} is listed twice in ALL", cap.slug());
         }
         assert_eq!(
             seen.len(),
-            18,
+            19,
             "a capability is missing from `Capability::ALL`"
         );
     }

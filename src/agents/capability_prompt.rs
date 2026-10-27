@@ -131,6 +131,11 @@ pub fn phrasing(cap: Capability) -> Phrasing {
             deny: "delegate work to sub-agents — `delegate_tasks` is refused for you and native Agent/Workflow/Task delegation is disabled",
             peer: "delegates bounded read-only work to managed helpers",
         },
+        MessageSessions => Phrasing {
+            grant: "send attributed peer text into another open session with `send_session_message(session_id, request_id, text)` and read its receipts with `session_message_status` — it lands as a host-origin notice naming you and your session, never as the user's words or a direction; it queues behind the target's turns, gates, Pause and halts, never starts a dormant session, and a session holding a controller takes it only after opting in; one message per target per minute, and three per target between two things your own user says in your session",
+            deny: "message another session — `send_session_message` is refused for you; a session document or the user relays instead",
+            peer: "sends attributed messages to other sessions",
+        },
         FileFinding => Phrasing {
             grant: "file a review finding with `eyes_flag(severity, summary)` — a `blocking` \
                     one mechanically gates commit and push until it is dispositioned",

@@ -215,6 +215,26 @@ impl Storage {
     /// first — the ones a boot brings back on its own, so the wake has a ring
     /// to deal to. A plain halt, a closed row, a session with no halt: not
     /// listed.
+    /// Plan Batch 6: whether a session that holds a controller accepts peer
+    /// relay messages (`send_session_message`); read only for such sessions.
+    pub async fn session_accepts_relay(&self, session_id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar::<_, i64>("SELECT accepts_relay FROM sessions WHERE id = ?")
+            .bind(session_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some_and(|v| v != 0))
+    }
+
+    pub async fn set_session_accepts_relay(&self, session_id: &str, accepts: bool) -> Result<bool> {
+        Ok(sqlx::query("UPDATE sessions SET accepts_relay = ? WHERE id = ?")
+            .bind(accepts as i64)
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            > 0)
+    }
+
     pub async fn sessions_with_temporary_halt(&self) -> Result<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT id FROM sessions WHERE closed_at IS NULL AND halt_wake_at IS NOT NULL ORDER BY created_at",

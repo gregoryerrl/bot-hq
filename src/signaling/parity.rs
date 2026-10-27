@@ -476,7 +476,11 @@ async fn the_reviewer_down_gate_blocks_only_a_duo_with_a_dead_reviewer() {
 // existing roles; adding it to their grants to appease the old oracle would
 // violate that instruction. No previously available tool changes permission.
 // delegate_tasks is the user's explicit 2026-10-25 opt-in helper mandate.
-const SANCTIONED_DIVERGENCE: &[&str] = &["flag_finding", "close_session", "delegate_tasks", "app_control", "cl_edit_file"];
+// send_session_message / session_message_status (s-ca0da1e6, Plan Batch 6,
+// 2026-10-27) stand on the new opt-in `message_sessions` grant — the attributed
+// peer relay the user asked for in feedback #108/#114/#115; the name gate never
+// knew them and no preset holds the grant, so neither seeded role may use them.
+const SANCTIONED_DIVERGENCE: &[&str] = &["flag_finding", "close_session", "delegate_tasks", "app_control", "send_session_message", "session_message_status", "cl_edit_file"];
 
 #[tokio::test]
 async fn the_capability_gate_reproduces_the_name_gate_for_every_tool() {

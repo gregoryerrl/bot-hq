@@ -141,12 +141,23 @@ impl SignalingBridge {
         session: &str,
         slug: &str,
     ) -> Result<ControlActor> {
+        self.granted_authority(session, slug, crate::storage::CONTROL_GRANT).await
+    }
+
+    /// The caller's standing to act under `grant` right now: snapshot and live
+    /// role carry it, and its session is not paused or cancelling.
+    pub(crate) async fn granted_authority(
+        &self,
+        session: &str,
+        slug: &str,
+        grant: &str,
+    ) -> Result<ControlActor> {
         let storage = self
             .storage_handle()
             .await
             .context("storage is unavailable")?;
-        let actor = storage.controller_actor(session, slug).await?;
-        // A retired/paused controller must not issue new administrative work.
+        let actor = storage.granted_actor(session, slug, grant).await?;
+        // A retired/paused caller must not issue new work.
         // An ordinary awaiting-user recap is not a human Pause.
         if self
             .session_activity
@@ -156,7 +167,7 @@ impl SignalingBridge {
             .and_then(Weak::upgrade)
             .is_some_and(|a| a.holds_wakes())
         {
-            anyhow::bail!("controller session is paused or cancelling");
+            anyhow::bail!("caller session is paused or cancelling");
         }
         Ok(actor)
     }
@@ -373,19 +384,7 @@ impl SignalingBridge {
             MessageStatus {
                 session_id,
                 message_id,
-            } => {
-                let exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM messages WHERE id = ? AND session_id = ?)",
-                )
-                .bind(message_id)
-                .bind(&session_id)
-                .fetch_one(storage.pool())
-                .await?;
-                anyhow::ensure!(exists, "message does not belong to this session");
-                let rows: Vec<(i64, String, bool, Option<String>, Option<String>)> = sqlx::query_as("SELECT p.id, p.slug, p.enabled <> 0, d.delivered_at, d.withheld_reason FROM session_participants p LEFT JOIN participant_deliveries d ON d.participant_id = p.id AND d.message_id = ? WHERE p.session_id = ? AND (p.enabled <> 0 OR d.delivered_at IS NOT NULL) ORDER BY p.turn_position, p.id")
-                    .bind(message_id).bind(&session_id).fetch_all(storage.pool()).await?;
-                json!({"message_id":message_id,"session_id":session_id,"participants":rows.into_iter().map(|(id,slug,enabled,delivered_at,withheld_reason)|json!({"participant_id":id,"slug":slug,"enabled":enabled,"delivered_at":delivered_at,"withheld_reason":withheld_reason})).collect::<Vec<_>>()})
-            }
+            } => self.message_receipts(storage, &session_id, message_id).await?,
             Answer { .. } => anyhow::bail!("answer is a write operation"),
             Sessions {
                 before_id,
@@ -414,7 +413,8 @@ impl SignalingBridge {
                 let runtime = self.session_activity.lock().await.get(&session_id).and_then(Weak::upgrade)
                     .map(|a|json!({"activity":a.current().as_str(),"paused":a.is_paused()}));
                 json!({"session": crate::tauri_cmd::sessions::SessionInfo::from(session), "participants": participants, "runtime":runtime,
-                    "halt": storage.session_halt(&session_id).await?, "controls": crate::tauri_cmd::participant_changes::controls(storage, &session_id).await?})
+                    "halt": storage.session_halt(&session_id).await?, "controls": crate::tauri_cmd::participant_changes::controls(storage, &session_id).await?,
+                    "accepts_relay": storage.session_accepts_relay(&session_id).await?})
             }
             History { session_id, query } => {
                 serde_json::to_value(storage.read_session_history(&session_id, &query).await?)?
@@ -508,9 +508,26 @@ impl SignalingBridge {
         let id = self
             .persist_controlled_message(storage, claim, request_id, text)
             .await?;
+        let wake_requested = self.summon_for_message(storage, session, id, text).await?;
+        Ok(
+            json!({"status":"queued", "message_id":id, "wake_requested":wake_requested,
+            "note":"Delivery waits behind active turns, gates, Pause and declared halts; dormant sessions must be started. Read message_status for actual receipts."}),
+        )
+    }
+
+    /// Announce a persisted host row and summon its readers: the `@mentioned`
+    /// participants, else the first active one. A Summon queues behind the
+    /// live turn, gates, Pause and declared halts; it never replaces the
+    /// human's staged text or sends an interrupt. Returns whether any summon
+    /// was requested (a dormant session has no ring to ask).
+    pub(super) async fn summon_for_message(
+        &self,
+        storage: &Storage,
+        session: &str,
+        id: i64,
+        text: &str,
+    ) -> Result<bool> {
         self.notify_message_persisted(Arc::from(session), id);
-        // A Summon queues behind the live turn, gates, Pause and declared
-        // halts. It never replaces the human's staged text or sends an interrupt.
         let mut recipients = Vec::new();
         for slug in crate::core::mentions::parse_mention_slugs(text) {
             if let Some(p) = storage
@@ -547,10 +564,7 @@ impl SignalingBridge {
                 }
             }
         }
-        Ok(
-            json!({"status":"queued", "message_id":id, "wake_requested":wake_requested,
-            "note":"Delivery waits behind active turns, gates, Pause and declared halts; dormant sessions must be started. Read message_status for actual receipts."}),
-        )
+        Ok(wake_requested)
     }
 
     async fn control_start(&self, session_id: &str, claim: &super::control_claim::ControlClaim) -> Result<Value> {

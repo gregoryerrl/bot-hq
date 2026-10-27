@@ -7,6 +7,10 @@ use anyhow::Context;
 #[derive(Clone)]
 pub(crate) struct ControlClaim {
     pub actor: ControlActor,
+    /// The capability slug this claim stands on — `control_bot_hq` for every
+    /// `app_control` action, `message_sessions` for a peer relay. Rechecked
+    /// (snapshot AND live role) at every claim.
+    pub grant: &'static str,
     proof: McpTokenProof,
     source: Arc<ActivityTracker>,
     source_pause: u64,
@@ -17,10 +21,18 @@ pub(crate) struct ControlClaim {
 }
 
 impl ControlClaim {
+    /// The claim's own grant, rechecked on THIS connection once the writer
+    /// lock is held: the role can be edited while a write waits for it.
+    pub(crate) async fn reverify_on(&self, conn: &mut sqlx::SqliteConnection) -> Result<()> {
+        let current = Storage::granted_actor_on(conn, &self.actor.session_id, &self.actor.slug, self.grant).await?;
+        anyhow::ensure!(current == self.actor, "caller identity changed");
+        Ok(())
+    }
+
     pub(crate) fn check(&self, bridge: &SignalingBridge) -> Result<()> {
         anyhow::ensure!(
             bridge.token_proof_is_current(&self.actor.session_id, &self.actor.slug, &self.proof),
-            "controller runtime was replaced or its credential was revoked"
+            "caller runtime was replaced or its credential was revoked"
         );
         let trackers = bridge
             .session_activity
@@ -29,12 +41,12 @@ impl ControlClaim {
         let source = trackers
             .get(&self.actor.session_id)
             .and_then(Weak::upgrade)
-            .context("controller runtime stopped")?;
+            .context("caller runtime stopped")?;
         anyhow::ensure!(
             Arc::ptr_eq(&source, &self.source)
                 && source.pause_generation() == self.source_pause
                 && !source.holds_wakes(),
-            "controller was paused, cancelled or restarted before the action claimed"
+            "caller was paused, cancelled or restarted before the action claimed"
         );
         let target = trackers.get(&self.target_session).and_then(Weak::upgrade);
         match (&self.target, target) {
@@ -88,6 +100,17 @@ impl SignalingBridge {
         self.control_ticket(actor, proof, target, None, true).await
     }
 
+    /// A peer relay's ticket (Plan Batch 6): the `message_sessions` grant,
+    /// a target that may be paused or dormant — the row waits for it.
+    pub(crate) async fn relay_ticket(
+        &self,
+        actor: ControlActor,
+        proof: Option<&McpTokenProof>,
+        target: String,
+    ) -> Result<ControlClaim> {
+        self.ticket(actor, crate::storage::RELAY_GRANT, proof, target, None, true).await
+    }
+
     /// Admission point for a synchronous application operation. Async workers
     /// must additionally validate when they take ownership (as startup does).
     pub(crate) async fn authorize_control_effect(&self, claim: &ControlClaim) -> Result<()> {
@@ -130,6 +153,18 @@ impl SignalingBridge {
         expected_choice_sha: Option<String>,
         allow_target_paused: bool,
     ) -> Result<ControlClaim> {
+        self.ticket(actor, crate::storage::CONTROL_GRANT, proof, target_session, expected_choice_sha, allow_target_paused).await
+    }
+
+    async fn ticket(
+        &self,
+        actor: ControlActor,
+        grant: &'static str,
+        proof: Option<&McpTokenProof>,
+        target_session: String,
+        expected_choice_sha: Option<String>,
+        allow_target_paused: bool,
+    ) -> Result<ControlClaim> {
         let proof = proof
             .context("an authenticated HTTP caller is required for delegated writes")?
             .clone();
@@ -137,7 +172,7 @@ impl SignalingBridge {
         let source = trackers
             .get(&actor.session_id)
             .and_then(Weak::upgrade)
-            .context("controller runtime is not registered")?;
+            .context("caller runtime is not registered")?;
         let target = trackers
             .get(&target_session)
             .and_then(Weak::upgrade)
@@ -147,6 +182,7 @@ impl SignalingBridge {
             });
         let claim = ControlClaim {
             actor,
+            grant,
             proof,
             source_pause: source.pause_generation(),
             source,

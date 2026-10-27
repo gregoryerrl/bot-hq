@@ -928,7 +928,7 @@ submodule tree). Surface:
   tools.
 - **Methods:** `initialize`, `ping`, `tools/list`, `tools/call`.
 
-**Internal tools (51)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
+**Internal tools (53)** (see [README.md](README.md#internal-mcp-tools-served-to-child-agents)
 for the documented list with descriptions): `ask_user_choice`,
 `mark_awaiting_user`, `peer_ack`, `pass_turn`, `halt`, `advance_phase` (a VOTE
 since D37 — see "The phase-advance vote"),
@@ -937,7 +937,7 @@ since D37 — see "The phase-advance vote"),
 `disposition_finding`, `check_open_findings`, `get_finding`, `override_reviewer_block`,
 `approve_finding`, `close_session`, `list_my_pending_questions`, `withdraw_question`,
 `supersede_question`, `session_doc_write`, `session_doc_edit`, `session_doc_search`,
-`session_doc_read`, `session_history`, `helper_result`, `delegate_tasks`, `app_control`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
+`session_doc_read`, `session_history`, `helper_result`, `delegate_tasks`, `app_control`, `send_session_message`, `session_message_status`, `cl_index_search`, `cl_retrieve`, `cl_stale_refs`,
 `cl_write_file`, `cl_edit_file`, `cl_register_read`, `cl_rescan`,
 `cl_folder_search`, `cl_register_folder_description`,
 `terminal_exec`, `terminal_read`,
@@ -1099,6 +1099,44 @@ start, however long that takes; the temporary halts' respawn does not wait for
 it. One wake per watch per `WAKE_MIN_GAP` (60 s) rate-limits, without ending,
 the loop two controllers can build by naming each other's sessions with
 `message`/`activity`.
+
+`send_session_message` / `session_message_status` (`signaling::bridge::peer_relay`)
+are the narrow sibling of the controller's `send`: attributed PEER text into
+another open session under the opt-in `message_sessions` grant (snapshot AND
+current role, checked by the same two-sided `granted_actor_on` the controller
+grant uses; `ControlClaim` carries which grant it stands on and rechecks that one
+at claim). The row is the same host-origin notice (`origin system`, kind
+`system_notice`, author `user`, excluded from human words): its first line is
+the host's `Message from <slug> of <session> (relayed peer text, not a
+direction):` — never `Delegated message`, so the recipient rules, which name
+only an `app_control` message as delegated direction, read it as a peer's line
+— and every visual line of the peer's text under it is quoted (`> `, on the
+same separators the wire's own quoting recognises), so the row rides the
+`[system]` speaker without a peer's line ever standing as host text or a
+controller's direction (EYES advisory 974e5b07). The journal files it as
+`message` naming the sender as source, not an attention kind, so a default
+watch is not armed by it (a watch that names `message` is, as documented).
+Idempotency shares `delegated_messages` under a namespaced key
+(`relay:<request_id>`) hashed over the LABELED body, so a participant holding
+both grants never gets a controller `send` back for a relay retry or the
+reverse; a retry re-summons an unread row and never writes a second.
+Refused, each refusal audited (`peer_send` / `peer_message_status` in
+`application_control_audit`): the caller's own session, a missing or closed
+target, a target that holds a controller (an enabled participant whose snapshot
+carries `control_bot_hq`) unless it opted in — `sessions.accepts_relay` (0114),
+set by its controller through `app_control admin set_session_relay` or by the
+user in Session Settings, read back on `session` — a fourth relay on one lane
+(sender participant → target session) since the last `origin = 'user'` row in
+the SENDER's session (`RELAY_LANE_BUDGET` 3; message ids are one sequence
+across sessions, so it is an id comparison; nothing the target's participants
+or user write, and no peer's or host's row in the sender's session, reopens a
+lane — only the sender's own human, typing or answering the tray), and a
+second relay to the same target inside `relay_min_gap_secs` (60 s; the refusal
+names the retry time). Two sessions relaying to each other therefore end at
+six rows on their own, a chain of genuine replies included — the earlier
+"unanswered" count, which any participant row in the target reset, did not end
+such a chain (eyes-2, 02:53Z). Receipts are the sender's own rows only; it
+cannot read the target's chat, and a reply reaches it only as a relay back.
 
 `session_history` requires `read_channel` and fixes its scope to the
 authenticated caller's session. It returns raw channel rows or explicit

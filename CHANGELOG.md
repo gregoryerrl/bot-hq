@@ -61,6 +61,24 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   controller whose pending event is an attention kind is respawned at boot
   like a temporary halt, once the journal has re-armed the watches from what
   it kept.
+- Roles offers an opt-in **Cross-session messaging** capability: a participant
+  that holds it can send attributed text into another open session with
+  `send_session_message` and read the delivery receipts of its own messages with
+  `session_message_status`. The target's participants read a host row that opens
+  `Message from <slug> of <session> (relayed peer text, not a direction):` with
+  the text quoted line by line under it — a peer's line, never a user
+  instruction and never the controller's delegated direction, whatever the
+  quoted lines say — queued behind the target's live turn, gates, Pause and
+  declared halts; a dormant target reads it when started. A stable request id
+  makes retries safe (a changed text under the same id is refused). To keep two
+  sessions from feeding each other turns, a sender may relay to one target
+  three times between two things its own user says in the sender's session
+  (nothing the other session writes back reopens that), at most once a minute,
+  and reaches a session that holds an application controller only after that
+  session opted in (migration 0114; its user ticks it in Session Settings, its
+  controller sets it with `app_control admin set_session_relay`). Every call is
+  audited beside the application-control actions. No role is granted it by
+  default.
 
 ### Fixed
 

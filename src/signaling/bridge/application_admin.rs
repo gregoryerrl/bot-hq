@@ -45,6 +45,10 @@ pub(crate) enum AdminRequest {
     SetPolicy { scope: ConfigScope, #[serde(deserialize_with = "strict_policy")] policy: Value },
     ToolGate { scope: ConfigScope },
     SetToolGate { scope: ConfigScope, keywords: Vec<GatedKeyword> },
+    /// Plan Batch 6: whether a session that holds a controller accepts
+    /// attributed peer relay (`send_session_message`). Sessions without a
+    /// controller accept by default and ignore this flag.
+    SetSessionRelay { session_id: String, accepts: bool },
 }
 
 fn strict_policy<'de, D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Value, D::Error> {
@@ -104,6 +108,7 @@ impl AdminRequest {
             Self::Capabilities => ("capabilities", None, false), Self::Setting { .. } => ("setting", None, false), Self::SetSetting { .. } => ("set_setting", None, true),
             Self::Policy { scope } => ("policy", scope.session(), false), Self::SetPolicy { scope, .. } => ("set_policy", scope.session(), true),
             Self::ToolGate { scope } => ("tool_gate", scope.session(), false), Self::SetToolGate { scope, .. } => ("set_tool_gate", scope.session(), true),
+            Self::SetSessionRelay { session_id, .. } => ("set_session_relay", Some(session_id), true),
         }
     }
 }
@@ -236,6 +241,12 @@ impl SignalingBridge {
                     ConfigScope::Project { .. } => anyhow::bail!("Tool Gate has global and session scopes, not a project scope"),
                 }
                 file_write = true; (json!({"saved":true}), object)
+            }
+            SetSessionRelay { session_id, accepts } => {
+                let changed = sqlx::query("UPDATE sessions SET accepts_relay = ? WHERE id = ?")
+                    .bind(accepts as i64).bind(&session_id).execute(&mut *tx).await?.rows_affected() > 0;
+                anyhow::ensure!(changed, "session does not exist");
+                (json!({"session_id":session_id,"accepts_relay":accepts}), json!({"resource":"session_relay","session_id":session_id,"accepts_relay":accepts}))
             }
             _ => anyhow::bail!("not an administrative write"),
         };
