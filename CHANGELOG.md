@@ -99,6 +99,18 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- A gated or direct host command now starts with SIGINT and SIGQUIT at their
+  defaults whatever launched bot-hq. A process started as a shell background
+  job (`cmd &` in a script) has those two signals ignored, the ignore survives
+  into every child, and a POSIX shell cannot trap a signal that was ignored on
+  entry — so such a command's shell would never see the graceful interrupt
+  that precedes the SIGTERM two seconds later, and its own `trap … INT`
+  cleanup would never run. In the app this was narrow: bot-hq installs its own
+  SIGINT handler at startup, which a child resets to default, so only SIGQUIT
+  and a command started before that handler were affected. Where it actually
+  bit was the test suite run as a background job (feedback #129); the spawner
+  no longer depends on its launcher either way, and a subprocess regression
+  pins it.
 - When Codex gives up on bot-hq's gate hook (`hook timed out after 30s`), the
   notice now says where the time went: the hook keeps a per-invocation record
   of the phase it is in (reading the payload, the posture call, policy files,

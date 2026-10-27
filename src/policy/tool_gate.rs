@@ -597,11 +597,28 @@ async fn run_in_shell_with_spawn(
         use std::os::unix::process::CommandExt;
         // No controlling terminal and pgid == pid. A separate process_group
         // call before setsid would make setsid fail with EPERM.
+        //
+        // SIGINT and SIGQUIT back to their defaults: a process started as a
+        // shell background job (`cmd &` in a script, a `cargo test &`)
+        // inherits them IGNORED, and ignored dispositions survive exec —
+        // while a POSIX shell cannot trap a signal that was ignored on entry.
+        // A gated command's shell would then never see the graceful SIGINT of
+        // `command_run::stop` nor run its own `trap … INT`, and die only at
+        // the SIGTERM two seconds later. The app's own SIGINT handler (main.rs)
+        // already resets SIGINT for children spawned after startup — a handled
+        // signal goes back to default at exec, an ignored one does not — so in
+        // the app this covered SIGQUIT and a pre-handler spawn; the test
+        // binary, with no such handler, failed whenever it ran as a background
+        // job (feedback #129). The command must behave as it would in the
+        // user's terminal, whatever launched bot-hq.
         // SAFETY: this pre-exec closure calls only async-signal-safe setsid
-        // and reads errno; it allocates nothing and takes no locks.
+        // and signal(2) and reads errno; it allocates nothing and takes no locks.
         unsafe {
             cmd.as_std_mut().pre_exec(|| {
-                if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+                if libc::setsid() < 0 { return Err(std::io::Error::last_os_error()); }
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+                Ok(())
             });
         }
     }

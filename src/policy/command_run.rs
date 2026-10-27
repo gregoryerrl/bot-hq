@@ -334,6 +334,89 @@ mod tests {
         .unwrap();
     }
 
+    // Feedback #129's cause, run only in the disposable subprocess below: the
+    // test process itself starts with SIGINT IGNORED (as a `cargo test &` or
+    // a `"$BIN" | tee &` launcher leaves its children), and the probe must
+    // still see the graceful interrupt — which it cannot unless the spawner
+    // resets the disposition, because a POSIX shell cannot trap a signal that
+    // was ignored on entry.
+    #[test]
+    #[ignore = "private subprocess fixture: the launcher ignores SIGINT"]
+    fn inherited_sigint_fixture() {
+        let path = std::path::PathBuf::from(std::env::var_os("BOT_HQ_GATE_SIGINT_FIXTURE").unwrap());
+        // The premise, checked rather than assumed: our own SIGINT is ignored.
+        let ignored = unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGINT, std::ptr::null(), &mut current);
+            current.sa_sigaction == libc::SIG_IGN
+        };
+        assert!(ignored, "the fixture must be started with SIGINT ignored");
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            std::fs::write(
+                path.join("child.sh"),
+                "trap 'echo INT > interrupted; exit 0' INT\necho $$ > child\nsleep 30 &\necho $! > grandchild\nwait\necho SHOULD_NOT_FINISH > finished\n",
+            )
+            .unwrap();
+            let cwd = path.clone();
+            let run = tokio::spawn(async move {
+                run_in_repo("echo $$ > leader; sh child.sh; :", &cwd, Duration::from_secs(30), &[]).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while pids(&path).len() != 3 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("command must write its process identities");
+            run.abort();
+            let ids = pids(&path);
+            let gone = tokio::time::timeout(Duration::from_secs(7), async {
+                while ids.iter().any(|pid| !crate::process::is_gone(*pid)) {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .is_ok();
+            assert!(gone, "request cancellation must stop children");
+            assert_eq!(
+                std::fs::read_to_string(path.join("interrupted")).unwrap_or_default(),
+                "INT\n",
+                "the probe's shell must have trapped the graceful SIGINT although its launcher ignored the signal"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn a_launcher_that_ignores_sigint_still_lets_a_gated_command_trap_it() {
+        use std::os::unix::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = crate::process::tokio_command(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "policy::command_run::tests::inherited_sigint_fixture",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("BOT_HQ_GATE_SIGINT_FIXTURE", dir.path())
+        .kill_on_drop(true);
+        // SAFETY: signal(2) is async-signal-safe; nothing else runs in the
+        // pre-exec closure.
+        unsafe {
+            cmd.as_std_mut().pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_IGN);
+                Ok(())
+            });
+        }
+        let out = tokio::time::timeout(Duration::from_secs(20), cmd.output()).await.unwrap().unwrap();
+        for &pid in &pids(dir.path()) {
+            if !crate::process::is_gone(pid) {
+                crate::process::kill_process_tree(pid);
+            }
+        }
+        assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert_eq!(std::fs::read_to_string(dir.path().join("interrupted")).unwrap(), "INT\n");
+    }
+
     // Run only in the disposable subprocess below: the global reaper must
     // never kill unrelated children in the shared cargo-test process.
     #[test]
