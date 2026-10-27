@@ -44,6 +44,27 @@ async getSessionProjectInfo(sessionId: string) : Promise<Result<SessionProjectIn
 }
 },
 /**
+ * Plan Batch 6: whether this session, while it holds an application
+ * controller, accepts attributed peer relay (`send_session_message`). A
+ * session without a controller accepts by default and the flag is inert.
+ */
+async getSessionAcceptsRelay(sessionId: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_session_accepts_relay", { sessionId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async setSessionAcceptsRelay(sessionId: string, accepts: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_session_accepts_relay", { sessionId, accepts }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * A session's roster in turn order — the read side of rc3 D10.
  * 
  * This is what replaces every `brian_*` / `rain_*` pair the session view read:
