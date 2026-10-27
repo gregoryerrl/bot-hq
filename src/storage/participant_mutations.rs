@@ -416,6 +416,7 @@ mod tests {
         let s = Storage::memory().await.unwrap();
         for (id, runtime) in [("old", "claude_code"), ("new", "codex")] {
             s.upsert_model(&Model {
+                favorite: false,
                 id: id.into(), display_name: id.into(), provider: "fixture".into(), model_name: id.into(),
                 base_url: None, auth_token: Some("fixture-secret".into()), created_at: String::new(), updated_at: String::new(),
                 context_window: Some(100_000), cli_settings: None, claude_config_dir: Some(format!("/accounts/{id}")), runtime: runtime.into(),

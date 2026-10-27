@@ -69,6 +69,11 @@ function Svg({ className, children, ...props }: IconProps & { children: ReactNod
   );
 }
 
+/** Saved-model favorite; callers may fill the selected heart with currentColor. */
+export function HeartIcon(props: IconProps) {
+  return <Svg {...props}><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z" /></Svg>;
+}
+
 /** Notification bell — the pending-tray indicator. */
 export function BellIcon(props: IconProps) {
   return (

@@ -79,7 +79,11 @@ pub(super) async fn selection_fingerprint(conn: &mut SqliteConnection, request: 
             .bind(id).fetch_one(&mut *conn).await?;
         model.created_at.clear();
         model.updated_at.clear();
-        selections.push(serde_json::to_value(model)?);
+        let mut value = serde_json::to_value(model)?;
+        // Cosmetic preferences must neither cancel an existing intent nor
+        // change fingerprints recorded before the preference column existed.
+        value.as_object_mut().unwrap().remove("favorite");
+        selections.push(value);
     }
     if let Some(id) = role {
         let role: (String, String, Option<String>, String, String, Option<String>, bool) = sqlx::query_as(
@@ -276,6 +280,7 @@ mod tests {
     async fn seed(s: &Storage) -> (i64, i64, i64) {
         for id in ["m1", "m2"] {
             s.upsert_model(&Model {
+                favorite: false,
                 id: id.into(), display_name: id.into(), provider: "anthropic".into(),
                 model_name: "claude-opus-5".into(), base_url: None, auth_token: None,
                 created_at: String::new(), updated_at: String::new(), context_window: None,
@@ -291,6 +296,29 @@ mod tests {
 
     fn switch(id: i64) -> ParticipantChangeRequest {
         ParticipantChangeRequest::SwitchModel { participant_id: id, model_id: "m2".into() }
+    }
+
+    #[tokio::test]
+    async fn favorites_preserve_preference_less_pending_selection_fingerprints() {
+        let s = Storage::memory().await.unwrap();
+        let (id, _, role_id) = seed(&s).await;
+        let rev = s.roster_revision("s1").await.unwrap();
+        // Independent spelling of the pre-0115 Model JSON. Do not derive the
+        // expected fingerprint by serializing today's preference-bearing type.
+        let old_model = serde_json::json!({
+            "id":"m2", "display_name":"m2", "provider":"anthropic", "model_name":"claude-opus-5",
+            "base_url":null, "auth_token":null, "created_at":"", "updated_at":"", "context_window":null,
+            "cli_settings":null, "claude_config_dir":null, "runtime":"claude_code"
+        });
+        let role = s.role_by_id(role_id).await.unwrap().unwrap();
+        let old_role = (role.slug, role.display_name, role.description_prompt, role.capabilities,
+            role.participation_mode, role.default_model_id, role.archived);
+        let old_hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&serde_json::json!([old_model, old_role])).unwrap()));
+        let row = s.request_participant_change("s1", "pref-old", rev, switch(id), ParticipantChangeOrigin::User).await.unwrap();
+        assert_eq!(row.selection_fingerprint, old_hash, "preserve pre-upgrade queued requests");
+        assert!(s.set_model_favorite("m2", true).await.unwrap());
+        assert_eq!(s.request_participant_change("s1", "pref-old", rev, switch(id), ParticipantChangeOrigin::User).await.unwrap().id, row.id);
+        assert!(s.claim_participant_change("s1", "pref-old").await.unwrap().is_some(), "cosmetic preference changes must not invalidate the intent");
     }
 
     #[tokio::test]

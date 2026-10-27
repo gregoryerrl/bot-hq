@@ -50,6 +50,8 @@ pub struct ModelView {
     /// (claude-code) or `codex` (OpenAI's Codex CLI), 0102. Save refuses any
     /// other value; blank is stored as `claude_code`.
     pub runtime: String,
+    #[serde(default)]
+    pub favorite: bool,
 }
 
 /// The connector a dialog value names, or a validation error the dialog
@@ -206,6 +208,7 @@ pub(crate) fn validate_dir_against_rows(
 impl From<Model> for ModelView {
     fn from(m: Model) -> Self {
         Self {
+            favorite: m.favorite,
             id: m.id,
             display_name: m.display_name,
             provider: m.provider,
@@ -225,6 +228,7 @@ impl From<Model> for ModelView {
 impl From<ModelView> for Model {
     fn from(v: ModelView) -> Self {
         Self {
+            favorite: v.favorite,
             id: v.id,
             display_name: v.display_name,
             provider: v.provider,
@@ -251,6 +255,21 @@ pub async fn list_models(
         .await
         .map(|v| v.into_iter().map(Into::into).collect())
         .map_err(|e| AppError::DbError(e.to_string()))
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_model_favorite(
+    storage: tauri::State<'_, Arc<Storage>>,
+    app: tauri::AppHandle,
+    id: String,
+    favorite: bool,
+) -> Result<(), AppError> {
+    if !storage.set_model_favorite(&id, favorite).await.map_err(|e| AppError::DbError(e.to_string()))? {
+        return Err(AppError::NotFound(format!("model {id}")));
+    }
+    let _ = app.emit(crate::tauri_events::types::MODEL_CHANGED, ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -406,6 +425,7 @@ mod tests {
     #[tokio::test]
     async fn view_roundtrips_through_model() {
         let view = ModelView {
+            favorite: false,
             id: "m1".into(),
             display_name: "Opus".into(),
             provider: "anthropic".into(),
@@ -490,6 +510,7 @@ mod tests {
     fn save_refuses_a_dir_the_other_runtime_uses_and_a_homeless_codex_row() {
         use crate::agents::runtime::Runtime;
         let row = |id: &str, runtime: &str, dir: Option<&str>| Model {
+            favorite: false,
             id: id.into(),
             display_name: id.into(),
             provider: "x".into(),

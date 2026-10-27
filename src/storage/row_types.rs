@@ -188,6 +188,10 @@ pub struct AgentConfig {
 /// over, so it is left in place and unread rather than migrated away.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Model {
+    /// Picker preference; ordinary model saves and spawn fingerprints ignore it.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub favorite: bool,
     pub id: String,
     pub display_name: String,
     pub provider: String,

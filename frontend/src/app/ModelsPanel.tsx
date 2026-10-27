@@ -7,7 +7,7 @@ import { cn } from "../lib/cn";
 import { formatTimestamp } from "../lib/time";
 import { accountLabelOf, formatLimitMark, markIsLive, marksFor } from "../lib/accounts";
 import { FieldLabel } from "./contextLibraryShared";
-import { CheckIcon, CrossIcon, SaveIcon } from "../components/icons";
+import { CheckIcon, CrossIcon, SaveIcon, HeartIcon } from "../components/icons";
 import type { AccountMark, AccountSetupCommands, ModelView, ValidateResult } from "../lib/bindings";
 import { invoke } from "@tauri-apps/api/core";
 import { Dialog } from "../components/ui/Dialog";
@@ -39,6 +39,20 @@ export function ModelsPanel() {
   const { data: models = [], refetch, isLoading } =
     useTauriQuery<ModelView[]>("list_models");
   const del = useTauriMutation<void, { id: string }>("delete_model");
+  const favorite = useTauriMutation<void, { id: string; favorite: boolean }>("set_model_favorite");
+  const [favoriteError, setFavoriteError] = useState<{ id: string; message: string } | null>(null);
+  // Pickers use the backend's favorites-first order. Keep Settings rows still
+  // when the user clicks a heart, including across query refreshes.
+  const settingsModels = [...models].sort((a, b) => a.display_name.localeCompare(b.display_name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+  const onFavorite = async (model: ModelView) => {
+    setFavoriteError(null);
+    try {
+      await favorite.mutateAsync({ id: model.id, favorite: !model.favorite });
+      await refetch();
+    } catch (e) {
+      setFavoriteError({ id: model.id, message: errorMessage(e) });
+    }
+  };
   // 0091: the usage-limit marks, one per account (config dir + organisation).
   // A row shows the mark for its dir — "limited until …" and a Clear — and
   // nothing else: no pointer at another account (spec §8).
@@ -135,12 +149,19 @@ export function ModelsPanel() {
             <span aria-hidden />
           </div>
           <div className="divide-y divide-outline-variant/40">
-            {models.map((m) => (
+            {settingsModels.map((m) => (
               <div key={m.id} data-testid="model-row">
                 <div className={cn(rowGridClass, "py-2.5")}>
-                  <span className="truncate font-body-md text-body-md text-on-surface">
-                    {m.display_name || "Untitled model"}
-                  </span>
+                  <div className="flex min-w-0 items-center gap-1">
+                    <Button variant="ghost" size="icon" tone={m.favorite ? "tertiary" : "inherit"}
+                      aria-label={`${m.favorite ? "Remove" : "Add"} ${m.display_name || "Untitled model"} ${m.favorite ? "from" : "to"} favorites`}
+                      aria-pressed={!!m.favorite} title={m.favorite ? "Remove favorite" : "Add favorite"}
+                      disabled={favorite.isPending} onClick={() => void onFavorite(m)}>
+                      <HeartIcon className={m.favorite ? "fill-current" : undefined} />
+                    </Button>
+                    <span className="truncate font-body-md text-body-md text-on-surface">{m.display_name || "Untitled model"}</span>
+                    {favoriteError?.id === m.id && <span role="alert" className="font-code-sm text-code-sm text-error">{favoriteError.message}</span>}
+                  </div>
                   <span className="flex min-w-0 items-center gap-1.5 font-code-sm text-code-sm text-on-surface-variant">
                     <span className="truncate">{m.provider || "—"}</span>
                     {m.runtime === "codex" && (
@@ -319,6 +340,7 @@ export function ModelsPanel() {
 
 function emptyDraft(): ModelView {
   return {
+    favorite: false,
     id: "",
     display_name: "",
     provider: "anthropic",

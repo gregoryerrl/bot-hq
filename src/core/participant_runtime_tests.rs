@@ -807,6 +807,25 @@ async fn driver_admin_partial_role_save_preserves_prose_and_default_model() {
 }
 
 #[tokio::test]
+async fn driver_favorites_use_the_shared_setter_and_preserve_inventory_cursors() {
+    let f = driver_fixture(false).await;
+    let changed = admin_rpc(&f.state, serde_json::json!({"operation":"set_model_favorite","id":"new","favorite":true})).await.unwrap();
+    assert_eq!(changed["favorite"], true);
+    assert!(f.state.storage.get_model("new").await.unwrap().unwrap().favorite);
+    let listed = admin_rpc(&f.state, serde_json::json!({"operation":"models"})).await.unwrap();
+    let rows = listed["models"].as_array().unwrap();
+    let ids: Vec<_> = rows.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(ids.windows(2).all(|pair| pair[0] > pair[1]), "inventory keeps its existing ID cursor order");
+    assert_eq!(rows.iter().find(|m| m["id"] == "new").unwrap()["favorite"], true);
+    let page = admin_rpc(&f.state, serde_json::json!({"operation":"models","before_id":"old"})).await.unwrap();
+    assert!(page["models"].as_array().unwrap().iter().all(|m| m["id"].as_str().unwrap() < "old"));
+    admin_rpc(&f.state, serde_json::json!({"operation":"save_model","model":{"id":"new","display_name":"Renamed"}})).await.unwrap();
+    assert!(f.state.storage.get_model("new").await.unwrap().unwrap().favorite);
+    assert!(admin_rpc(&f.state, serde_json::json!({"operation":"set_model_favorite","id":"missing","favorite":true})).await.is_err());
+    f.end().await;
+}
+
+#[tokio::test]
 async fn driver_admin_partial_model_save_preserves_account_endpoint_and_window() {
     let f = driver_fixture(false).await;
     let mut model = f.state.storage.get_model("old").await.unwrap().unwrap();
@@ -1413,6 +1432,7 @@ impl Fixture {
         for id in ["old", "new"] {
             storage
                 .upsert_model(&Model {
+                    favorite: false,
                     id: id.into(),
                     display_name: id.into(),
                     provider: "fixture".into(),

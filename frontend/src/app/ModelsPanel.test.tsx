@@ -9,6 +9,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 const mockInvoke = vi.mocked(invoke);
 
 const OPUS: ModelView = {
+  favorite: false,
   id: "m-opus",
   display_name: "Opus",
   provider: "anthropic",
@@ -85,6 +86,48 @@ function renderPanel(retry: number | false = false) {
 }
 
 beforeEach(() => mockInvoke.mockReset());
+
+describe("favorite models", () => {
+  it("refreshes favorites-first picker data without moving Settings rows", async () => {
+    let models = [{ ...OPUS }, { ...ASTRA }];
+    mockInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === "list_models") return models.map((m) => ({ ...m })).sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.display_name.localeCompare(b.display_name));
+      if (cmd === "list_account_marks") return [];
+      if (cmd === "set_model_favorite") {
+        const value = args as { id: string; favorite: boolean };
+        models = models.map((m) => m.id === value.id ? { ...m, favorite: value.favorite } : m);
+      }
+      return undefined;
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={qc}><ModelsPanel /></QueryClientProvider>);
+    const rowNames = () => screen.getAllByTestId("model-row").map((row) => within(row).queryByText("Astra") ? "Astra" : "Opus");
+    const add = await screen.findByRole("button", { name: "Add Opus to favorites" });
+    expect(rowNames()).toEqual(["Astra", "Opus"]);
+    fireEvent.click(add);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove Opus from favorites" })).toHaveAttribute("aria-pressed", "true"));
+    expect(mockInvoke).toHaveBeenCalledWith("set_model_favorite", { id: OPUS.id, favorite: true });
+    expect(rowNames()).toEqual(["Astra", "Opus"]);
+    // The same cached query is consumed by all real model pickers.
+    expect(qc.getQueryData<ModelView[]>(["list_models", {}])?.map((m) => m.id)).toEqual([OPUS.id, ASTRA.id]);
+    fireEvent.click(screen.getByRole("button", { name: "Remove Opus from favorites" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add Opus to favorites" })).toHaveAttribute("aria-pressed", "false"));
+    expect(rowNames()).toEqual(["Astra", "Opus"]);
+  });
+
+  it("shows a failed favorite write without displaying it as saved", async () => {
+    mockBackend([OPUS]);
+    const normal = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation(async (cmd, args) => {
+      if (cmd === "set_model_favorite") throw new Error("Preference could not be saved");
+      return normal(cmd, args);
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "Add Opus to favorites" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Preference could not be saved");
+    expect(screen.getByRole("button", { name: "Add Opus to favorites" })).toHaveAttribute("aria-pressed", "false");
+  });
+});
 
 describe("Settings → Models — a model row's Claude config dir (0090)", () => {
   it("lists the account a subscription row bills, and nothing for the default dir or a gateway", async () => {

@@ -9,7 +9,7 @@ use super::*;
 /// upsert now leaves it at the column default. Dropping it needs a migration
 /// this phase does not write.
 const MODEL_COLUMNS: &str = "id, display_name, provider, model_name, base_url, auth_token, \
-     created_at, updated_at, context_window, cli_settings, claude_config_dir, runtime";
+     created_at, updated_at, context_window, cli_settings, claude_config_dir, runtime, favorite";
 
 /// Key in `app_settings`: "0" = repo-backed sessions run directly in the repo
 /// by default instead of an isolated git worktree. Resolved via
@@ -53,7 +53,7 @@ pub fn normalize_config_dir(raw: Option<&str>) -> Option<String> {
 impl Storage {
     // ---- models ----------------------------------------------------------
 
-    /// All saved models, ordered by display name.
+    /// Picker order: favorites first, then display name and a stable ID tie-break.
     pub async fn list_models(&self) -> Result<Vec<Model>> {
         let mut conn = self.pool.acquire().await?;
         Self::list_models_on(&mut conn).await
@@ -61,7 +61,7 @@ impl Storage {
 
     pub(crate) async fn list_models_on(conn: &mut sqlx::SqliteConnection) -> Result<Vec<Model>> {
         let rows = sqlx::query_as::<_, Model>(&format!(
-            "SELECT {MODEL_COLUMNS} FROM models ORDER BY display_name COLLATE NOCASE ASC"
+            "SELECT {MODEL_COLUMNS} FROM models ORDER BY favorite DESC, display_name COLLATE NOCASE ASC, id ASC"
         ))
         .fetch_all(&mut *conn)
         .await
@@ -72,6 +72,18 @@ impl Storage {
     pub async fn get_model(&self, id: &str) -> Result<Option<Model>> {
         let mut conn = self.pool.acquire().await?;
         Self::get_model_on(&mut conn, id).await
+    }
+
+    /// Set only the preference: an ordinary model edit cannot clear a favorite.
+    /// Returns false for an unknown ID; setting the same value is idempotent.
+    pub async fn set_model_favorite(&self, id: &str, favorite: bool) -> Result<bool> {
+        let mut conn = self.pool.acquire().await?;
+        Self::set_model_favorite_on(&mut conn, id, favorite).await
+    }
+
+    pub(crate) async fn set_model_favorite_on(conn: &mut sqlx::SqliteConnection, id: &str, favorite: bool) -> Result<bool> {
+        Ok(sqlx::query("UPDATE models SET favorite = ?, updated_at = ? WHERE id = ?")
+            .bind(favorite).bind(now_utc()).bind(id).execute(conn).await?.rows_affected() > 0)
     }
 
     pub(crate) async fn get_model_on(conn: &mut sqlx::SqliteConnection, id: &str) -> Result<Option<Model>> {
@@ -262,6 +274,7 @@ mod tests {
 
     fn model(id: &str, name: &str) -> Model {
         Model {
+            favorite: false,
             id: id.into(),
             display_name: name.into(),
             provider: "anthropic".into(),
@@ -275,6 +288,31 @@ mod tests {
             claude_config_dir: None,
             runtime: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn favorites_order_pickers_and_survive_ordinary_model_saves() {
+        let s = Storage::memory().await.unwrap();
+        assert!(s.list_models().await.unwrap().iter().all(|m| !m.favorite), "existing rows default to false");
+        for (id, name) in [("pref-a", "Alpha"), ("pref-b", "beta"), ("pref-z", "Zulu")] {
+            s.upsert_model(&model(id, name)).await.unwrap();
+        }
+        assert!(!s.set_model_favorite("missing", true).await.unwrap());
+        assert!(s.set_model_favorite("pref-z", true).await.unwrap());
+        assert!(s.set_model_favorite("pref-z", true).await.unwrap(), "idempotent setter");
+        let order = |rows: Vec<Model>| rows.into_iter().filter(|m| m.id.starts_with("pref-")).map(|m| m.id).collect::<Vec<_>>();
+        assert_eq!(order(s.list_models().await.unwrap()), ["pref-z", "pref-a", "pref-b"]);
+        let original_created = s.get_model("pref-z").await.unwrap().unwrap().created_at;
+        let mut edit = model("pref-z", "Zebra");
+        edit.context_window = Some(200_000);
+        assert!(!edit.favorite);
+        s.upsert_model(&edit).await.unwrap();
+        let saved = s.get_model("pref-z").await.unwrap().unwrap();
+        assert!(saved.favorite, "editing an old/no-preference payload must not clear the heart");
+        assert_eq!(saved.context_window, Some(200_000));
+        assert_eq!(saved.created_at, original_created);
+        assert!(s.set_model_favorite("pref-z", false).await.unwrap());
+        assert_eq!(order(s.list_models().await.unwrap()), ["pref-a", "pref-b", "pref-z"]);
     }
 
     #[tokio::test]

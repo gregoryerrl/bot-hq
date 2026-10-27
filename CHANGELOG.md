@@ -27,6 +27,9 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Added
 
+- Saved models have a heart in Settings → Models. Favorites appear first in
+  model pickers; the settings list stays in name order while hearts are toggled.
+  Favorites survive ordinary model edits and can also be set by a Driver.
 - Application control gained `events`: a forward, cursor-paged read of a new
   durable control-event journal (migration 0112) that records, for every open
   session, non-tool message rows, decisions parked and resolved, halts declared

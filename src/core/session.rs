@@ -3720,6 +3720,7 @@ mod tests {
         use crate::agents::runtime::Runtime;
         let s = crate::storage::Storage::memory_bare().await.unwrap();
         let mut astra = crate::storage::Model {
+            favorite: false,
             id: "astra".into(),
             display_name: "Astra".into(),
             provider: "openai".into(),
@@ -5038,6 +5039,7 @@ mod tests {
         s.upsert_agent_config(&cfg).await.unwrap();
 
         s.upsert_model(&crate::storage::Model {
+            favorite: false,
             id: "m-cli".into(),
             display_name: "CLI model".into(),
             provider: "anthropic".into(),
@@ -5067,6 +5069,7 @@ mod tests {
 
     fn fable_row(id: &str) -> crate::storage::Model {
         crate::storage::Model {
+            favorite: false,
             id: id.into(),
             display_name: "Fable 5.1".into(),
             provider: "anthropic".into(),
@@ -5211,6 +5214,7 @@ mod tests {
 
     fn astra_row(id: &str, home: &str) -> crate::storage::Model {
         crate::storage::Model {
+            favorite: false,
             id: id.into(),
             display_name: "Astra".into(),
             provider: "openai".into(),

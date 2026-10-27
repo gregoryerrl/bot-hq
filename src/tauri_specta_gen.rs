@@ -79,6 +79,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         roles::get_role_default_prose,
         // Models registry + default-model setting
         models::list_models,
+        models::set_model_favorite,
         models::upsert_model,
         models::account_setup_commands,
         models::list_account_marks,

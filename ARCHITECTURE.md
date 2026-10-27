@@ -1982,6 +1982,13 @@ session and instruct it.
 
 ## Storage (sqlite)
 
+Saved-model favorites are UI preferences (migration 0115). Picker lists order
+favorites first, then display name; Settings → Models keeps name order so a
+heart click does not move its row. A separate preference setter preserves hearts
+across ordinary model saves. Delegated administration exposes the flag/setter
+while retaining its ID-based inventory cursor. Favorite preferences are excluded
+from participant-change selection fingerprints, including pre-upgrade intents.
+
 Schema at `migrations/0001_init.sql` + subsequent migration files.
 
 **Tables:**

@@ -33,6 +33,7 @@ pub(crate) enum AdminRequest {
     Models { before_id: Option<String> },
     Model { id: String },
     SaveModel { model: Value, #[serde(default)] clear_auth_token: bool },
+    SetModelFavorite { id: String, favorite: bool },
     DeleteModel { id: String },
     Roles { before_id: Option<i64>, #[serde(default)] include_archived: bool },
     Role { id: i64, #[serde(default)] offset_bytes: usize },
@@ -103,6 +104,7 @@ impl AdminRequest {
         match self {
             Self::Models { .. } => ("models", None, false), Self::Model { .. } => ("model", None, false),
             Self::SaveModel { .. } => ("save_model", None, true), Self::DeleteModel { .. } => ("delete_model", None, true),
+            Self::SetModelFavorite { .. } => ("set_model_favorite", None, true),
             Self::Roles { .. } => ("roles", None, false), Self::Role { .. } => ("role", None, false),
             Self::SaveRole { .. } => ("save_role", None, true), Self::ArchiveRole { .. } => ("archive_role", None, true),
             Self::Capabilities => ("capabilities", None, false), Self::Setting { .. } => ("setting", None, false), Self::SetSetting { .. } => ("set_setting", None, true),
@@ -173,6 +175,10 @@ impl SignalingBridge {
                 }
                 Storage::upsert_model_on(&mut tx, &model).await?;
                 (json!({"id":model.id,"saved":true}), json!({"resource":"model","id":model.id,"provided_fields":fields}))
+            }
+            SetModelFavorite { id, favorite } => {
+                anyhow::ensure!(Storage::set_model_favorite_on(&mut tx, &id, favorite).await?, "model does not exist");
+                (json!({"id":id,"favorite":favorite}), json!({"resource":"model","id":id,"provided_fields":["favorite"]}))
             }
             DeleteModel { id } => (json!({"deleted":Storage::delete_model_on(&mut tx, &id).await? > 0}), json!({"resource":"model","id":id})),
             SaveRole { id, draft: patch, expected_sha256 } => {
@@ -273,7 +279,7 @@ impl SignalingBridge {
                 rows.sort_by(|a,b| b.id.cmp(&a.id));
                 let rows: Vec<_> = rows.into_iter().filter(|m|before_id.as_ref().is_none_or(|id|m.id < *id)).take(20).collect();
                 let next = (rows.len() == 20).then(||rows.last().unwrap().id.clone());
-                json!({"models":rows.into_iter().map(|m|json!({"id":m.id,"display_name":m.display_name,"provider":m.provider,"model_name":m.model_name,"runtime":m.runtime,"context_window":m.context_window,"auth_configured":m.auth_token.is_some()})).collect::<Vec<_>>(),"next_before_id":next})
+                json!({"models":rows.into_iter().map(|m|json!({"id":m.id,"display_name":m.display_name,"provider":m.provider,"model_name":m.model_name,"runtime":m.runtime,"favorite":m.favorite,"context_window":m.context_window,"auth_configured":m.auth_token.is_some()})).collect::<Vec<_>>(),"next_before_id":next})
             }
             Model { id } => {
                 let model = storage.get_model(&id).await?.context("model does not exist")?;

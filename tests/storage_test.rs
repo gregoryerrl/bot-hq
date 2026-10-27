@@ -309,6 +309,7 @@ async fn agent_config_round_trips_every_column_it_still_projects() {
 async fn model_round_trips_every_column_it_still_projects() {
     let s = Storage::memory().await.unwrap();
     let m = bot_hq::storage::Model {
+        favorite: false,
         id: "m-gateway".into(),
         display_name: "DeepSeek V4 Pro".into(),
         provider: "deepseek".into(),

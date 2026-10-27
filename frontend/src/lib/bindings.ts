@@ -539,6 +539,14 @@ async listModels() : Promise<Result<ModelView[], AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async setModelFavorite(id: string, favorite: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_model_favorite", { id, favorite }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async upsertModel(model: ModelView) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("upsert_model", { model }) };
@@ -2091,7 +2099,7 @@ claude_config_dir: string | null;
  * (claude-code) or `codex` (OpenAI's Codex CLI), 0102. Save refuses any
  * other value; blank is stored as `claude_code`.
  */
-runtime: string }
+runtime: string; favorite?: boolean }
 /**
  * One open session's halt, for the cross-session surfaces — the dashboard
  * cards and the header bell (the user, 2026-09-25: a halted session showed
