@@ -171,6 +171,13 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   participants get no user MCP servers, and the change reaches participants
   spawned after it. Before this a Driver asked to check a team channel had no
   Discord (feedback #141).
+- A gated command in a session with no working repo is refused when it is
+  issued — "has no working_repo_path … cannot run here, so nothing was
+  parked" — instead of parking a card whose approval could only end in "could
+  not start". This covers action_gate, the Tool Gate's park, read_gate,
+  prod_read and an outward publish queued for review; gates already parked are
+  untouched. `gate_status` now says it reads this session's gates only
+  (feedback #134).
 - Settings → Roles and Settings → Claude Config never save Claude overrides
   over a store they have not read. Both write the whole store, so an edit made
   while the saved overrides were still loading, or after the read failed,

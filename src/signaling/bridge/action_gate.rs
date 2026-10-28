@@ -964,6 +964,7 @@ impl SignalingBridge {
         &self, session_id: &str, agent: &str, command: &str, approve_after: Option<&str>,
         reviewer_read: bool, prod_read_card: Option<&str>, window: Option<&RunWindow>, intent: ReviewIntent,
     ) -> Result<ParkOutcome> {
+        self.refuse_without_repo(session_id, command).await?;
         let explicit = intent == ReviewIntent::Explicit;
         let mut upgraded = None;
         // Bound first: the `if let` scrutinee's guard would otherwise live
@@ -1903,6 +1904,26 @@ impl SignalingBridge {
         let session = storage.get_session(session_id).await.ok()??;
         session.working_repo_path.map(PathBuf::from)
     }
+
+    /// Feedback #134: a session whose row has no `working_repo_path` can run
+    /// no gated command — the runner executes in that repo — so a park or a
+    /// review queue is refused up front, while the issuer can still adapt,
+    /// instead of spending an approval round trip on a run that can only be
+    /// refused. Unknown (no storage, a failed read, no row) is not "no repo":
+    /// the runner's own check stays the backstop. Gates already parked are
+    /// left as they are.
+    async fn refuse_without_repo(&self, session_id: &str, command: &str) -> Result<()> {
+        let Some(storage) = self.storage.lock().await.clone() else { return Ok(()) };
+        if let Ok(Some(session)) = storage.get_session(session_id).await {
+            if session.working_repo_path.as_deref().is_none_or(|p| p.trim().is_empty()) {
+                anyhow::bail!(
+                    "action_gate: session {session_id} has no working_repo_path — `{command}` cannot run here, so nothing was parked. \
+                     Gated commands run in the session's repo: ask the user for a session that has one, or for another way to do this."
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The outward-review verdict: park may proceed (with an optional LOUD note
@@ -2407,6 +2428,7 @@ impl SignalingBridge {
         approval_required: bool,
         run_timeout_secs: Option<u64>,
     ) -> Result<(String, bool)> {
+        self.refuse_without_repo(session_id, command).await?;
         let storage = self
             .storage
             .lock()
@@ -3874,6 +3896,39 @@ mod tests {
             err.to_string().contains("working_repo_path"),
             "err: {err}"
         );
+    }
+
+    /// Feedback #134: a session with no repo can run no gated command, so a
+    /// gate that WOULD park — a gated keyword, a forced approval, an outward
+    /// publish queued for review — is refused before anything is parked or
+    /// queued, while the issuing agent can still adapt. Before this the card
+    /// parked, the approval round trip was spent, and only then did the runner
+    /// refuse. A session with a repo still parks.
+    #[tokio::test]
+    async fn a_session_without_a_repo_refuses_a_gate_before_parking_it() {
+        let data = tempdir().unwrap();
+        tool_gate::save(data.path(), &[gk("rm", GateMode::Gate), gk("gh", GateMode::AutoAllow)]).unwrap();
+        let log = ViolationsLog::new(data.path());
+        let bridge = SignalingBridge::with_policy(log, data.path().to_path_buf());
+        let storage = Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s-norepo", "t", None).await.unwrap();
+        storage.ensure_session_roster("s-norepo", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
+        bridge.register_session_reviewers("s-norepo".into(), vec!["eyes".into()]);
+        let body = data.path().join("body.md");
+        std::fs::write(&body, "a body the reviewer would read\n").unwrap();
+        for (command, forced) in [
+            ("rm -rf build".to_string(), false),
+            ("echo driver-gate-test".to_string(), true),
+            (format!("gh issue comment 1 --body-file {}", posix_path(&body)), false),
+        ] {
+            let err = bridge.action_gate("s-norepo".into(), "hands".into(), command.clone(), forced).await.unwrap_err().to_string();
+            assert!(err.contains("has no working_repo_path") && err.contains("nothing was parked"), "{command}: {err}");
+            assert!(err.contains(&command), "names the command: {err}");
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_tray WHERE session_id = 's-norepo'").fetch_one(storage.pool()).await.unwrap();
+        assert_eq!(rows, 0, "no card parked, nothing queued for review");
+        assert!(storage.pending_gate_ids("s-norepo").await.unwrap().is_empty());
     }
 
     #[tokio::test]

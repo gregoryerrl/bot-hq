@@ -498,7 +498,7 @@ pub fn tool_descriptors() -> &'static [ToolDescriptor] {
         },
         ToolDescriptor {
             name: "gate_status",
-            description: "Current state of a parked action_gate command by its gate_id — the full id, or the short one quoted in chat (a unique prefix of 8+ characters, resolved inside your own session): queued (waiting for the reviewer's read), pending (still awaiting the user — do not re-issue), approved and RUNNING (for how long, and the bound bot-hq runs it under), approved and finished (its exit code, how long it ran, and the tail of its output — read from the delivery row, already redacted; the row itself reaches the issuing agent only at its next turn, so this is how to read a result mid-turn and how a reviewer reads one at all), rejected (not run; includes the user's answer text), or withdrawn (with the reason). A `request_approval` choice_id works too — those rows carry no command, so the answer is the user's pick and nothing ran on bot-hq's side. Read-only, callable by any participant. Use this instead of guessing whether a gated command ran.",
+            description: "Current state of a parked action_gate command by its gate_id — the full id, or the short one quoted in chat (a unique prefix of 8+ characters, resolved inside your own session): queued (waiting for the reviewer's read), pending (still awaiting the user — do not re-issue), approved and RUNNING (for how long, and the bound bot-hq runs it under), approved and finished (its exit code, how long it ran, and the tail of its output — read from the delivery row, already redacted; the row itself reaches the issuing agent only at its next turn, so this is how to read a result mid-turn and how a reviewer reads one at all), rejected (not run; includes the user's answer text), or withdrawn (with the reason). A `request_approval` choice_id works too — those rows carry no command, so the answer is the user's pick and nothing ran on bot-hq's side. Read-only; this session's gates only. Use this instead of guessing whether a gated command ran.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1260,6 +1260,23 @@ impl ToolCallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn described(name: &str) -> &'static str {
+        tool_descriptors().iter().find(|t| t.name == name).unwrap_or_else(|| panic!("no tool {name}")).description.as_ref()
+    }
+
+    /// Feedback #134: `gate_status` answers for the caller's own session only
+    /// — a controller asking about another session's gate got "no gate with
+    /// id" from a tool described as callable by anyone. (A session without a
+    /// repo is explained by `action_gate`'s refusal itself, when it happens;
+    /// the always-loaded budget has no room for a sentence nobody needs
+    /// beforehand.)
+    #[test]
+    fn gate_status_says_it_reads_this_sessions_gates_only() {
+        let status = described("gate_status");
+        assert!(status.contains("this session's gates only"), "{status}");
+        assert!(!status.contains("callable by any participant"), "{status}");
+    }
 
     fn always_loaded(caps: &crate::agents::ResolvedCapabilities) -> Vec<&'static str> {
         tool_descriptors()

@@ -908,7 +908,8 @@ mod tests {
         let storage = crate::storage::Storage::memory().await.unwrap();
         // The tray row is FK'd to `sessions`; without the session the insert is
         // swallowed and dedupe has nothing to find.
-        storage.create_session("s1", "gate", None).await.unwrap();
+        // A repo: a gate parks only in a session that can run it (#134).
+        storage.create_session("s1", "gate", Some(&data.path().display().to_string())).await.unwrap();
         bridge.set_storage(storage).await;
         let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
         let url = format!("http://{}/hooks/tool-gate", server.local_addr);
@@ -964,7 +965,8 @@ mod tests {
         let bridge =
             SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
         let storage = crate::storage::Storage::memory().await.unwrap();
-        storage.create_session("s1", "gate", None).await.unwrap();
+        // A repo: a gate parks only in a session that can run it (#134).
+        storage.create_session("s1", "gate", Some(&data.path().display().to_string())).await.unwrap();
         bridge.set_storage(storage.clone()).await;
         let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
         let client = reqwest::Client::new();
@@ -1109,7 +1111,8 @@ mod tests {
         let bridge =
             SignalingBridge::with_policy(ViolationsLog::new(data.path()), data.path().to_path_buf());
         let storage = crate::storage::Storage::memory().await.unwrap();
-        storage.create_session("s1", "gate", None).await.unwrap();
+        // A repo: a gate parks only in a session that can run it (#134).
+        storage.create_session("s1", "gate", Some(&data.path().display().to_string())).await.unwrap();
         bridge.set_storage(storage).await;
         let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
         paths.write_signaling_addr(server.local_addr).unwrap();

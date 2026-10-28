@@ -3445,6 +3445,9 @@ mod tests {
         state.bridge.register_session_awaiting("s1".into(), Arc::clone(&awaiting)).await;
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         state.bridge.register_session_sequencer("s1".into(), tx).await;
+        // A repo: a gate parks only in a session that can run it (#134).
+        sqlx::query("UPDATE sessions SET working_repo_path = ? WHERE id = 's1'")
+            .bind(_tmp.path().display().to_string()).execute(storage.pool()).await.unwrap();
         state.bridge.park_gated_command("s1", "hands", "printf first").await.unwrap();
         let gate_id = storage.tray_entries_for_session("s1").await.unwrap().into_iter()
             .find(|row| row.command_text.as_deref() == Some("printf first")).unwrap().choice_id;
