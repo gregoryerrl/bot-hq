@@ -749,6 +749,77 @@ async fn driver_live_hook_answer_records_actor_before_unblocking_the_waiter() {
     f.end().await;
 }
 
+/// Feedback #140/#142: a push gate's decision reaches the hook — and so the
+/// executor's `git push` output — verbatim and attributed, whether a delegated
+/// controller or the user decided; and the human decision leaves a channel
+/// row too, as the controller's always did. The live-hook branch runs nothing:
+/// the hook itself pushes on approve, nothing on reject.
+#[tokio::test]
+async fn push_gate_decisions_reach_the_hook_verbatim_and_attributed() {
+    let f = driver_fixture(false).await;
+    let bridge = f.state.bridge.clone();
+    bridge.set_hook_token("hook-token-for-tests");
+    let url = format!("http://{}/hooks/pre-push", f.state.signaling_addr);
+    let post = |url: String| async move {
+        let txt = reqwest::Client::new()
+            .post(&url)
+            .header(crate::signaling::HOOK_TOKEN_HEADER, "hook-token-for-tests")
+            .header("content-type", "application/json")
+            .body(serde_json::json!({"session_id": "s1", "agent": "eyes", "branch": "main"}).to_string())
+            .send().await.unwrap().text().await.unwrap();
+        serde_json::from_str::<serde_json::Value>(&txt).unwrap()
+    };
+    let next_choice = |mut events: tokio::sync::broadcast::Receiver<crate::signaling::SignalingEvent>| async move {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop { if let crate::signaling::SignalingEvent::PendingChoice(row) = events.recv().await.unwrap() { break row.choice_id; } }
+        }).await.unwrap()
+    };
+
+    // The delegated controller (hands of s1) rejects with a reason.
+    let events = bridge.subscribe();
+    let hook = tokio::spawn(post(url.clone()));
+    let choice_id = next_choice(events).await;
+    let reason = "Reject — EYES has not read 978d03ac; re-issue the push after its read";
+    let args = decision_args(&f, &choice_id, reason).await;
+    assert_eq!(driver_rpc(&f.state, args).await.unwrap()["result"]["status"], "delivered");
+    let reply = hook.await.unwrap();
+    assert_eq!(reply["approved"], false);
+    assert_eq!(reply["decision"], reason, "the controller's words travel verbatim");
+    assert_eq!(reply["decided_by"], "hands of s1 (delegated controller)", "never 'the user' for a controller");
+    let notices = || async {
+        sqlx::query_scalar::<_, String>("SELECT content FROM messages WHERE session_id = 's1' AND origin = 'system' ORDER BY id")
+            .fetch_all(f.state.storage.pool()).await.unwrap()
+    };
+    assert!(notices().await.iter().any(|b| b.contains(&format!("Decision {choice_id} answered by hands of s1: {reason}"))));
+
+    // The user rejects the next push with a typed reason: same reply shape,
+    // attributed to the user, and the decision is a row in the channel.
+    let events = bridge.subscribe();
+    let hook = tokio::spawn(post(url.clone()));
+    let choice_id = next_choice(events).await;
+    f.state.resolve_choice(&choice_id, "Reject — wait for the release branch".into(), false).await.unwrap();
+    let reply = hook.await.unwrap();
+    assert_eq!(reply["approved"], false);
+    assert_eq!(reply["decision"], "Reject — wait for the release branch");
+    assert_eq!(reply["decided_by"], "the user");
+    assert!(notices().await.iter().any(|b| b.contains(&format!("Decision {choice_id} answered by the user: Reject — wait for the release branch"))));
+    let human_words: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_user_words WHERE session_id = 's1'").fetch_one(f.state.storage.pool()).await.unwrap();
+    assert_eq!(human_words, 0, "a notice row is host text, not the user's recorded words");
+
+    // The user approves: the hook pushes itself; bot-hq runs nothing and says so.
+    let events = bridge.subscribe();
+    let hook = tokio::spawn(post(url));
+    let choice_id = next_choice(events).await;
+    f.state.resolve_choice(&choice_id, "Approve".into(), false).await.unwrap();
+    let reply = hook.await.unwrap();
+    assert_eq!(reply["approved"], true);
+    assert_eq!(reply["decision"], "Approve");
+    assert_eq!(reply["decided_by"], "the user");
+    let row = f.state.storage.get_tray_entry(&choice_id).await.unwrap().unwrap();
+    assert!(row.result_row_id.is_none() && row.run_started_at.is_none(), "a live hook's approval is not an app-run push");
+    f.end().await;
+}
+
 #[tokio::test]
 async fn driver_send_waits_for_the_live_turn_and_reports_real_delivery() {
     let mut f = driver_fixture(false).await;

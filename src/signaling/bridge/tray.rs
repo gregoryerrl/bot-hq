@@ -32,6 +32,15 @@ pub fn gate_age_secs(asked_at: &str) -> Option<i64> {
     Some((chrono::Utc::now() - parse_tray_ts(asked_at)?).num_seconds())
 }
 
+/// How a park ended: returned at once with the `{"status":"parked",…}` ack
+/// (the non-blocking tools), or held open until the card was answered (the
+/// host's blocking gates), in which case the decision travels with its
+/// attribution.
+enum Asked {
+    Parked(String),
+    Decided(GateDecision),
+}
+
 /// What [`SignalingBridge::withdraw_question_for`] did — the three states an
 /// agent's `withdraw_question` answer must keep apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,6 +511,51 @@ impl SignalingBridge {
         options: Vec<String>,
         approval: Option<ApprovalContext>,
         supersedes_id: Option<i64>,
+        blocking: bool,
+        gate: bool,
+    ) -> Result<String> {
+        match self
+            .ask_user_choice_decided(session_id, agent, question, options, approval, supersedes_id, blocking, gate)
+            .await?
+        {
+            Asked::Parked(ack) => Ok(ack),
+            Asked::Decided(decision) => Ok(decision.picked),
+        }
+    }
+
+    /// The host's blocking gate, answered WITH its attribution: what the pick
+    /// was and whether a delegated controller made it — the push hook's reply
+    /// is built from this (feedback #140/#142). Same park as
+    /// [`Self::request_approval`]; only the return differs.
+    pub async fn request_gate_decision(
+        &self,
+        session_id: String,
+        agent: String,
+        question: String,
+        options: Vec<String>,
+        ctx: ApprovalContext,
+    ) -> Result<GateDecision> {
+        let supersedes_id = self
+            .auto_supersede_prior_pending(&session_id, &agent, &question)
+            .await;
+        match self
+            .ask_user_choice_decided(session_id, agent, question, options, Some(ctx), supersedes_id, true, true)
+            .await?
+        {
+            Asked::Decided(decision) => Ok(decision),
+            Asked::Parked(_) => Err(anyhow::anyhow!("a blocking gate was parked without a decision")),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn ask_user_choice_decided(
+        &self,
+        session_id: String,
+        agent: String,
+        question: String,
+        options: Vec<String>,
+        approval: Option<ApprovalContext>,
+        supersedes_id: Option<i64>,
         // `true` = hold the request open until the UI resolves (request_approval
         // / pre-push gate — a git hook awaits a synchronous bool). `false` =
         // park and return immediately (ask_user_choice / supersede); the answer
@@ -513,7 +567,7 @@ impl SignalingBridge {
         // = an agent's `request_approval` (round 12): `kind = request`, a tray
         // item, audited, latching nothing. Ignored when `approval` is None.
         gate: bool,
-    ) -> Result<String> {
+    ) -> Result<Asked> {
         // **F10: the question and its options are redacted ONCE, here** — every
         // park goes through this function (questions, requests, gates,
         // supersedes), so the in-memory park, the pending event and the stored
@@ -541,7 +595,7 @@ impl SignalingBridge {
         // parks a `request` row in the tray.
         let is_approval = approval.is_some();
         let is_gate = is_approval && gate;
-        let (tx, rx) = oneshot::channel::<String>();
+        let (tx, rx) = oneshot::channel::<GateDecision>();
         let choice = PendingChoice {
             choice_id: choice_id.clone(),
             session_id: session_id.clone(),
@@ -632,23 +686,25 @@ impl SignalingBridge {
             // delivers the answer as a synthetic user message. That is the SAME
             // path that already handled client-side timeouts — here it's primary,
             // so there's no ~30s dead-wait and no timeout-then-poll dance.
-            return Ok(serde_json::json!({
-                "status": "parked",
-                "choice_id": choice_id,
-            })
-            .to_string());
+            return Ok(Asked::Parked(
+                serde_json::json!({
+                    "status": "parked",
+                    "choice_id": choice_id,
+                })
+                .to_string(),
+            ));
         }
         // Blocking path (request_approval / pre-push gate): the caller needs a
         // synchronous decision (a git hook awaits a bool), so hold the request
         // open until the UI resolves.
-        let picked = rx.await.map_err(|_| {
+        let decision = rx.await.map_err(|_| {
             anyhow::anyhow!("ask_user_choice canceled before user picked an option")
         })?;
         let _ = self.event_tx.send(SignalingEvent::ChoiceResolved {
             choice_id,
-            picked: picked.clone(),
+            picked: decision.picked.clone(),
         });
-        Ok(picked)
+        Ok(Asked::Decided(decision))
     }
 
     /// Best-effort write of a question row to storage. The bridge's in-memory
@@ -1086,16 +1142,37 @@ impl SignalingBridge {
                 } else {
                     self.clear_session_awaiting(&p.choice.session_id).await;
                 }
-                if let Some(actor) = actor {
+                // The decision's own row, written BEFORE the waiter is
+                // unblocked. A LIVE waiter (the push hook) takes the decision
+                // in-band and nothing else would record it: a controller's
+                // decision has posted this notice since 0114, and a human's
+                // does too now (feedback #140 — the typed reason reached the
+                // hook as a bare rejection and left no row behind). With no
+                // live waiter the answer becomes its own OOB row below, so
+                // only the controller's attribution notice is kept there.
+                let live_waiter = !p.tx.is_closed();
+                if live_waiter || actor.is_some() {
                     if let Some(storage) = self.storage_handle().await {
+                        let who = match actor {
+                            Some(a) => format!("{} of {}", a.slug, a.session_id),
+                            None => "the user".to_string(),
+                        };
                         crate::core::post_system_notice(&storage, Some(self), &p.choice.session_id,
                             crate::storage::MessageKind::SystemNotice,
-                            format!("Decision {} answered by {} of {}: {}", choice_id, actor.slug, actor.session_id, picked), None).await;
+                            format!("Decision {choice_id} answered by {who}: {picked}"), None).await;
                     }
                 }
-                match p.tx.send(picked) {
+                let decision = GateDecision {
+                    choice_id: choice_id.to_string(),
+                    picked,
+                    actor: actor.cloned(),
+                };
+                match p.tx.send(decision) {
+                    // The live hook proceeds on its own: a push on approve,
+                    // nothing on reject. bot-hq runs nothing on this arm.
                     Ok(()) => Ok(ResolveOutcome::Delivered),
-                    Err(picked) => {
+                    Err(decision) => {
+                        let picked = decision.picked;
                         // Nobody is waiting on the oneshot. For `ask_user_choice`
                         // that is the NORMAL case — the tool is non-blocking (rc3
                         // D35) and dropped its receiver at park time — so this is the

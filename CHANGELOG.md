@@ -108,6 +108,17 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- A rejected push now tells the pushing agent the decision as it was made and
+  who made it. The pre-push hook's reply carries the pick verbatim ("Reject —
+  <reason>", the shape the card's reason field and a Driver's `answer` both
+  send) and the decider — the user, or the delegated controller by slug and
+  session — and the hook prints both in the `git push` output instead of a
+  fixed "Push rejected by the user". The decision is also a row in the channel
+  for a human's answer on a live hook, as it already was for a controller's.
+  The application-control tool description says how a reason reaches the
+  executor. Before this, a controller's rejection reached the executor as
+  "rejected (no reason given)" and cost a decision round trip (feedback #140,
+  #142).
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"

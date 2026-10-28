@@ -405,8 +405,12 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
         command,
     };
 
-    let approved = match bridge
-        .request_approval(
+    // The reply carries the decision as it was made and who made it (feedback
+    // #140/#142): the hook prints both for the executor, whose `git push`
+    // output used to say "rejected by the user" and nothing more — whatever
+    // reason the user typed, and even when a delegated controller decided.
+    match bridge
+        .request_gate_decision(
             session_id.to_string(),
             agent.to_string(),
             question,
@@ -415,16 +419,22 @@ async fn handle_pre_push(body: Incoming, bridge: Arc<SignalingBridge>) -> Respon
         )
         .await
     {
-        Ok(picked) => picked == "Approve",
+        Ok(decision) => text_response(
+            StatusCode::OK,
+            &json!({
+                "approved": decision.picked == "Approve",
+                "decision": decision.picked,
+                "decided_by": decision.decided_by(),
+            })
+            .to_string(),
+        ),
         Err(e) => {
             // Canceled before the user picked (e.g. superseded). Treat as not
             // approved — the hook fail-closes and blocks the push.
             warn!(%session_id, error = %e, "pre-push request_approval did not resolve to a pick");
-            false
+            text_response(StatusCode::OK, &json!({ "approved": false }).to_string())
         }
-    };
-
-    text_response(StatusCode::OK, &json!({ "approved": approved }).to_string())
+    }
 }
 
 /// Handle `POST /hooks/posture` from the Codex PreToolUse hook. Body:
@@ -771,8 +781,13 @@ mod tests {
         bridge.resolve_choice(&cid, "Approve".into()).await.unwrap();
         let resp = call.await.unwrap();
         assert_eq!(resp["approved"], json!(true), "approve → approved:true");
+        // Feedback #140/#142: the reply names the decision and who made it.
+        assert_eq!(resp["decision"], json!("Approve"));
+        assert_eq!(resp["decided_by"], json!("the user"));
 
-        // Reject → {"approved": false}. Also covers the no-branch body shape.
+        // Reject → {"approved": false, "decision": <the pick verbatim>, …}:
+        // the typed reason reaches the hook, which prints it for the executor.
+        // Also covers the no-branch body shape.
         let mut sub = bridge.subscribe();
         let call = tokio::spawn(async move {
             let body = json!({ "session_id": "s1", "agent": "hands" }).to_string();
@@ -793,9 +808,18 @@ mod tests {
                 _ => continue,
             }
         };
-        bridge.resolve_choice(&cid, "Reject".into()).await.unwrap();
+        bridge
+            .resolve_choice(&cid, "Reject — EYES has not read 978d03ac; re-issue after its read".into())
+            .await
+            .unwrap();
         let resp = call.await.unwrap();
         assert_eq!(resp["approved"], json!(false), "reject → approved:false");
+        assert_eq!(
+            resp["decision"],
+            json!("Reject — EYES has not read 978d03ac; re-issue after its read"),
+            "the typed reason travels verbatim"
+        );
+        assert_eq!(resp["decided_by"], json!("the user"));
     }
 
     /// Round 12: a re-run's hook presents its nonce and gets redeem-or-refuse

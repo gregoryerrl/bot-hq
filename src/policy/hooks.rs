@@ -1022,7 +1022,7 @@ fn run_pre_push(
                 eprintln!("bot-hq pre-push: pre-approved re-run (gate redeemed once); pushing.");
                 0
             }
-            PushDecision::Rejected | PushDecision::Blocked(..) => {
+            PushDecision::Rejected(..) | PushDecision::Blocked(..) => {
                 eprintln!(
                     "{}",
                     blocked_banner(
@@ -1058,17 +1058,8 @@ fn run_pre_push(
         updates.get_or_init(read_push_updates),
     )) {
         PushDecision::Approved => Ok(0),
-        PushDecision::Rejected => {
-            eprintln!(
-                "{}",
-                blocked_banner(
-                    "pre-push",
-                    "Push rejected by the user.\n\
-                     \n\
-                     The user declined this `git push`. Do not retry it — ask the user what \
-                     they'd like to do instead.\n"
-                )
-            );
+        PushDecision::Rejected(rejection) => {
+            eprintln!("{}", blocked_banner("pre-push", &push_rejected_text(&rejection)));
             Ok(1)
         }
         PushDecision::Blocked(kind, reason) => {
@@ -1134,11 +1125,47 @@ fn push_block_text(kind: BlockKind, reason: &str, data_dir: &Path) -> String {
 #[derive(Debug, PartialEq)]
 enum PushDecision {
     Approved,
-    Rejected,
+    /// Somebody answered the card with anything but the listed `Approve`.
+    Rejected(PushRejection),
     /// The prompt couldn't be surfaced (app down / network / bad response). The
     /// kind picks the advice (feedback #36); the `String` is a human-readable
     /// reason for the audit trail + banner.
     Blocked(BlockKind, String),
+}
+
+/// What the app reported about a rejection (feedback #140/#142): the pick as
+/// it was made — `Reject`, or `Reject — <reason>` as the card's reason field
+/// and a delegated controller's `answer` both compose it — and who made it,
+/// as the app attributes it (`the user`, or `<slug> of <session> (delegated
+/// controller)`). Both `None` when the app predates the fields: nothing is
+/// invented, the banner says the decision was not reported.
+#[derive(Debug, Default, PartialEq)]
+struct PushRejection {
+    decision: Option<String>,
+    decided_by: Option<String>,
+}
+
+/// The banner under a rejected push. The executor reads this in its `git
+/// push` output, so the decision travels verbatim: before this the hook said
+/// "Push rejected by the user" and nothing else, and a controller's
+/// "Reject — EYES has not read 978d03ac" reached the executor as "rejected
+/// (no reason given)", which cost a decision round trip (#140/#142).
+fn push_rejected_text(rejection: &PushRejection) -> String {
+    let head = match rejection.decided_by.as_deref() {
+        Some(who) => format!("Push rejected by {who}."),
+        None => "Push rejected.".to_string(),
+    };
+    let decision = match rejection.decision.as_deref().map(str::trim) {
+        Some("Reject") => "Decision: Reject (no reason was given).".to_string(),
+        Some(text) => format!("Decision, verbatim:\n{text}"),
+        None => "This app build did not report the decision text.".to_string(),
+    };
+    format!(
+        "{head}\n\n{decision}\n\n\
+         Do not retry this push on your own. If the decision names a condition — a review, a \
+         fix, another target — meet it and issue the push again (it parks a fresh gate). If no \
+         reason was given, ask the user what they'd like to do instead.\n"
+    )
 }
 
 /// WHY a push was blocked — typed, so the banner's advice never depends on
@@ -1281,9 +1308,19 @@ fn classify_push_response(status: reqwest::StatusCode, body: &str) -> PushDecisi
         Ok(v) => v,
         Err(e) => return PushDecision::Blocked(BlockKind::Other, format!("malformed bot-hq response: {e}")),
     };
+    let text = |key: &str| {
+        v.get(key)
+            .and_then(|s| s.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     match v.get("approved").and_then(|b| b.as_bool()) {
         Some(true) => PushDecision::Approved,
-        Some(false) => PushDecision::Rejected,
+        Some(false) => PushDecision::Rejected(PushRejection {
+            decision: text("decision"),
+            decided_by: text("decided_by"),
+        }),
         None => PushDecision::Blocked(BlockKind::Other, "bot-hq response missing 'approved'".into()),
     }
 }
@@ -3610,10 +3647,57 @@ mod tests {
 
     #[test]
     fn push_response_approved_false_rejects() {
+        // A legacy reply (an app older than this hook) carries no decision text
+        // and no decider: it still rejects, with nothing invented.
         assert_eq!(
             classify_push_response(reqwest::StatusCode::OK, r#"{"approved": false}"#),
-            PushDecision::Rejected
+            PushDecision::Rejected(PushRejection::default())
         );
+    }
+
+    /// Feedback #140/#142: the app's reply carries the decision as it was
+    /// picked and who decided it, and the hook keeps both for its banner.
+    #[test]
+    fn push_response_rejected_carries_the_decision_and_the_decider() {
+        let body = r#"{"approved": false, "decision": "Reject — EYES has not read 978d03ac; re-issue after its read", "decided_by": "driver of s-91409754 (delegated controller)"}"#;
+        assert_eq!(
+            classify_push_response(reqwest::StatusCode::OK, body),
+            PushDecision::Rejected(PushRejection {
+                decision: Some("Reject — EYES has not read 978d03ac; re-issue after its read".into()),
+                decided_by: Some("driver of s-91409754 (delegated controller)".into()),
+            })
+        );
+    }
+
+    /// The banner the executor reads in its `git push` output: the decision
+    /// verbatim and the decider as the app named it — never "the user" for a
+    /// delegated controller (#140).
+    #[test]
+    fn rejection_banner_quotes_the_decision_verbatim_and_names_the_decider() {
+        let text = push_rejected_text(&PushRejection {
+            decision: Some("Reject — EYES has not read 978d03ac; re-issue after its read".into()),
+            decided_by: Some("driver of s-91409754 (delegated controller)".into()),
+        });
+        assert!(text.contains("Push rejected by driver of s-91409754 (delegated controller)."), "{text}");
+        assert!(text.contains("Reject — EYES has not read 978d03ac; re-issue after its read"), "{text}");
+        assert!(!text.contains("by the user"), "{text}");
+        assert!(text.contains("Do not retry this push on your own"), "{text}");
+    }
+
+    #[test]
+    fn rejection_banner_says_when_no_reason_was_given() {
+        let bare = push_rejected_text(&PushRejection {
+            decision: Some("Reject".into()),
+            decided_by: Some("the user".into()),
+        });
+        assert!(bare.contains("Push rejected by the user."), "{bare}");
+        assert!(bare.contains("no reason was given"), "{bare}");
+        assert!(bare.contains("ask the user what they'd like to do instead"), "{bare}");
+        // A legacy reply: nothing is known beyond the rejection itself.
+        let legacy = push_rejected_text(&PushRejection::default());
+        assert!(legacy.contains("Push rejected."), "{legacy}");
+        assert!(legacy.contains("did not report"), "{legacy}");
+        assert!(!legacy.contains("by the user"), "{legacy}");
     }
 
     #[test]

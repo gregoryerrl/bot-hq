@@ -45,8 +45,8 @@ pub mod web_search;
 mod webview_js;
 
 pub use bridge::{
-    gate_age_secs, is_scheduled, PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent, RETIREMENT_MARKERS,
-    STALE_GATE_MAX_AGE_SECS,
+    gate_age_secs, is_scheduled, GateDecision, PendingChoice, ResolveOutcome, SignalingBridge, SignalingEvent,
+    RETIREMENT_MARKERS, STALE_GATE_MAX_AGE_SECS,
 };
 
 /// MCP server keys bot-hq strips from a spawned agent's forwarded

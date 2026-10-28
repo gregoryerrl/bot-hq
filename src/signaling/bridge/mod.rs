@@ -416,11 +416,35 @@ pub struct PreApprovedPush {
     pub refspecs: Vec<String>,
 }
 
+/// What a blocking gate's waiter receives when the card is answered: the pick
+/// as it was made, and the delegated controller that made it when one did
+/// (`None` = the user). Known at resolve time, after the durable claim, and
+/// carried rather than re-read: the hook route turns it into the reply the
+/// hook prints for the executor (feedback #140/#142), and an attribution
+/// taken from the row later could name a controller the claim never recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GateDecision {
+    pub choice_id: String,
+    pub picked: String,
+    pub actor: Option<crate::storage::ControlActor>,
+}
+
+impl GateDecision {
+    /// Who decided, in the words every attributed notice uses — `the user`, or
+    /// the controller as `<slug> of <session> (delegated controller)`.
+    pub fn decided_by(&self) -> String {
+        match &self.actor {
+            Some(a) => format!("{} of {} (delegated controller)", a.slug, a.session_id),
+            None => "the user".to_string(),
+        }
+    }
+}
+
 /// Parked state for a pending choice. The oneshot resolves the agent's wait;
 /// the cloned `choice` lets external readers (`list_pending_choices`) see the
 /// question + options without losing the resolve-time-only approval context.
 struct Parked {
-    tx: oneshot::Sender<String>,
+    tx: oneshot::Sender<GateDecision>,
     choice: PendingChoice,
     /// Whether this park is a session-blocking GATE (latched the ring, renders
     /// in the gate slot) or an agent's tray-parked request / question (round
