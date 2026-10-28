@@ -28,7 +28,7 @@ import { Chip } from "./ui/Chip";
  * unlike a wrong display name, a wrong answer here is a confident technical
  * claim on a badge whose entire justification is accuracy.
  *
- * So the backend records the reconciled pair at spawn (migration 0061), the
+ * So the backend records the observed runtime pair at startup and readback, the
  * same call `slot0_model_at_spawn` made for the sibling fact, and this renders
  * it. Re-resolving at read time would answer a different question — *"what it
  * would be spawned with now"* — which diverges the moment Claude Config is
@@ -38,13 +38,13 @@ import { Chip } from "./ui/Chip";
  *
  * | row | renders |
  * |---|---|
- * | `spawn_knobs_recorded === false` | **nothing** — spawned before 0061; unknown, and a guess is worse than a gap |
+ * | `spawn_knobs_recorded === false` | **nothing** — unknown or legacy request-derived values |
  * | recorded, both null | `default` — a pre-floor row: spawned before 2026-08-25, when reconciling to nothing was possible |
  * | recorded, either set | the value |
  *
  * The flag is what separates rows 1 and 2, which are otherwise the same two
- * nulls. Every post-floor spawn records a concrete effort, so row 2 only
- * shrinks from here — but it stays renderable for the rows that exist.
+ * nulls. Migration 0116 unconfirms old Claude records because requests alone
+ * did not establish the effort actually used. Known legacy defaults remain renderable.
  *
  * ## Text says what, style says whether it was chosen
  *

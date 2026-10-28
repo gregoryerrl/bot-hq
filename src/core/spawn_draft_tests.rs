@@ -197,6 +197,8 @@ mod spawn_drafts {
                     .unwrap();
                 assert_eq!(draft.config.config.model_name, frozen_model_name);
                 assert_eq!(draft.config.overrides.effort.as_deref(), Some("low"));
+                assert!(!draft.metadata.knobs_confirmed, "a draft has not observed a running process");
+                assert!(draft.metadata.effort.is_none());
                 assert_eq!(
                     draft.metadata.account_dir.as_deref(),
                     Some(account.as_str())
@@ -250,7 +252,8 @@ mod spawn_drafts {
                         now.account_email_at_spawn.as_deref(),
                         Some("candidate@example.com")
                     );
-                    assert!(now.spawn_knobs_recorded);
+                    assert!(!now.spawn_knobs_recorded, "publishing an unobserved draft must stay unconfirmed");
+                    assert!(now.effort_at_spawn.is_none());
                     assert_eq!(
                         s.participant_change("s1", "change")
                             .await

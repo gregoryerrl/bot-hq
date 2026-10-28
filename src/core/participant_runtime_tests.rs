@@ -62,7 +62,10 @@ fn services(fail: bool) -> (SpawnServices, mpsc::UnboundedReceiver<Spawned>) {
                     if fail && cfg.config.model_name == "new" {
                         anyhow::bail!("fixture refused candidate");
                     }
-                    let (handle, seat) = fake_agent(&cfg.session_id, &cfg.agent_name);
+                    let (mut handle, seat) = fake_agent(&cfg.session_id, &cfg.agent_name);
+                    handle.effort_control = crate::agents::effort::EffortControl::codex(Arc::new(std::sync::Mutex::new(crate::agents::effort::EffortPair {
+                        effort: cfg.overrides.effort.clone().unwrap_or_else(|| "medium".into()), ultracode: cfg.overrides.ultracode.unwrap_or(false),
+                    })));
                     tx.send(Spawned {
                         prompt: std::fs::read_to_string(&cfg.system_prompt_path).unwrap(),
                         config: cfg.config,
@@ -304,6 +307,47 @@ async fn helper_fixture_with_database(disk: bool) -> (Fixture,mpsc::UnboundedRec
 
 fn helper_start(id: &str) -> serde_json::Value {
     serde_json::json!({"action":"start","request_id":id,"tasks":[{"goal":"Inspect fixture","files":["source.rs"],"expected_evidence":"path:line","model_id":"old"}],"timeout_secs":30})
+}
+
+#[tokio::test]
+async fn helpers_require_an_explicit_effort_when_the_parent_is_unconfirmed() {
+    let (f, mut spawned) = helper_fixture().await;
+    f.state.storage.set_observed_spawn_knobs(f.rows[0].id, None).await.unwrap();
+    let request = helper_start("unconfirmed-parent");
+    assert!(helper_rpc(&f.state, request.clone()).await.unwrap_err().to_string().contains("Parent effort is unconfirmed"));
+    assert!(spawned.try_recv().is_err());
+    assert!(f.state.storage.helper_batch("s1", f.rows[0].id, "unconfirmed-parent").await.unwrap().is_none());
+    let mut explicit = request; explicit["tasks"][0]["effort"] = "high".into();
+    helper_rpc(&f.state, explicit).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), spawned.recv()).await.unwrap().unwrap();
+    f.end().await;
+}
+
+#[tokio::test]
+async fn candidate_effort_metadata_comes_from_observation_and_unknown_is_not_confirmed() {
+    for known in [true, false] {
+        let f = Fixture::new(false).await;
+        let (mut services, mut spawned) = services(false);
+        let base = services.spawn.clone();
+        services.spawn = Arc::new(move |cfg| {
+            let base = base.clone();
+            Box::pin(async move {
+                let mut handle = base(cfg).await?;
+                handle.effort_control = if known {
+                    crate::agents::effort::EffortControl::codex(Arc::new(std::sync::Mutex::new(crate::agents::effort::EffortPair { effort: "max".into(), ultracode: false })))
+                } else { Default::default() };
+                Ok(handle)
+            })
+        });
+        f.start("switch", f.switch(), services).await;
+        assert_eq!(f.done("switch").await.status, "applied");
+        let row = f.state.storage.participant_by_id(f.rows[0].id).await.unwrap().unwrap();
+        assert_eq!(row.spawn_knobs_recorded, known);
+        assert_eq!(row.effort_at_spawn.as_deref(), if known {Some("max")} else {None});
+        assert!(row.effort.is_none(), "do not change the user's inherited choice");
+        spawned.recv().await.unwrap();
+        f.end().await;
+    }
 }
 
 #[tokio::test]
@@ -1437,7 +1481,7 @@ async fn install_effort_fixture(f: &Fixture, mode: &'static str) {
             } else {
                 body = serde_json::json!({"applied":{"effort":actual,"ultracode":false,"ultracodeAvailable":true}});
             }
-            replies.observe(&serde_json::json!({"type":"control_response","response":{"subtype":"success","request_id":request.request_id,"response":body}}));
+            replies.observe(&serde_json::json!({"type":"control_response","response":{"subtype":if mode=="unknown" && writes>0 && request.request.subtype=="get_settings" {"error"} else {"success"},"request_id":request.request_id,"response":body}}));
         }
     });
     f.state.sessions.lock().await.get_mut("s1").unwrap().participants[0].handle.effort_control = control;
@@ -1607,6 +1651,10 @@ impl Fixture {
         storage.ensure_session_roster("s1", 2).await.unwrap();
         sqlx::query("UPDATE session_participants SET model_id = 'old', claude_session_id = 'thread-' || slug WHERE session_id = 's1'")
             .execute(storage.pool()).await.unwrap();
+        // The fixture's existing fake processes report medium at startup.
+        for row in storage.participants_for_session("s1").await.unwrap() {
+            storage.set_spawn_knobs(row.id, Some("medium"), Some(false)).await.unwrap();
+        }
         let rows = storage.participants_for_session("s1").await.unwrap();
         let data_dir = temp.path().join("data");
         crate::policy::tool_gate::save(

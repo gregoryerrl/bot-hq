@@ -827,7 +827,8 @@ async fn spawn_session_handle(
         // pre-flight is what surfaces that at configure time.
         let system_prompt_path = spawn_cfg.system_prompt_path.clone();
         let config_snapshot = spawn_cfg.config.clone();
-        let handle = spawn_supervised_agent(spawn_cfg, RetryPolicy::default()).await?;
+        let handle = spawn_observed(&storage, p.id, spawn_cfg,
+            |cfg| spawn_supervised_agent(cfg, RetryPolicy::default())).await?;
         spawned.push((handle, system_prompt_path, draft.mcp_token, config_snapshot));
     }
     if let Some(text) = account_straddle_notice(&accounts) {
@@ -2171,6 +2172,20 @@ pub(crate) struct ParticipantSpawnDraft {
     pub notices: Vec<String>,
 }
 
+/// The production join from native startup readback to the persisted badge and
+/// helper default. A resolved request is never itself a confirmed observation.
+async fn spawn_observed<F, Fut>(storage: &Storage, id: i64, cfg: SpawnConfig, spawn: F) -> Result<AgentHandle>
+where F: FnOnce(SpawnConfig) -> Fut + Send, Fut: std::future::Future<Output = Result<AgentHandle>> + Send {
+    storage.set_observed_spawn_knobs(id, None).await?;
+    let mut handle = spawn(cfg).await?;
+    let observed = handle.effort_control.status().await;
+    if let Err(error) = storage.set_observed_spawn_knobs(id, observed.current.as_ref()).await {
+        let _ = handle.stop_and_wait(std::time::Duration::from_secs(30)).await;
+        return Err(error);
+    }
+    Ok(handle)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn participant_spawn_draft(
     storage: &Storage,
@@ -2388,26 +2403,12 @@ async fn build_participant_spawn(
         Some(overrides) => overrides,
         None => resolve_participant_overrides(storage, &paths.data_dir, p).await,
     };
-    // **The precedence chain ends HERE, not in `build_command`.** This site holds
-    // `storage`, so it is the only one that can RECORD what the reconciliation
-    // decided — and recording it is the whole point: the effective pair is not
-    // recoverable from the participant's own columns (a choice of "inherit" says
-    // nothing about what was inherited) and re-resolving it later answers "what
-    // it would be spawned with now", which diverges the moment Claude Config is
-    // edited mid-session. `slot0_model_at_spawn` made the same call for the
-    // sibling fact.
-    //
-    // A failed write must not fail the spawn: the row is for the UI to read
-    // back, and a session that will not start because a display value could not
-    // be saved is a worse outcome than a badge that says nothing.
+    // Resolve the request here, but do not label it confirmed. The runtime's
+    // applied readback is recorded by spawn_observed (or candidate publication).
+    // Clear an older confirmation before preparing this new process.
     crate::agents::reconcile_spawn_knobs(&mut overrides, p.effort.as_deref(), p.ultracode);
     if persistence == SpawnPersistence::Immediate {
-        if let Err(e) = storage
-            .set_spawn_knobs(p.id, overrides.effort.as_deref(), overrides.ultracode)
-            .await
-        {
-            warn!(participant = %p.slug, ?e, "recording the spawn knobs failed");
-        }
+        storage.set_observed_spawn_knobs(p.id, None).await?;
     }
     // A Codex participant's prompt carries the connector's notes: the tool
     // names the rules use are claude-code's, and Codex's base instructions
@@ -2425,8 +2426,8 @@ async fn build_participant_spawn(
     // the schema promised "stored so what the agent actually ran with is
     // inspectable" since 0044 and nothing ever wrote it — 0 of 158 rows on
     // the live DB. It also becomes the measurement rail for the prompt-size
-    // work: real spawns report real bytes. Same non-fatal posture as the
-    // knobs above — an audit value must not fail a spawn.
+    // work: real spawns report real bytes. This prompt audit is non-fatal;
+    // effort confirmation, in contrast, must persist before model work starts.
     if persistence == SpawnPersistence::Immediate {
         if let Err(e) = storage.store_participant_prompt(p.id, &system_prompt).await {
             warn!(participant = %p.slug, ?e, "persisting the composed prompt failed");
@@ -2549,8 +2550,9 @@ async fn build_participant_spawn(
         } else {
             p.account_org_at_spawn.clone()
         },
-        effort: overrides.effort.clone(),
-        ultracode: overrides.ultracode,
+        effort: None,
+        ultracode: None,
+        knobs_confirmed: false,
         system_prompt,
     };
     let config = SpawnConfig {
@@ -4887,130 +4889,45 @@ mod tests {
         }
     }
 
-    /// Migration 0061: building a spawn config RECORDS the reconciled
-    /// effort/ultracode on the participant row.
-    ///
-    /// **The wire, not the halves.** `reconcile_spawn_knobs` is unit-tested in
-    /// `agents::spawn` and `set_spawn_knobs` is a one-line UPDATE; both can be
-    /// perfect while nothing calls either, which is the defect this codebase has
-    /// shipped five times. Deleting the `set_spawn_knobs` call in
-    /// `participant_spawn_config` must turn this red.
-    ///
-    /// It asserts the FLAG separately from the values because they answer
-    /// different questions. Since the no-inherit floor (2026-08-25) every
-    /// spawn records a CONCRETE effort — `effort_at_spawn IS NULL` now only
-    /// means a row that predates the floor (or nothing ever spawned, which
-    /// `spawn_knobs_recorded` still distinguishes). The no-pick case below
-    /// pins the floor value itself onto the row.
+    /// A resolved request is not an observation. Exercise the production join
+    /// with a process that deliberately reports a DIFFERENT actual effort.
     #[tokio::test]
-    async fn a_spawn_records_the_reconciled_knobs_on_the_participant_row() {
+    async fn startup_records_the_observed_effort_not_the_resolved_request() {
         let s = Storage::memory().await.unwrap();
         s.create_session("s1", "t", None).await.unwrap();
-        s.ensure_session_roster("s1", crate::storage::MAX_SESSION_PARTICIPANTS).await.unwrap();
-        let data_dir = TempDir::new().unwrap();
-        let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
-        let mcp_temp = TempDir::new().unwrap();
-        let roster = s.participants_for_session("s1").await.unwrap();
-        let me = roster.iter().find(|p| p.slug == "hands").expect("the executor").clone();
-
-        // Precondition: nothing recorded yet. Without it a passing assertion
-        // below could be measuring the migration's defaults.
-        let before: (Option<String>, i64) = sqlx::query_as(
-            "SELECT effort_at_spawn, spawn_knobs_recorded FROM session_participants WHERE id = ?",
-        )
-        .bind(me.id)
-        .fetch_one(s.pool())
-        .await
-        .unwrap();
-        assert_eq!(before, (None, 0), "precondition: the row starts unrecorded");
-
-        // A per-run pick the reconciliation must carry through untouched (no
-        // persistent override is in force in this temp data dir).
-        sqlx::query("UPDATE session_participants SET effort = 'high' WHERE id = ?")
-            .bind(me.id)
-            .execute(s.pool())
-            .await
-            .unwrap();
+        s.ensure_session_roster("s1", 2).await.unwrap();
+        let dir = TempDir::new().unwrap();
+        let paths = Paths::for_data_dir(dir.path().to_path_buf());
+        let mcp = TempDir::new().unwrap();
         let me = s.participant_by_slug("s1", "hands").await.unwrap().unwrap();
-
-        participant_spawn_config(
-            &s,
-            &me,
-            resolve_participant_config(&s, &me).await,
-            &paths,
-            &None,
-            "prompt".to_string(),
-            "127.0.0.1:1".parse().unwrap(),
-            mcp_temp.path(),
-            None,
-            &SignalingBridge::new(),
-            &*no_auth_probe(),
-            &*no_codex_probe(),
-        )
-        .await
-        .expect("spawn config");
-
-        let after: (Option<String>, Option<i64>, i64) = sqlx::query_as(
-            "SELECT effort_at_spawn, ultracode_at_spawn, spawn_knobs_recorded \
-             FROM session_participants WHERE id = ?",
-        )
-        .bind(me.id)
-        .fetch_one(s.pool())
-        .await
-        .unwrap();
-        assert_eq!(
-            after,
-            (Some("high".to_string()), None, 1),
-            "the spawn must record what it resolved, and flag the row as recorded"
-        );
-
-        // And the COMPOSED prompt persists on the same row (Batch 7 P3 — the
-        // 0044 schema comment's promise, 0/158 rows on the live DB until now).
-        // Deleting the store_participant_prompt call turns this red.
-        let stored: Option<String> =
-            sqlx::query_scalar("SELECT prompt FROM session_participants WHERE id = ?")
-                .bind(me.id)
-                .fetch_one(s.pool())
-                .await
-                .unwrap();
-        assert_eq!(
-            stored.as_deref(),
-            Some("prompt"),
-            "the exact composed string the spawn received is inspectable on the row"
-        );
-
-        // The floor reaches the ROW: a participant with no pick and no role
-        // config records DEFAULT_EFFORT, not NULL — this is the wire between
-        // reconcile's floor and what the spawn badge shows.
-        let peer = s.participant_by_slug("s1", "eyes").await.unwrap().unwrap();
-        participant_spawn_config(
-            &s,
-            &peer,
-            resolve_participant_config(&s, &peer).await,
-            &paths,
-            &None,
-            "prompt".to_string(),
-            "127.0.0.1:1".parse().unwrap(),
-            mcp_temp.path(),
-            None,
-            &SignalingBridge::new(),
-            &*no_auth_probe(),
-            &*no_codex_probe(),
-        )
-        .await
-        .expect("spawn config");
-        let floored: (Option<String>, i64) = sqlx::query_as(
-            "SELECT effort_at_spawn, spawn_knobs_recorded FROM session_participants WHERE id = ?",
-        )
-        .bind(peer.id)
-        .fetch_one(s.pool())
-        .await
-        .unwrap();
-        assert_eq!(
-            floored,
-            (Some(crate::claude_config::DEFAULT_EFFORT.to_string()), 1),
-            "a no-pick, no-config spawn must record the floor, never NULL"
-        );
+        sqlx::query("UPDATE session_participants SET effort='low' WHERE id=?").bind(me.id).execute(s.pool()).await.unwrap();
+        let me = s.participant_by_id(me.id).await.unwrap().unwrap();
+        let config = participant_spawn_config(&s, &me, resolve_participant_config(&s,&me).await,
+            &paths, &None, "prompt".into(), "127.0.0.1:1".parse().unwrap(), mcp.path(), None,
+            &SignalingBridge::new(), &*no_auth_probe(), &*no_codex_probe()).await.unwrap();
+        let pending = s.participant_by_id(me.id).await.unwrap().unwrap();
+        assert_eq!(config.overrides.effort.as_deref(), Some("low"));
+        assert!(!pending.spawn_knobs_recorded && pending.effort_at_spawn.is_none());
+        let handle = spawn_observed(&s, me.id, config.clone(), |cfg| async move {
+            assert_eq!(cfg.overrides.effort.as_deref(), Some("low"));
+            let mut h=stub_handle(&cfg.agent_name);
+            h.effort_control=crate::agents::effort::EffortControl::codex(Arc::new(std::sync::Mutex::new(
+                crate::agents::effort::EffortPair {effort:"max".into(),ultracode:false})));
+            Ok(h)
+        }).await.unwrap();
+        let actual = s.participant_by_id(me.id).await.unwrap().unwrap();
+        assert_eq!(actual.effort.as_deref(), Some("low"), "the user's choice is retained");
+        assert_eq!(actual.effort_at_spawn.as_deref(), Some("max"));
+        assert_eq!(actual.ultracode_at_spawn, Some(false));
+        assert!(actual.spawn_knobs_recorded);
+        let prompt: Option<String> = sqlx::query_scalar("SELECT prompt FROM session_participants WHERE id=?").bind(me.id).fetch_one(s.pool()).await.unwrap();
+        assert_eq!(prompt.as_deref(), Some("prompt"));
+        drop(handle);
+        let unknown = spawn_observed(&s, me.id, config, |cfg| async move {Ok(stub_handle(&cfg.agent_name))}).await.unwrap();
+        let row=s.participant_by_id(me.id).await.unwrap().unwrap();
+        assert!(!row.spawn_knobs_recorded && row.effort_at_spawn.is_none());
+        assert_eq!(row.effort.as_deref(),Some("low"));
+        drop(unknown);
     }
 
     #[tokio::test]

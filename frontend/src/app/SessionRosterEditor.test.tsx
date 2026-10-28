@@ -72,6 +72,15 @@ describe("Session Settings live agent controls", () => {
     expect(within(native).getAllByRole("option")).toHaveLength(5);
   });
 
+  it("shows observed startup effort while waiting for first-turn change support", async () => {
+    controls.selections[0].effort = { available: false, reason: "Available after this agent's first turn since it started", current: { effort: "low", ultracode: false }, ultracode_available: false };
+    mount();
+    const picker = await screen.findByLabelText("Effort for Builder · Old");
+    await waitFor(() => expect(picker).toHaveValue("low"));
+    expect(picker).toBeDisabled();
+    expect(screen.getByText(/Current effort: low.*after this agent's first turn/)).toBeVisible();
+  });
+
   it("adds the selected role/model through the panel with revision and stable request identity", async () => {
     mount();
     await screen.findByRole("option", { name: "Reviewer" });

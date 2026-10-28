@@ -33,6 +33,7 @@ pub struct ParticipantSpawnMetadata {
     pub account_org: Option<String>,
     pub effort: Option<String>,
     pub ultracode: Option<bool>,
+    pub knobs_confirmed: bool,
     pub system_prompt: String,
 }
 
@@ -217,10 +218,10 @@ impl Storage {
         if !current.enabled || current.runtime != metadata.runtime { return Ok(false); }
         sqlx::query("UPDATE session_participants SET runtime_version_at_spawn = ?, claude_session_id = ?, \
             account_dir_at_spawn = ?, account_email_at_spawn = ?, account_org_at_spawn = ?, \
-            effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = 1, prompt = ? WHERE session_id = ? AND id = ?")
+            effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = ?, prompt = ? WHERE session_id = ? AND id = ?")
             .bind(&metadata.runtime_version).bind(&metadata.resume_id).bind(&metadata.account_dir)
             .bind(&metadata.account_email).bind(&metadata.account_org).bind(&metadata.effort)
-            .bind(metadata.ultracode.map(i64::from)).bind(&metadata.system_prompt).bind(session).bind(participant_id)
+            .bind(metadata.ultracode.map(i64::from)).bind(metadata.knobs_confirmed).bind(&metadata.system_prompt).bind(session).bind(participant_id)
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(true)
@@ -262,11 +263,11 @@ impl Storage {
         if current.runtime != metadata.runtime { anyhow::bail!("spawn metadata belongs to another runtime"); }
         sqlx::query("UPDATE session_participants SET runtime_version_at_spawn = ?, claude_session_id = ?, \
             account_dir_at_spawn = ?, account_email_at_spawn = ?, account_org_at_spawn = ?, \
-            effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = 1, prompt = ? \
+            effort_at_spawn = ?, ultracode_at_spawn = ?, spawn_knobs_recorded = ?, prompt = ? \
             WHERE session_id = ? AND id = ?")
             .bind(&metadata.runtime_version).bind(&metadata.resume_id)
             .bind(&metadata.account_dir).bind(&metadata.account_email).bind(&metadata.account_org)
-            .bind(&metadata.effort).bind(metadata.ultracode.map(i64::from)).bind(&metadata.system_prompt)
+            .bind(&metadata.effort).bind(metadata.ultracode.map(i64::from)).bind(metadata.knobs_confirmed).bind(&metadata.system_prompt)
             .bind(session).bind(target).execute(&mut *tx).await?;
         sqlx::query("UPDATE session_participant_changes SET status = 'applied', finished_at = ? WHERE id = ? AND session_id = ?")
             .bind(now_utc()).bind(id).bind(session).execute(&mut *tx).await?;
@@ -449,7 +450,7 @@ mod tests {
             runtime: "codex".into(), runtime_version: "observed-version".into(),
             resume_id: Some("ready-thread".into()), account_dir: Some("/new-account".into()),
             account_email: Some("new@example.com".into()), account_org: Some("new-org".into()),
-            effort: Some("low".into()), ultracode: Some(false), system_prompt: "candidate prompt".into(),
+            effort: Some("low".into()), ultracode: Some(false), knobs_confirmed: true, system_prompt: "candidate prompt".into(),
         }
     }
 

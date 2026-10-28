@@ -64,6 +64,11 @@ pub fn claude_command(cfg: &SpawnConfig) -> Result<Command> {
     if let Some(effort) = cfg.overrides.effort.as_deref().filter(|s| !s.is_empty()) {
         cmd.env("CLAUDE_CODE_EFFORT_LEVEL", effort);
     }
+    // One safe budget knob, not an import of arbitrary model/user env. Gateways
+    // retain their inherited/explicit limit rather than receiving 64000.
+    if let Some(limit) = super::spawn::managed_output_limit(&cfg.config) {
+        cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", limit);
+    }
     if let Some(window) = cfg.config.context_window.filter(|w| *w > 0) {
         cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", window.to_string());
     }
@@ -138,6 +143,19 @@ mod tests {
         cfg.config.runtime = "claude_code".into();
         cfg.working_dir = None;
         assert!(claude_command(&cfg).unwrap_err().to_string().contains("repository"));
+    }
+
+    #[test]
+    fn helper_output_default_is_first_party_only_and_model_override_is_respected() {
+        let repo = tempfile::tempdir().unwrap(); let mut c = cfg(repo.path());
+        let explicit = |c: &SpawnConfig| claude_command(c).unwrap().as_std().get_envs()
+            .find(|(k,_)| *k == "CLAUDE_CODE_MAX_OUTPUT_TOKENS").and_then(|(_,v)| v.map(|v|v.to_string_lossy().to_string()));
+        assert_eq!(explicit(&c), None, "gateway keeps its inherited limit");
+        c.config.base_url = None; c.config.model_name = "claude-opus-5-5".into();
+        assert_eq!(explicit(&c).as_deref(), Some("64000"));
+        c.config.cli_settings = Some(r#"{"env":{"CLAUDE_CODE_MAX_OUTPUT_TOKENS":"16000","UNTRUSTED":"do not copy"}}"#.into());
+        assert_eq!(explicit(&c).as_deref(), Some("16000"));
+        assert!(!claude_command(&c).unwrap().as_std().get_envs().any(|(k,_)| k=="UNTRUSTED"));
     }
 
     #[cfg(unix)]

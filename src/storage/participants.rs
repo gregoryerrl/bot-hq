@@ -160,8 +160,8 @@ pub struct Participant {
     /// [`participant_display_name`] for what it overrides and what it leaves
     /// alone.
     pub label: Option<String>,
-    /// Latest confirmed runtime pair: initially reconcile_spawn_knobs at spawn
-    /// (0061), updated only after successful live effort readback.
+    /// Latest observed runtime pair, from startup/retry or live readback.
+    /// Migration 0116 marks pre-fix Claude request-derived records unconfirmed.
     ///
     /// **Not the same question as `effort` / `ultracode` above.** Those are the
     /// user's CHOICE, and "inherit" was the choice on 94 of 94 rows when this
@@ -170,10 +170,8 @@ pub struct Participant {
     /// it would be spawned with NOW"). Same call `slot0_model_at_spawn` made.
     pub effort_at_spawn: Option<String>,
     pub ultracode_at_spawn: Option<bool>,
-    /// Whether the pair above is confirmed (spawn or live readback). Every post-floor spawn
-    /// records a concrete effort (no-inherit, 2026-08-25), so a NULL pair means
-    /// a pre-floor row; the flag still separates that from a row nothing ever
-    /// spawned.
+    /// Whether the pair above was confirmed. False also covers legacy Claude
+    /// request-derived values, an unreadable runtime, and a never-started row.
     pub spawn_knobs_recorded: bool,
     /// The Claude config dir this participant was spawned into (migration
     /// 0090): `''` = the CLI's default `~/.claude`, else the absolute path the
@@ -1600,23 +1598,9 @@ impl Storage {
         Ok(())
     }
 
-    /// Record what this participant was ACTUALLY spawned with — the effort and
-    /// ultracode values left standing after `reconcile_spawn_knobs`, i.e. what
-    /// the child process really received (migration 0061).
-    ///
-    /// **Distinct from the `effort` / `ultracode` columns beside them**, which
-    /// are the user's CHOICE (usually the Default absence pair). A choice of
-    /// Default says nothing about the effective value, and the effective value
-    /// cannot be recovered later: the chain is per-run pick → the role's
-    /// `per_role[slug]` entry → the `DEFAULT_EFFORT` floor (no-inherit,
-    /// 2026-08-25), plus an exclusion rule that can flip either knob, and
-    /// re-resolving it after the fact answers "what it WOULD be spawned with
-    /// now".
-    ///
-    /// `spawn_knobs_recorded` is set unconditionally. Since the floor, every
-    /// spawn records a concrete effort — `effort_at_spawn IS NULL` means a
-    /// pre-floor row, and the flag still separates that from a row nothing
-    /// ever spawned, so a UI can honestly render each.
+    /// Persist a confirmed runtime pair, independently of the user's choice.
+    /// Call only with observed values; reconciliation alone cannot prove what
+    /// the process applied. Unknown outcomes use `set_observed_spawn_knobs`.
     pub async fn set_spawn_knobs(
         &self,
         participant_id: i64,
@@ -1634,6 +1618,18 @@ impl Storage {
         .execute(&self.pool)
         .await
         .with_context(|| format!("recording spawn knobs for participant {participant_id}"))?;
+        Ok(())
+    }
+
+    /// Only a process readback (or Codex's effective next-turn pair) belongs in
+    /// the confirmed record. None clears stale confirmation, never the choice.
+    pub async fn set_observed_spawn_knobs(&self, participant_id: i64, pair: Option<&crate::agents::effort::EffortPair>) -> Result<()> {
+        if let Some(pair) = pair {
+            pair.validate()?;
+            return self.set_spawn_knobs(participant_id, Some(&pair.effort), Some(pair.ultracode)).await;
+        }
+        sqlx::query("UPDATE session_participants SET effort_at_spawn = NULL, ultracode_at_spawn = NULL, spawn_knobs_recorded = 0 WHERE id = ?")
+            .bind(participant_id).execute(&self.pool).await?;
         Ok(())
     }
 
@@ -7984,4 +7980,16 @@ mod tests {
         assert_eq!((p.runtime.as_str(), p.runtime_version_at_spawn.as_str()), ("codex", "0.163.0"));
     }
 
+}
+
+#[cfg(test)]
+mod effort_provenance_migration_tests {
+    #[tokio::test]
+    async fn legacy_claude_effort_is_unconfirmed_without_losing_requested_values() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql("CREATE TABLE session_participants(id INTEGER, runtime TEXT, effort TEXT, effort_at_spawn TEXT, ultracode INTEGER, spawn_knobs_recorded INTEGER); INSERT INTO session_participants VALUES(1,'claude_code','low','low',0,1),(2,'claude_code',NULL,'max',1,1),(3,'codex','high','high',0,1);").execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/0116_unconfirm_legacy_claude_effort.sql")).execute(&pool).await.unwrap();
+        let rows: Vec<(i64,Option<String>,String,i64,i64)> = sqlx::query_as("SELECT id,effort,effort_at_spawn,ultracode,spawn_knobs_recorded FROM session_participants ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(rows, vec![(1,Some("low".into()),"low".into(),0,0),(2,None,"max".into(),1,0),(3,Some("high".into()),"high".into(),0,1)]);
+    }
 }

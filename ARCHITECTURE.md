@@ -841,6 +841,17 @@ participant, each choosing a ROLE and optionally overriding that role's default
 model and effort. The picks persist on `session_participants`
 (`role_id` / `model_id` / `effort` / `ultracode`).
 
+Managed Claude launches clear settings-file effort pins in their flag settings
+and pass their selected level through `--effort`. Shared interactive settings
+remain unchanged. Startup, candidate publication and automatic retry read the
+process's applied pair before recording it; retry metadata is fenced and
+acknowledged before continuation, without opening a turn. Unknown parent effort
+requires an explicit helper level. Live mutation additionally needs that
+process's per-message capability, reported with its first turn. First-party
+Claude participants/helpers default to a 64,000-token output ceiling; explicit
+model limits win and gateways keep their inherited/configured limits. Managed
+env values also reach tool subprocesses.
+
 **The model chain (rc3 D8):** the session's own pick → the ROLE's
 `default_model_id` → the per-agent row → the built-in default, resolved in
 `resolve_participant_config`. The role step is what makes the Roles tab the owner
@@ -2008,11 +2019,12 @@ Schema at `migrations/0001_init.sql` + subsequent migration files.
   per-participant model, effort, ultracode and resume id live on
   `session_participants` (rc3 D10), which also carries **`effort_at_spawn` /
   `ultracode_at_spawn` / `spawn_knobs_recorded`** (0061) — what a participant was
-  last confirmed with (initially at spawn, then after live effort readback), because the effective value cannot be recovered
+  last confirmed with through runtime observation, because the effective value cannot be recovered
   from the user's `effort`/`ultracode` CHOICE (usually "inherit") and must not be
   re-derived later, which would answer "what it would be spawned with now".
-  `spawn_knobs_recorded` separates "no override in force" from "predates 0061",
-  which are otherwise the same two nulls. **Migration 0060 dropped the nine columns
+  `spawn_knobs_recorded` distinguishes confirmed values from unknown ones.
+  Migration 0116 preserves but unconfirms legacy Claude values that were derived
+  from requests rather than readback. **Migration 0060 dropped the nine columns
   that used to shadow them** (`rain_enabled`, `brian/rain_model_id`,
   `brian/rain_claude_session_id`, `brian/rain_effort`,
   `brian/rain_ultracode`) — every one had no reader and no writer — and renamed

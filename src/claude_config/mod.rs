@@ -118,8 +118,8 @@ pub enum Surface {
     CoreKnobs,
     /// The `env.CLAUDE_CODE_EFFORT_LEVEL` knob specifically — split from
     /// [`Surface::CoreKnobs`] when the no-inherit floor landed (2026-08-25):
-    /// agents no longer read the user's settings.json effort, so the shared
-    /// every-agent chip became a false claim on that one row.
+    /// managed launches neutralize settings-file effort pins so each agent's
+    /// own selected effort can take effect.
     Effort,
     Model,
     Permissions,
@@ -168,13 +168,13 @@ pub fn inheritance(surface: Surface) -> Inheritance {
         Surface::CoreKnobs => Inheritance {
             inherited_by: agents(&[EVERY_AGENT]),
             skipped_by: agents(&[]),
-            note: "Read from settings.json by every agent (thinking, output tokens, …).".into(),
+            note: "Agents read shared settings. First-party Claude agents default to a 64,000-token output ceiling; a model's explicit limit wins. Gateway limits stay inherited or model-configured.".into(),
             overridable: true,
         },
         Surface::Effort => Inheritance {
             inherited_by: agents(&[]),
             skipped_by: agents(&[EVERY_AGENT]),
-            note: "Bot-hq uses --effort: the participant's pick, else its role's default (Roles tab), else medium. Its live control uses per-message effort when the process supports it. This knob applies to your own claude only.".into(),
+            note: "Managed agents override shared effort pins with their own pick, else the role's default, else medium. The displayed current effort comes from runtime readback. Supported live changes become available after the agent's first turn. This setting controls your interactive Claude defaults.".into(),
             overridable: true,
         },
         Surface::Model => Inheritance {

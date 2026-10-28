@@ -128,6 +128,14 @@ impl AgentHealth {
 /// High-level events a session-orchestrator consumes from an agent.
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    /// Retry startup observation. The pump publishes it before acknowledging;
+    /// no model work resumes against an old effort record.
+    EffortObserved {
+        current: Option<super::effort::EffortPair>,
+        /// Success says whether the interrupted turn may continue. A held
+        /// session still records the observation, but leaves the child idle.
+        acknowledged: tokio::sync::watch::Sender<Option<std::result::Result<bool, String>>>,
+    },
     /// Plain prose chunk from the assistant.
     Text(String),
     /// Text that is NOT the model's speech: claude-code's own synthetic
@@ -1221,6 +1229,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         crate::agents::runtime::Runtime::Codex => {
             let first = crate::agents::codex::spawn::spawn_codex_agent(cfg.clone()).await?;
             effort_control = first.effort_control.clone();
+            let _ = effort_control.status().await;
             tokio::spawn(async move { let result = supervise(
                 cfg,
                 policy,
@@ -1235,6 +1244,7 @@ pub async fn spawn_supervised_agent(cfg: SpawnConfig, policy: RetryPolicy) -> Re
         crate::agents::runtime::Runtime::ClaudeCode => {
             let first = spawn_agent(cfg.clone()).await?;
             effort_control = first.effort_control.clone();
+            let _ = effort_control.status().await;
             tokio::spawn(async move { let result = supervise(
                 cfg,
                 policy,
@@ -1302,6 +1312,12 @@ async fn supervise<S, Fut>(
     loop {
         // A freshly respawned `--resume` child idles until it receives input —
         // nudge it to pick up the interrupted turn.
+        // An interrupt queued during readback/publication cancels that private
+        // continuation, just as an interrupt takes priority over ordinary input.
+        while let Ok(ctl) = out_control_rx.try_recv() {
+            if ctl.request.subtype == "interrupt" { pending_nudge = None; }
+            let _ = incarnation.control_tx.try_send(ctl);
+        }
         if let Some(nudge) = pending_nudge.take() {
             let _ = interruptible!(incarnation.input_tx.relay(OutgoingUserMessage::text(nudge)));
         }
@@ -1427,6 +1443,25 @@ async fn supervise<S, Fut>(
                 Ok(next) => {
                     effort_control.replace_runtime(&next.effort_control).await;
                     incarnation = next;
+                    let observed = interruptible!(effort_control.status());
+                    let (acknowledged, mut receipt) = tokio::sync::watch::channel(None);
+                    if interruptible!(out_event_tx.send(AgentEvent::EffortObserved { current: observed.current, acknowledged })).is_err() {
+                        return incarnation.stop_and_wait(Duration::from_secs(30)).await;
+                    }
+                    let result = interruptible!(tokio::time::timeout(Duration::from_secs(30), async {
+                        loop {
+                            if let Some(result) = receipt.borrow().clone() { return result; }
+                            if receipt.changed().await.is_err() { return Err("effort publication receipt closed".to_string()); }
+                        }
+                    }));
+                    match result {
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => pending_nudge = None,
+                        _ => {
+                            let _ = interruptible!(out_event_tx.send(AgentEvent::Notice("Resumed runtime effort could not be published. The runtime was stopped; restart its agents to recover safely.".into())));
+                            return incarnation.stop_and_wait(Duration::from_secs(30)).await;
+                        }
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -1652,6 +1687,31 @@ mod ensure_claude_runnable_tests {
 fn apply_attribution_policy(settings: &mut serde_json::Map<String, serde_json::Value>, cfg: &SpawnConfig) {
     if cfg.blank_cli_attribution {
         settings.insert("attribution".into(), serde_json::json!({ "commit": "", "pr": "" }));
+    }
+}
+
+/// Only first-party Claude receives a larger default. Unknown gateway models
+/// are not reliably clamped by the CLI; preserve their inherited/configured cap.
+pub(crate) fn managed_output_limit(config: &AgentConfig) -> Option<String> {
+    if let Some(value) = config.cli_settings.as_deref()
+        .and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|s| s.get("env")?.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS")?.as_str().map(str::to_owned)) {
+        return Some(value);
+    }
+    let first_party = config.base_url.as_deref().is_none_or(|s| s.trim().is_empty())
+        && (config.model_name.starts_with("claude-") || ["opus", "sonnet", "haiku"].contains(&config.model_name.as_str()));
+    first_party.then(|| "64000".to_string())
+}
+
+fn apply_participant_knob_settings(settings: &mut serde_json::Map<String, Value>, cfg: &SpawnConfig) {
+    let env = settings.entry("env").or_insert_with(|| serde_json::json!({}));
+    if !env.is_object() { *env = serde_json::json!({}); }
+    let env = env.as_object_mut().unwrap();
+    // The settings-file env layer otherwise overrides --effort. Empty is the
+    // CLI's no-pin value and also propagates to tools launched by the agent.
+    env.insert("CLAUDE_CODE_EFFORT_LEVEL".into(), Value::String(String::new()));
+    if let Some(limit) = managed_output_limit(&cfg.config) {
+        env.entry("CLAUDE_CODE_MAX_OUTPUT_TOKENS").or_insert(Value::String(limit));
     }
 }
 
@@ -1945,6 +2005,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
             settings.entry(k).or_insert(v);
         }
         apply_attribution_policy(&mut settings, cfg);
+        apply_participant_knob_settings(&mut settings, cfg);
         if !settings.is_empty() {
             cmd.args(["--settings", &serde_json::Value::Object(settings).to_string()]);
         }
@@ -2009,6 +2070,7 @@ fn build_command(cfg: &SpawnConfig) -> Command {
                         map.entry(k).or_insert(v);
                     }
                     apply_attribution_policy(map, cfg);
+                    apply_participant_knob_settings(map, cfg);
                 }
                 cmd.args(["--settings", &settings.to_string()]);
             }
@@ -2531,7 +2593,7 @@ mod tests {
     fn a_model_without_cli_settings_injects_nothing() {
         let s = settings_arg_of(&eyes_cfg()).expect("the handoff hook rides --settings");
         let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["hooks"], "got {s}");
+        assert_eq!(keys, vec!["env", "hooks"], "got {s}");
         let s = settings_arg_of(&cfg()).expect("hook branch always passes --settings");
         assert!(s.get("modelOverrides").is_none(), "got {s}");
     }
@@ -2581,7 +2643,7 @@ mod tests {
             eyes.config.cli_settings = Some(bad.into());
             let s = settings_arg_of(&eyes).expect("the handoff hook rides --settings");
             assert!(s["hooks"]["SessionStart"].is_array(), "{bad}: hook lost: {s}");
-            assert_eq!(s.as_object().unwrap().len(), 1, "{bad}: read-only branch injected: {s}");
+            assert_eq!(s.as_object().unwrap().len(), 2, "{bad}: only hooks and managed env: {s}");
         }
     }
 
@@ -2964,7 +3026,7 @@ mod tests {
         // hooks, the post-compaction handoff and the shell lint.
         let s = settings_arg_of(&c).expect("the handoff hook rides --settings");
         let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["hooks"], "no override fragment on a role without edit_files: {s}");
+        assert_eq!(keys, vec!["env", "hooks"], "only managed env and hooks without edit_files: {s}");
         assert!(!s.to_string().contains("policy-check tool-gate"), "got {s}");
         // env-based overrides still apply to it.
         let cmd = build_command(&c);
@@ -3014,7 +3076,7 @@ mod tests {
         first.effort_control = EffortControl::codex(Arc::new(Mutex::new(EffortPair { effort: "high".into(), ultracode: false })));
         let outer = first.effort_control.clone();
         outer.apply(&EffortPair { effort: "low".into(), ultracode: false }).await.unwrap();
-        let (out, _out_rx) = mpsc::channel(16);
+        let (out, mut out_rx) = mpsc::channel(16);
         let (_input, inputs) = mpsc::channel(1);
         let (_control, controls) = mpsc::channel(1);
         let (_stop, stopped) = oneshot::channel();
@@ -3030,12 +3092,54 @@ mod tests {
         }));
         events.send(AgentEvent::Init { session_id: Some("same-conversation".into()), api_key_source: None }).await.unwrap();
         events.send(errored_turn(529)).await.unwrap(); drop(events);
+        let acknowledged = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(AgentEvent::EffortObserved { current, acknowledged }) = out_rx.recv().await {
+                    assert_eq!(current.unwrap().effort, "low");
+                    return acknowledged;
+                }
+            }
+        }).await.unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(20), next_inputs.recv()).await.is_err(), "no continuation before publication");
+        acknowledged.send_replace(Some(Ok(true)));
         next_inputs.recv().await.unwrap();
         assert_eq!(outer.status().await.current.unwrap().effort, "low");
         outer.apply(&EffortPair { effort: "max".into(), ultracode: false }).await.unwrap();
         assert_eq!(outer.status().await.current.unwrap().effort, "max");
         drop(next_events); task.await.unwrap().unwrap();
         assert!(!outer.status().await.available);
+    }
+
+    #[tokio::test]
+    async fn retry_effort_receipt_failure_pause_and_queued_interrupt_prevent_the_nudge() {
+        for (published, interrupted) in [(Ok(false), false), (Ok(true), true), (Err("storage unavailable".to_string()), false)] {
+            let failed = published.is_err();
+            let (first, events, _inputs) = fake_incarnation();
+            let (out, mut out_rx) = mpsc::channel(16);
+            let (_input, inputs) = mpsc::channel(1);
+            let (control, controls) = mpsc::channel(1);
+            let (_stop, stopped) = oneshot::channel();
+            let (next, next_events, mut next_inputs) = fake_incarnation();
+            let next = Arc::new(Mutex::new(Some(next)));
+            let task = tokio::spawn(supervise(cfg(), instant_policy(1), first, out, inputs, controls, stopped, move |_| {
+                let child = next.lock().unwrap().take().unwrap(); async move { Ok(child) }
+            }));
+            events.send(errored_turn(529)).await.unwrap(); drop(events);
+            let acknowledged = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Some(AgentEvent::EffortObserved { acknowledged, .. }) = out_rx.recv().await { break acknowledged; }
+                }
+            }).await.unwrap();
+            if interrupted { control.send(ControlRequest::interrupt("pause-during-publication")).await.unwrap(); }
+            acknowledged.send_replace(Some(published));
+            match tokio::time::timeout(Duration::from_millis(40), next_inputs.recv()).await {
+                Ok(None) | Err(_) => {}
+                Ok(Some(_)) => panic!("held, cancelled or unpublished retry resumed model work"),
+            }
+            if failed { assert!(next_inputs.recv().await.is_none(), "failed receipt must stop the runtime"); }
+            drop(next_events);
+            tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
+        }
     }
 
     /// A fake `AgentHandle` whose event stream the test drives directly. Push
@@ -3063,6 +3167,21 @@ mod tests {
             incarnation: crate::agents::incarnation::Incarnation::new(),
         };
         (handle, ev_tx, in_rx)
+    }
+
+    /// Legacy supervisor tests simulate the metadata consumer; receipt-specific
+    /// tests above keep the actual acknowledgement under explicit test control.
+    fn acknowledged_test_events() -> (mpsc::Sender<AgentEvent>, mpsc::Receiver<AgentEvent>) {
+        let (tx, mut raw) = mpsc::channel(64);
+        let (forward, rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(event) = raw.recv().await {
+                if let AgentEvent::EffortObserved { acknowledged, .. } = event {
+                    acknowledged.send_replace(Some(Ok(true)));
+                } else if forward.send(event).await.is_err() { break; }
+            }
+        });
+        (tx, rx)
     }
 
     fn errored_turn(status: u16) -> AgentEvent {
@@ -3159,7 +3278,7 @@ mod tests {
             async move { Ok(h) }
         };
 
-        let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (out_ev_tx, mut out_ev_rx) = acknowledged_test_events();
         let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
         let (_out_ctl_tx, out_ctl_rx) = mpsc::channel::<ControlRequest>(8);
         let (_kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -3347,7 +3466,7 @@ mod tests {
             async move { Ok(h) }
         };
 
-        let (out_ev_tx, mut out_ev_rx) = mpsc::channel::<AgentEvent>(64);
+        let (out_ev_tx, mut out_ev_rx) = acknowledged_test_events();
         let (_out_in_tx, out_in_rx) = mpsc::channel::<OutgoingUserMessage>(16);
         let (_out_ctl_tx, out_ctl_rx) = mpsc::channel::<ControlRequest>(8);
         let (_kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -3883,6 +4002,57 @@ mod tests {
                 Some(r#"{"attribution":{"commit":"Made-With: X <x@y>","pr":"made by X"}}"#.into());
             let s = settings_arg_of(&c).unwrap();
             assert_eq!(s["attribution"], blank, "{who}: the policy outranks a model row: {s}");
+        }
+    }
+
+    #[test]
+    fn participant_settings_neutralize_file_effort_without_raising_gateway_limits() {
+        for make in [cfg as fn() -> SpawnConfig, eyes_cfg] {
+            let mut c = make();
+            c.config.model_name = "claude-opus-5-5".into();
+            let s = settings_arg_of(&c).unwrap();
+            assert_eq!(s["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "");
+            assert_eq!(s["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "64000");
+            assert!(s["hooks"].is_object(), "launch hooks must survive");
+            c.config.cli_settings = Some(r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"16000","TEST_KEEP":"yes"}}"#.into());
+            let s = settings_arg_of(&c).unwrap();
+            assert_eq!(s["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "");
+            assert_eq!(s["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16000");
+            assert_eq!(s["env"]["TEST_KEEP"], "yes");
+            for model in ["deepseek-v4-pro", "deepseek/deepseek-v4.1-flash-1017"] {
+                c.config.base_url = Some("https://gateway.invalid".into());
+                c.config.model_name = model.into();
+                c.config.cli_settings = None;
+                let s = settings_arg_of(&c).unwrap();
+                assert_eq!(s["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "");
+                assert!(s["env"].get("CLAUDE_CODE_MAX_OUTPUT_TOKENS").is_none(), "{model}: keep inherited limit");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires installed Claude CLI; settings control only, no inference"]
+    async fn native_startup_effort_uses_user_file_env_without_inference() {
+        for make in [cfg as fn() -> SpawnConfig, eyes_cfg] {
+            let dir = tempfile::tempdir().unwrap();
+            let account = dir.path().join("account"); std::fs::create_dir(&account).unwrap();
+            std::fs::write(account.join("settings.json"), r#"{"env":{"CLAUDE_CODE_EFFORT_LEVEL":"max","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"32000"}}"#).unwrap();
+            let mut c=make(); c.config.auth_token=None; c.config.model_name="claude-opus-5-5".into();
+            c.config.runtime="claude_code".into(); c.config.base_url=None;
+            c.account_dir=Some(account.to_string_lossy().into()); c.data_dir=dir.path().into();
+            c.working_dir=Some(dir.path().into()); c.overrides.effort=Some("low".into());
+            c.system_prompt_path=dir.path().join("prompt.txt"); std::fs::write(&c.system_prompt_path,"Settings-only probe.").unwrap();
+            let mcp=dir.path().join("mcp.json"); std::fs::write(&mcp,r#"{"mcpServers":{}}"#).unwrap(); c.mcp_config_path=Some(mcp);
+            let mut cmd=build_command(&c);
+            if !cmd.as_std().get_args().any(|s|s=="--strict-mcp-config") {cmd.arg("--strict-mcp-config");}
+            cmd.args(["--tools","","--no-session-persistence"]);
+            let mut handle=spawn_with_command(c,cmd).await.unwrap();
+            let status=handle.effort_control.status().await;
+            let stopped=handle.stop_and_wait(Duration::from_secs(5)).await;
+            assert_eq!(status.current.as_ref().map(|p|p.effort.as_str()),Some("low"),"{status:?}");
+            assert!(!status.available);
+            assert!(status.reason.unwrap().contains("after this agent's first turn"));
+            stopped.unwrap();
         }
     }
 

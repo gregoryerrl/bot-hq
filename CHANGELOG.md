@@ -108,6 +108,20 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- Managed Claude agents now neutralize settings-file effort pins and record
+  the effort their process actually reports at startup and after a retry.
+  On this installation, live effort changes under `afcf738` always failed
+  because shared settings forced max; earlier spawn records held requests,
+  not observations. Migration 0116 preserves those values but marks old Claude
+  records unconfirmed. An unconfirmed parent requires explicit helper effort.
+  Before the first turn, current effort remains visible and live changes say
+  when support can become available. Pin errors name the conflicting source.
+- First-party Claude agents and helpers default to a 64,000-token output
+  ceiling so high effort has more room for thinking and text. Explicit model
+  limits win, and gateway limits stay inherited or explicitly configured.
+  Interactive settings stay unchanged. The managed empty effort override and
+  output ceiling also reach commands run by the agent; empty effort means no
+  pin, rather than an absent environment variable.
 - The application-control tool now advertises its event/watch actions and
   typed cursors, filters and wake flag. Native clients can request a waking
   watch, acknowledge it and page events with the expected argument types,

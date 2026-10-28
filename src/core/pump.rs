@@ -4,7 +4,7 @@
 //! (rc3 D19 — no fan-out lives here since the router's deletion).
 
 use crate::agents::{AgentEvent, AgentHealth};
-use crate::core::activity::ActivityTracker;
+use crate::core::activity::{ActivityTracker, SessionActivity};
 use crate::core::ipav::{IpavPhase, IpavState};
 use crate::signaling::SignalingBridge;
 use crate::storage::{MessageKind, Storage};
@@ -1325,6 +1325,22 @@ pub async fn pump_agent(
         let Some(event) = event_rx.recv().await else { break };
         let Some(_incarnation_lease) = cfg.incarnation.enter().await else { return };
 
+        if let AgentEvent::EffortObserved { current, acknowledged } = event {
+            let result = match cfg.participant_id {
+                Some(id) => storage.set_observed_spawn_knobs(id, current.as_ref()).await
+                    .map_err(|e| crate::policy::secret_scan::redact_string(e.to_string())),
+                None => Err("runtime has no participant for effort observation".into()),
+            };
+            if result.is_ok() {
+                if let Some(bridge) = &cfg.bridge { bridge.notify_participant_effort_changed(&cfg.session_id, &cfg.slug); }
+            }
+            let result = result.map(|()| cfg.activity.as_ref().is_none_or(|activity| {
+                matches!(activity.current(), SessionActivity::Idle | SessionActivity::Busy)
+            }));
+            acknowledged.send_replace(Some(result));
+            continue;
+        }
+
         // Batch 7: any event means the agent is alive — reset the stall timer.
         if let Some(liveness) = &cfg.liveness {
             liveness.touch();
@@ -1601,7 +1617,8 @@ pub async fn pump_agent(
 
         match event {
             // Handled before the turn logic, which they must never reach.
-            AgentEvent::BackgroundTasks { .. }
+            AgentEvent::EffortObserved { .. }
+            | AgentEvent::BackgroundTasks { .. }
             | AgentEvent::AssistantUsage { .. }
             | AgentEvent::Compacted { .. }
             | AgentEvent::HandoffInjected { .. }
@@ -2642,6 +2659,48 @@ mod tests {
         s.create_session("s1", "test", None).await.unwrap();
         let st = Arc::new(Mutex::new(IpavState::default()));
         (s, st)
+    }
+
+    #[tokio::test]
+    async fn retry_effort_observation_is_fenced_metadata_not_a_turn_or_wake() {
+        use crate::agents::effort::EffortPair;
+        for (paused, retired, current) in [
+            (false, false, Some(EffortPair { effort: "max".into(), ultracode: false })),
+            (true, false, Some(EffortPair { effort: "high".into(), ultracode: false })),
+            (false, false, None),
+            (false, true, Some(EffortPair { effort: "max".into(), ultracode: false })),
+        ] {
+            let (storage, state) = setup().await;
+            let id = storage.insert_participant("s1", "hands", "HANDS", None, None, "[]", "active", 0).await.unwrap();
+            storage.set_spawn_knobs(id, Some("low"), Some(false)).await.unwrap();
+            let bridge = SignalingBridge::new(); bridge.set_storage(storage.clone()).await;
+            let activity = ActivityTracker::new("s1", Arc::new(AtomicBool::new(false)), bridge, vec!["hands".into()]);
+            activity.set_paused(paused);
+            let (mut cfg, mut ring) = cfg_with_ring("hands");
+            cfg.participant_id = Some(id); cfg.activity = Some(activity.clone());
+            let epoch = Arc::new(std::sync::atomic::AtomicU64::new(7));
+            cfg.turn_epoch = Some(epoch.clone());
+            if retired { cfg.incarnation.retire().await; }
+            let (acknowledged, mut receipt) = tokio::sync::watch::channel(None);
+            let (events, rx) = mpsc::channel(4);
+            events.send(AgentEvent::EffortObserved { current: current.clone(), acknowledged }).await.unwrap();
+            let task = tokio::spawn(pump_agent(cfg, rx, storage.clone(), state));
+            tokio::time::timeout(Duration::from_secs(2), receipt.changed()).await.unwrap().ok();
+            let row = storage.participant_by_id(id).await.unwrap().unwrap();
+            if retired {
+                assert!(receipt.borrow().is_none(), "retired runtime cannot acknowledge publication");
+                assert_eq!(row.effort_at_spawn.as_deref(), Some("low"));
+            } else {
+                assert_eq!(receipt.borrow().as_ref().unwrap().as_ref().unwrap(), &!paused);
+                assert_eq!(row.effort_at_spawn, current.as_ref().map(|p| p.effort.clone()));
+                assert_eq!(row.spawn_knobs_recorded, current.is_some());
+            }
+            assert_eq!(epoch.load(Ordering::Acquire), 7);
+            assert!(ring.try_recv().is_err(), "metadata must not bind or complete a ring turn");
+            assert!(!activity.any_busy());
+            assert_eq!(activity.is_paused(), paused);
+            drop(events); task.await.unwrap();
+        }
     }
 
     #[tokio::test]

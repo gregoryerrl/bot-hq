@@ -201,8 +201,10 @@ impl AppState {
                     }
                     let repo: Option<String>=sqlx::query_scalar("SELECT working_repo_path FROM sessions WHERE id=?").bind(&session).fetch_one(&mut *tx).await?;
                     let repo=repo.context("helpers require a session repository")?;
-                    // The parent's own recorded effort is every helper's default.
-                    let parent_effort: Option<String>=sqlx::query_scalar("SELECT effort_at_spawn FROM session_participants WHERE id=?").bind(participant).fetch_one(&mut *tx).await?;
+                    // Only a confirmed runtime observation can be inherited.
+                    let (value, known): (Option<String>,bool)=sqlx::query_as("SELECT effort_at_spawn, spawn_knobs_recorded FROM session_participants WHERE id=?").bind(participant).fetch_one(&mut *tx).await?;
+                    let parent_effort = value.filter(|_| known);
+                    ensure!(parent_effort.is_some() || tasks.iter().all(|task|task.effort.is_some()),"Parent effort is unconfirmed; choose an explicit effort for every helper or wait for startup readback");
                     let id=uuid::Uuid::new_v4().to_string();
                     let now=crate::storage::now_utc();
                     let mut recorded: Value=serde_json::from_str(&raw)?;clean_json(&mut recorded);

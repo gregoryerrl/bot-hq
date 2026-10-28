@@ -107,7 +107,7 @@ export function SessionRosterEditor({ sessionId }: { sessionId: string }) {
                     if (pair.effort) void submit({ kind: "set_effort", participant_id: p.id, effort: pair.effort, ultracode: pair.ultracode === true });
                   }}>Change effort</Button>
                 </div>
-                <p>{effort?.available ? `Current effort: ${effective}. Changes keep this conversation and apply after the current turn.` : effort?.reason ?? "Start or resume this agent to check live effort support."}</p>
+                <p>{effort?.current && `Current effort: ${effective}. `}{effort?.available ? "Changes keep this conversation and apply after the current turn." : effort?.reason ?? "Start or resume this agent to check live effort support."}</p>
               </div>}
             </li>;
           })}

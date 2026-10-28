@@ -92,10 +92,9 @@ fn read_at(config_dir: &Path, home: &Path, source: &str, managed: bool) -> Claud
 // --- core knobs -------------------------------------------------------------
 
 fn core_knobs(settings: &Map<String, Value>) -> Vec<SettingItem> {
-    // Effort level: bot-hq routes this through the CLAUDE_CODE_EFFORT_LEVEL env
-    // var rather than the top-level `effortLevel` field, because the env var is
-    // the only persistent lever that accepts `max` (the field rejects
-    // `max`/`ultracode` — they are session-only in claude-code). Read env first,
+    // This lens edits interactive Claude defaults. Managed participants clear
+    // the settings-file env pin and use --effort plus runtime readback instead.
+    // The env setting supports max on the installed CLI. Read env first,
     // fall back to the legacy `effortLevel` field so an existing setting still
     // shows; the UI clears the legacy field on its next change (a second staged
     // write), since the writer only touches the targeted key.

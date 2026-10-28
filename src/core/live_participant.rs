@@ -170,6 +170,11 @@ impl CandidateDraft {
         let account_email = self.draft.config.account_email.clone();
         let prompt_path = self.draft.config.system_prompt_path.clone();
         let mut handle = (services.spawn)(self.draft.config).await?;
+        let observed = handle.effort_control.status().await;
+        let mut metadata = self.draft.metadata;
+        metadata.knobs_confirmed = observed.current.is_some();
+        metadata.effort = observed.current.as_ref().map(|p| p.effort.clone());
+        metadata.ultracode = observed.current.as_ref().map(|p| p.ultracode);
         let events = std::mem::replace(&mut handle.event_rx, mpsc::channel(1).1);
         let epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let liveness = crate::core::watchdog::AgentLiveness::new();
@@ -214,7 +219,7 @@ impl CandidateDraft {
             },
             events,
             pump,
-            metadata: self.draft.metadata,
+            metadata,
             notices: self.draft.notices,
             liveness,
         })
