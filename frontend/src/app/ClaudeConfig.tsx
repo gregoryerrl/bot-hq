@@ -859,7 +859,7 @@ function McpPane({
     <div>
       <PaneHeader
         title="MCP servers"
-        blurb="Servers forwarded into a participant whose role can edit files (bot-hq + claude-in-chrome are always filtered; a role without edit_files gets none). 'settings.json (ignored)' means claude-code itself doesn't load it — but bot-hq still forwards it."
+        blurb="Which servers bot-hq forwards into a Claude participant's config. A role that can edit files gets each one unless it is Off; a role that cannot edit files gets only the ones set to Force forward here — and a role's own choice in Settings → Roles → MCP servers wins for that role. A server is forwarded whole, every tool it has. bot-hq + claude-in-chrome are always filtered; Codex participants get none. 'settings.json (ignored)' means claude-code itself doesn't load it — but bot-hq still forwards it."
       />
       {config.mcp_servers.length === 0 ? (
         <Empty>No MCP servers configured.</Empty>
@@ -906,9 +906,9 @@ function McpPane({
                         )
                       }
                     >
-                      <option value="">Inherit (forward)</option>
-                      <option value="on">Force forward</option>
-                      <option value="off">Off for agents</option>
+                      <option value="">Default (roles that can edit files)</option>
+                      <option value="on">Force forward (every role)</option>
+                      <option value="off">Off (unless a role forwards it)</option>
                     </select>
                   )}
                 </div>

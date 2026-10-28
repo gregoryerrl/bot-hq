@@ -297,13 +297,15 @@ fn mcp_servers(
             //
             // **rc3 D10/D11: to whom is a CAPABILITY, not a name.**
             // `core::session::user_mcp_servers_for_agent` forwards to a
-            // participant whose role grants `edit_files` and to nobody else, so
+            // participant whose role grants `edit_files`, and (feedback
+            // #141) to any other role it is forwarded to — Force forward in
+            // `_all`, or the role's own Forward in Roles → MCP servers — so
             // the chip says that instead of naming an agent that no longer
-            // exists — this label is the only place a user learns the rule.
+            // exists.
             let forwarded_to_agents = if reserved_filtered {
                 Vec::new()
             } else {
-                vec!["agents that may edit files".to_string()]
+                vec!["roles that may edit files, plus roles it is forwarded to by Force forward or in Roles → MCP servers".to_string()]
             };
             McpServerItem {
                 name: name.clone(),
@@ -592,7 +594,7 @@ mod tests {
         // has to state the rule the spawn path actually applies.
         assert_eq!(
             discord.forwarded_to_agents,
-            vec!["agents that may edit files"]
+            vec!["roles that may edit files, plus roles it is forwarded to by Force forward or in Roles → MCP servers"]
         );
         // bot-hq is reserved → filtered from agents.
         let bothq = v.mcp_servers.iter().find(|m| m.name == "bot-hq").unwrap();

@@ -1159,6 +1159,7 @@ mod tests {
             account_email: Some("me@example.com".into()),
             account_org: Some("acct".into()),
             codex: Some(codex.clone()),
+            forwarded_mcp: Vec::new(),
         };
         (cfg, codex)
     }

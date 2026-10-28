@@ -54,7 +54,7 @@ async fn claude_helper_native_inventory_and_read_boundary() {
         system_prompt_path: prompt, mcp_config_path: None, working_dir: Some(repo.clone()), claude_bin: None,
         session_id: "not-a-live-session".into(), resume_session_id: None, project: None, data_dir: root.path().into(),
         capabilities: ResolvedCapabilities::Known(CapabilitySet::preset_hands()), overrides: Default::default(),
-        blank_cli_attribution: true, account_dir, account_email: None, account_org: None, codex: None,
+        blank_cli_attribution: true, account_dir, account_email: None, account_org: None, codex: None, forwarded_mcp: Vec::new(),
     };
     let mut cmd = claude_command(&cfg).unwrap();
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);

@@ -22,7 +22,7 @@ const EVERY_AGENT = "every agent";
 // `claude_config::reader` labels MCP forwarding by CAPABILITY, not by name —
 // `user_mcp_servers_for_agent` forwards to a role granting `edit_files` and to
 // nobody else. Different string from the inheritance chips, on purpose.
-const MCP_FORWARDED_TO = "agents that may edit files";
+const MCP_FORWARDED_TO = "roles that may edit files, plus roles it is forwarded to by Force forward or in Roles → MCP servers";
 
 function role(over: Partial<RoleView> = {}): RoleView {
   return {
@@ -214,6 +214,25 @@ describe("Claude Config panel", () => {
     ).toBeNull();
     // Both the pane blurb and the knob note point at the Roles tab.
     expect(screen.getAllByText(/settings → roles/i).length).toBeGreaterThan(0);
+  });
+
+  // Feedback #141: Force forward is no longer a no-op — it reaches roles that
+  // cannot edit files too — and each option says whom it reaches, with the
+  // Roles editor's per-role choice winning for its role.
+  it("says whom each global MCP choice reaches, roles that cannot edit included", async () => {
+    mockBackend();
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /mcp/i }));
+    const select = (await screen.findByRole("combobox")) as HTMLSelectElement;
+    const labels = Array.from(select.options).map((o) => o.textContent ?? "");
+    expect(labels).toEqual([
+      "Default (roles that can edit files)",
+      "Force forward (every role)",
+      "Off (unless a role forwards it)",
+    ]);
+    expect(screen.getByText(/cannot edit files gets only/i)).toBeInTheDocument();
+    expect(screen.getByText(/Settings → Roles/)).toBeInTheDocument();
+    expect(screen.getByText(/Codex participants get none/i)).toBeInTheDocument();
   });
 
   it("carries per_role entries through a save untouched", async () => {

@@ -53,7 +53,9 @@ pub struct AgentOverride {
     /// plugin key (`name@marketplace`) → enabled. Maps to `enabledPlugins`.
     #[serde(default)]
     pub plugins: BTreeMap<String, bool>,
-    /// MCP server name → forwarded. `false` removes it from the agent's mcp-config.
+    /// MCP server name → forwarded (feedback #141). `false` removes it from
+    /// the agent's mcp-config; `true` forwards it even to a role that cannot
+    /// edit files, which otherwise gets none. A role's own entry beats `_all`'s.
     #[serde(default)]
     pub mcp: BTreeMap<String, bool>,
     /// Effort level (low/medium/high/xhigh/max). Maps to `CLAUDE_CODE_EFFORT_LEVEL`.

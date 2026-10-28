@@ -2441,12 +2441,12 @@ async fn build_participant_spawn(
     std::fs::write(&system_prompt_path, &system_prompt)
         .with_context(|| format!("writing system prompt to {}", system_prompt_path.display()))?;
     let mcp_config_path = mcp_temp_dir.join(format!("{agent_name}-mcp.json"));
-    let mut user_servers = user_mcp_servers_for_agent(&capabilities);
-    // Apply the role's MCP overrides (Settings → Claude Config): a server the
-    // user disabled for this role is dropped from its forwarded mcp-config.
-    for name in crate::claude_config::overrides::disabled_mcp(&overrides) {
-        user_servers.remove(&name);
-    }
+    // The role's effective MCP overrides (Settings → Claude Config `_all`,
+    // layered with the Roles editor's per-role entries) decide the forwarded
+    // set together with the capability: an `false` drops a server from an
+    // editing role, a `true` is the only way one reaches a role that cannot
+    // edit (feedback #141).
+    let user_servers = user_mcp_servers_for_agent(&capabilities, &overrides);
     // The per-agent MCP secret (C1-1): minted here, written into this agent's
     // own config and registered with the bridge that will check it. A fresh one
     // per spawn — it is only meaningful while this subprocess is alive, and a
@@ -2481,8 +2481,13 @@ async fn build_participant_spawn(
                     )
                 }),
         });
-    let mcp_config_path = if codex.is_some() {
-        None
+    // The forwarded names ride along for the restricted posture's tool
+    // allowlist — the mcp-config alone does not admit a server's tools under
+    // `dontAsk` — and are exactly the keys that config was written with. A
+    // Codex participant has no claude mcp-config, so nothing is forwarded and
+    // nothing is named (feedback #141).
+    let (mcp_config_path, forwarded_mcp) = if codex.is_some() {
+        (None, Vec::new())
     } else {
         let json = mcp_config_json(
             signaling_addr,
@@ -2493,7 +2498,7 @@ async fn build_participant_spawn(
         );
         std::fs::write(&mcp_config_path, json)
             .with_context(|| format!("writing mcp-config to {}", mcp_config_path.display()))?;
-        Some(mcp_config_path)
+        (Some(mcp_config_path), user_servers.keys().cloned().collect())
     };
     // The claude CLI tells an agent to end commits with a co-author trailer.
     // When this session's policy forbids a word that trailer holds,
@@ -2579,6 +2584,7 @@ async fn build_participant_spawn(
         account_email: account.email.clone(),
         account_org: account.org.clone(),
         codex,
+        forwarded_mcp,
     };
     metadata.resume_id = config.resume_session_id.clone();
     Ok(ParticipantSpawnDraft {
@@ -2592,19 +2598,25 @@ async fn build_participant_spawn(
 /// Decide which user MCP servers to expose to an agent at spawn time.
 ///
 /// Asks the participant's capability snapshot, not its name: a role WITHOUT
-/// `edit_files` gets an empty map — only `bot-hq-signaling` will be in the
-/// generated mcp-config.json. Without external MCPs (`brave-devtools`,
-/// `chrome-devtools`, `discord`, etc.) such a role literally cannot drive
-/// side-effects: the role contract is enforced at the tool boundary
-/// instead of relying on prompt discipline the model rationalizes around
-/// when a "next step" looks obvious. It still has claude-code's
-/// built-in read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`,
-/// `WebSearch`, `ToolSearch`, `TodoWrite`), which are what a reviewer
-/// needs to review the work.
+/// `edit_files` gets an empty map by default — only `bot-hq-signaling` will
+/// be in the generated mcp-config.json. Without external MCPs
+/// (`brave-devtools`, `chrome-devtools`, `discord`, etc.) such a role cannot
+/// drive side-effects through them: the role contract is enforced at the
+/// tool boundary instead of relying on prompt discipline the model
+/// rationalizes around when a "next step" looks obvious. It still has
+/// claude-code's built-in read-only tools (`Read`, `Grep`, `Glob`,
+/// `WebFetch`, `WebSearch`, `ToolSearch`, `TodoWrite`), which are what a
+/// reviewer needs to review the work.
 ///
 /// A role that MAY edit gets the full merged set from the
 /// user's claude-code config so it can drive browsers, talk to Discord,
-/// etc.
+/// etc., minus the servers its effective override turns off.
+///
+/// A role that may NOT edit gets exactly the servers its effective override
+/// turns ON — the per-role allow the Roles editor writes (feedback #141: a
+/// Driver asked to check Discord had no Discord). The user chooses that per
+/// role, server by server, knowing a server is forwarded as a unit; an
+/// unreadable roster still gets nothing, whatever the override says.
 ///
 /// This is the sibling of `spawn::build_command`'s permission posture and asks
 /// the same question for the same reason — the two together are what "cannot
@@ -2614,12 +2626,72 @@ async fn build_participant_spawn(
 /// An unreadable roster gets the empty map (fail closed).
 pub fn user_mcp_servers_for_agent(
     capabilities: &crate::agents::ResolvedCapabilities,
+    overrides: &crate::claude_config::AgentOverride,
 ) -> serde_json::Map<String, serde_json::Value> {
-    if capabilities.grants(crate::agents::Capability::EditFiles) {
-        load_user_mcp_servers(&default_user_settings_paths())
-    } else {
-        serde_json::Map::new()
+    select_user_mcp_servers(capabilities, overrides, &load_user_mcp_servers(&user_mcp_settings_paths()))
+}
+
+/// The user's claude-code MCP settings files a spawn reads. A test pins its
+/// own fixture with [`pin_user_mcp_settings`], so the spawn wire is exercised
+/// against a known, non-empty inventory instead of whatever the machine
+/// running the tests has configured.
+fn user_mcp_settings_paths() -> Vec<std::path::PathBuf> {
+    #[cfg(test)]
+    if let Some(paths) = PINNED_USER_MCP_SETTINGS.with(|p| p.borrow().clone()) {
+        return paths;
     }
+    default_user_settings_paths()
+}
+
+#[cfg(test)]
+thread_local! {
+    static PINNED_USER_MCP_SETTINGS: std::cell::RefCell<Option<Vec<std::path::PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Restores the previous pin when dropped.
+#[cfg(test)]
+pub(crate) struct PinnedUserMcpSettings(Option<Vec<std::path::PathBuf>>);
+
+#[cfg(test)]
+impl Drop for PinnedUserMcpSettings {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        PINNED_USER_MCP_SETTINGS.with(|p| *p.borrow_mut() = previous);
+    }
+}
+
+/// Make this thread's spawns read `paths` as the user's MCP settings until
+/// the guard drops. Thread-local: a `#[tokio::test]` runs its spawn on the
+/// test's own thread, and parallel tests never see each other's pin.
+#[cfg(test)]
+pub(crate) fn pin_user_mcp_settings(paths: Vec<std::path::PathBuf>) -> PinnedUserMcpSettings {
+    PinnedUserMcpSettings(PINNED_USER_MCP_SETTINGS.with(|p| p.replace(Some(paths))))
+}
+
+/// [`user_mcp_servers_for_agent`] over a given server map — the decision
+/// itself, testable without the user's files. `available` is what the loader
+/// returns (reserved names already filtered). Order of checks: an unreadable
+/// roster forwards nothing BEFORE any override is consulted; an editing role
+/// keeps everything not explicitly `false`; a restricted role gets only what
+/// is explicitly `true` AND configured.
+pub fn select_user_mcp_servers(
+    capabilities: &crate::agents::ResolvedCapabilities,
+    overrides: &crate::claude_config::AgentOverride,
+    available: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    if matches!(capabilities, crate::agents::ResolvedCapabilities::Unreadable { .. }) {
+        return serde_json::Map::new();
+    }
+    let edits = capabilities.grants(crate::agents::Capability::EditFiles);
+    available
+        .iter()
+        .filter(|(name, _)| match overrides.mcp.get(name.as_str()) {
+            Some(true) => true,
+            Some(false) => false,
+            None => edits,
+        })
+        .map(|(name, server)| (name.clone(), server.clone()))
+        .collect()
 }
 
 /// Assemble the system prompt for an agent at spawn time. Layers:
@@ -4341,7 +4413,7 @@ mod tests {
         assert!(!eyes.grants(Capability::AskUser));
         // And the MCP posture spawn derives from it: only a participant that may
         // edit inherits the user's external MCP servers.
-        assert!(user_mcp_servers_for_agent(&eyes).is_empty());
+        assert!(user_mcp_servers_for_agent(&eyes, &crate::claude_config::AgentOverride::default()).is_empty());
     }
 
     fn stub_agent(slug: &str, turn_position: i64, caps: &[&str]) -> SessionAgent {
@@ -4670,6 +4742,50 @@ mod tests {
             for_roleless.overrides.effort.as_deref(),
             Some(crate::claude_config::DEFAULT_EFFORT)
         );
+
+        // Feedback #141, the whole wire, against a PINNED inventory — never
+        // the machine's own ~/.claude.json, which may be empty and would let
+        // every assertion below pass vacuously: the forwarded names on the
+        // SpawnConfig are the keys of the mcp-config the spawn wrote (minus
+        // bot-hq's own server; the reserved `bot-hq` entry never forwards),
+        // the executor gets every configured server, the reviewer none — and
+        // with an explicit per-role allow for one server the reviewer gets
+        // exactly that one, in its config AND its allowlist.
+        let fixture = TempDir::new().unwrap();
+        let claude_json = fixture.path().join(".claude.json");
+        std::fs::write(&claude_json, serde_json::json!({"mcpServers": {
+            "discord": {"command": "discord-mcp"},
+            "clockify": {"type": "http", "url": "https://clockify.example/mcp"},
+            "bot-hq": {"command": "bot-hq", "args": ["mcp"]},
+        }}).to_string()).unwrap();
+        let _pinned = pin_user_mcp_settings(vec![claude_json]);
+        let config_keys = |c: &crate::agents::SpawnConfig| -> Vec<String> {
+            let path = c.mcp_config_path.as_ref().expect("a claude participant has an mcp-config");
+            let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            let mut keys: Vec<String> = json["mcpServers"].as_object().unwrap().keys().filter(|k| *k != "bot-hq-signaling").cloned().collect();
+            keys.sort();
+            keys
+        };
+        let allowed_tools = |c: &crate::agents::SpawnConfig| -> Vec<String> {
+            let argv = crate::agents::spawn::debug_command(c);
+            argv.windows(2).find(|w| w[0] == "--allowedTools").map(|w| w[1].split_whitespace().map(str::to_string).collect()).unwrap_or_default()
+        };
+        let sorted = |v: &[String]| { let mut v = v.to_vec(); v.sort(); v };
+        let for_executor = spawn_of(executor.clone()).await;
+        let for_reviewer = spawn_of(reviewer.clone()).await;
+        assert_eq!(sorted(&for_executor.forwarded_mcp), ["clockify", "discord"], "the executor forwards every configured server, the reserved one never");
+        assert_eq!(config_keys(&for_executor), ["clockify", "discord"], "…and its mcp-config names the same ones");
+        assert!(for_reviewer.forwarded_mcp.is_empty() && config_keys(&for_reviewer).is_empty(), "no allow: the reviewer forwards nothing");
+        assert!(!allowed_tools(&for_reviewer).iter().any(|t| t == "mcp__discord" || t == "mcp__clockify"));
+        let mut store = ClaudeOverrides::default();
+        store.per_role.entry("eyes".into()).or_default().mcp.insert("discord".into(), true);
+        save_overrides(data_dir.path(), &store).unwrap();
+        let allowed = spawn_of(reviewer.clone()).await;
+        assert_eq!(allowed.forwarded_mcp, ["discord"], "the allowed server, and only it");
+        assert_eq!(config_keys(&allowed), ["discord"]);
+        let tools = allowed_tools(&allowed);
+        assert!(tools.iter().any(|t| t == "mcp__discord"), "{tools:?}");
+        assert!(!tools.iter().any(|t| t == "mcp__clockify" || t == "mcp__bot-hq"), "only the forwarded names: {tools:?}");
     }
 
     /// rc3 **P1**: the path a spawn records is the file holding the composed
@@ -5221,6 +5337,11 @@ mod tests {
         let (codex_probe, asked) = fixed_codex_probe(chatgpt_account("me@example.com", "acct-1"), Some((&home_str, data_dir.path(), "sha256:first")));
         let paths = Paths::for_data_dir(data_dir.path().to_path_buf());
         let mcp_temp = TempDir::new().unwrap();
+        // The user HAS MCP servers, and this row is an editing role: a claude
+        // participant would forward them. A Codex one forwards none (#141).
+        let claude_json = home_dir.path().join(".claude.json");
+        std::fs::write(&claude_json, r#"{"mcpServers":{"discord":{"command":"discord-mcp"}}}"#).unwrap();
+        let _pinned = pin_user_mcp_settings(vec![claude_json]);
         let spawn_cfg = participant_spawn_config(
             &s,
             &p,
@@ -5246,6 +5367,7 @@ mod tests {
         assert_eq!(spawn_cfg.account_email.as_deref(), Some("me@example.com"));
         assert_eq!(spawn_cfg.account_org.as_deref(), Some("acct-1"));
         assert!(spawn_cfg.mcp_config_path.is_none(), "no claude mcp-config for a Codex participant");
+        assert!(spawn_cfg.forwarded_mcp.is_empty(), "nothing is forwarded to Codex, so nothing is named as forwarded: {:?}", spawn_cfg.forwarded_mcp);
         assert_eq!(spawn_cfg.resume_session_id, None);
         assert!(home.join("hooks.json").is_file(), "the gate hook was written before the probe");
         let prompt = std::fs::read_to_string(&spawn_cfg.system_prompt_path).unwrap();
@@ -5938,21 +6060,26 @@ mod tests {
         // Same boundary the `agent_name == "rain"` check drew, asked of the
         // capability set instead: a role that may not edit must have no external
         // MCP servers beyond the bot-hq-signaling one added by mcp_config_json;
-        // a role that may keeps whatever the user has in ~/.claude.json.
-        // Mocking the file isn't worth it — we just verify one map is empty and
-        // the other matches what load_user_mcp_servers returns.
+        // a role that may keeps whatever the user has in ~/.claude.json —
+        // here a pinned file, so the comparison is not of two empty maps.
         use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let fixture = TempDir::new().unwrap();
+        let claude_json = fixture.path().join(".claude.json");
+        std::fs::write(&claude_json, r#"{"mcpServers":{"discord":{"command":"discord-mcp"},"bot-hq":{"command":"bot-hq"}}}"#).unwrap();
+        let _pinned = pin_user_mcp_settings(vec![claude_json.clone()]);
+        let none = crate::claude_config::AgentOverride::default();
         let eyes = user_mcp_servers_for_agent(&ResolvedCapabilities::Known(
             CapabilitySet::preset_eyes(),
-        ));
+        ), &none);
         assert!(
             eyes.is_empty(),
             "a role without `edit_files` must spawn with no external MCPs"
         );
         let hands = user_mcp_servers_for_agent(&ResolvedCapabilities::Known(
             CapabilitySet::preset_hands(),
-        ));
-        let expected_hands = load_user_mcp_servers(&default_user_settings_paths());
+        ), &none);
+        let expected_hands = load_user_mcp_servers(&[claude_json]);
+        assert_eq!(hands.keys().collect::<Vec<_>>(), ["discord"], "the reserved bot-hq entry is filtered by the loader");
         assert_eq!(hands, expected_hands);
     }
 
@@ -5960,14 +6087,50 @@ mod tests {
     fn an_unreadable_roster_spawns_with_no_user_mcps() {
         // Fail closed, deliberately: the side-effect surface is the last thing
         // to hand out on a read failure. `ResolvedCapabilities` documents the
-        // reasoning; this pins that the spawn path actually follows it.
+        // reasoning; this pins that the spawn path actually follows it — even
+        // with an explicit allow in the overrides (feedback #141).
         let unknown = crate::agents::ResolvedCapabilities::Unreadable {
             reason: "no participant row",
         };
+        let mut allow = crate::claude_config::AgentOverride::default();
+        allow.mcp.insert("discord".into(), true);
         assert!(
-            user_mcp_servers_for_agent(&unknown).is_empty(),
+            user_mcp_servers_for_agent(&unknown, &allow).is_empty(),
             "an unreadable capability set must not inherit the user's MCP servers"
         );
+    }
+
+    /// Feedback #141: the user's MCP servers reach a role that CANNOT edit
+    /// only through an explicit per-role allow (`mcp: {name: true}` in the
+    /// effective override); a role that can edit keeps every server minus
+    /// its `false` entries; an unreadable roster gets nothing whatever the
+    /// override says; a name the user's config does not have forwards nothing.
+    #[test]
+    fn explicit_mcp_allows_reach_a_restricted_role_and_an_unreadable_roster_gets_nothing() {
+        use crate::agents::{CapabilitySet, ResolvedCapabilities};
+        let mut available = serde_json::Map::new();
+        available.insert("discord".into(), serde_json::json!({"command": "discord-mcp"}));
+        available.insert("clockify".into(), serde_json::json!({"url": "https://clockify.example/mcp"}));
+        let eyes = ResolvedCapabilities::Known(CapabilitySet::preset_eyes());
+        let hands = ResolvedCapabilities::Known(CapabilitySet::preset_hands());
+        let unknown = ResolvedCapabilities::Unreadable { reason: "no participant row" };
+        let keys = |m: &serde_json::Map<String, serde_json::Value>| m.keys().cloned().collect::<Vec<_>>();
+
+        let none = crate::claude_config::AgentOverride::default();
+        assert!(select_user_mcp_servers(&eyes, &none, &available).is_empty(), "no allow, nothing");
+        assert_eq!(keys(&select_user_mcp_servers(&hands, &none, &available)), ["clockify", "discord"]);
+
+        let mut allow_discord = crate::claude_config::AgentOverride::default();
+        allow_discord.mcp.insert("discord".into(), true);
+        allow_discord.mcp.insert("ghost".into(), true);
+        assert_eq!(keys(&select_user_mcp_servers(&eyes, &allow_discord, &available)), ["discord"], "only the allowed, only if configured");
+        assert_eq!(keys(&select_user_mcp_servers(&hands, &allow_discord, &available)), ["clockify", "discord"], "an allow changes nothing for an editing role");
+        assert!(select_user_mcp_servers(&unknown, &allow_discord, &available).is_empty(), "fail closed before any override is read");
+
+        let mut off_clockify = crate::claude_config::AgentOverride::default();
+        off_clockify.mcp.insert("clockify".into(), false);
+        assert_eq!(keys(&select_user_mcp_servers(&hands, &off_clockify, &available)), ["discord"]);
+        assert!(select_user_mcp_servers(&eyes, &off_clockify, &available).is_empty(), "an explicit off is not an allow");
     }
 
     #[test]

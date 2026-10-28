@@ -101,7 +101,7 @@ mod tests {
             resume_session_id: None, project: None, data_dir: repo.into(),
             capabilities: ResolvedCapabilities::Known(CapabilitySet::preset_hands()),
             overrides: Default::default(), blank_cli_attribution: false, account_dir: Some("/fixture-account".into()),
-            account_email: None, account_org: None, codex: None,
+            account_email: None, account_org: None, codex: None, forwarded_mcp: Vec::new(),
         }
     }
 

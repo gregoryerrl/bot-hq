@@ -201,7 +201,7 @@ async fn codex_probe(f: &Fixture, brief: &str, trace: &mut Trace, normal_discove
             data_dir:f._temp.path().join("data"),capabilities:crate::agents::ResolvedCapabilities::Known(
                 crate::agents::CapabilitySet::from_slugs(&["read_channel","delegate_tasks"])),
             overrides:Default::default(),blank_cli_attribution:true,account_dir:Some(home.clone()),
-            account_email:None,account_org:None,codex:Some(codex.clone()),
+            account_email:None,account_org:None,codex:Some(codex.clone()),forwarded_mcp:Vec::new(),
         };
         crate::agents::codex::spawn::build_codex_command(&cfg,&codex)
     } else {

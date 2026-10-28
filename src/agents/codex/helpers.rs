@@ -215,7 +215,7 @@ mod tests {
         std::fs::write(dir.join("models_cache.json"),json!({"models":[{"slug":"fixture-model","input_modalities":["text","image"],"apply_patch_tool_type":"freeform"}]}).to_string()).unwrap();
         SpawnConfig {agent_name:"helper-fixture".into(),config:crate::storage::AgentConfig {agent_name:"helper-fixture".into(),provider:"openai".into(),model_name:"fixture-model".into(),base_url:None,auth_token:None,updated_at:String::new(),context_window:None,cli_settings:None,claude_config_dir:Some(dir.display().to_string()),runtime:"codex".into()},
             system_prompt_path:prompt,mcp_config_path:None,working_dir:Some(dir.into()),claude_bin:None,session_id:"parent-session".into(),resume_session_id:None,project:None,data_dir:dir.into(),capabilities:crate::agents::ResolvedCapabilities::Known(crate::agents::CapabilitySet::preset_hands()),overrides:Default::default(),blank_cli_attribution:true,account_dir:Some(dir.display().to_string()),account_email:None,account_org:None,
-            codex:Some(super::super::spawn::CodexSpawn {bin:Some(bin.display().to_string()),mcp_url:"http://must-not-load.invalid".into(),mcp_token:"must-not-inherit".into(),hook_trust:vec![],hook_exe:None,model_catalog:None})}
+            codex:Some(super::super::spawn::CodexSpawn {bin:Some(bin.display().to_string()),mcp_url:"http://must-not-load.invalid".into(),mcp_token:"must-not-inherit".into(),hook_trust:vec![],hook_exe:None,model_catalog:None}),forwarded_mcp:Vec::new()}
     }
     #[tokio::test]
     async fn helper_wires_restricted_thread_mcp_removal_and_repo_tool_answers() {

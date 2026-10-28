@@ -447,6 +447,16 @@ pub struct SpawnConfig {
     /// agent to write a commit the `commit-msg` hook refuses. `false` leaves
     /// the CLI's default alone.
     pub blank_cli_attribution: bool,
+    /// The user MCP servers this participant's mcp-config forwards, by name —
+    /// the keys of the map `core::session::user_mcp_servers_for_agent` chose,
+    /// after the capability and the role's overrides (feedback #141). Only the
+    /// restricted posture reads it: under `dontAsk` a forwarded server's tools
+    /// are denied unless `mcp__<name>` is allowed, so the config file alone
+    /// would hand a role a server it cannot call (an editing role runs in
+    /// bypass mode, which allows every forwarded tool already). Empty for a
+    /// Codex participant (no claude mcp-config) and a managed helper (strict
+    /// empty config).
+    pub forwarded_mcp: Vec<String>,
     /// The Claude config dir this participant is spawned into — the child's
     /// `CLAUDE_CONFIG_DIR` — or `None` for the CLI's default `~/.claude`.
     /// Decided by the caller from the participant's spawn snapshot
@@ -1952,10 +1962,19 @@ fn build_command(cfg: &SpawnConfig) -> Command {
         // CLAUDE.md/auto-memory the same as an editing one — heavier startup;
         // suppress per-agent via the override env if needed.)
         cmd.args(["--permission-mode", "dontAsk"]);
-        cmd.args([
-            "--allowedTools",
+        // The read-only set, plus every user MCP server this spawn forwards
+        // (feedback #141): the role's explicit allows, as `mcp__<name>` — a
+        // server as a unit, the way the user chose it in the Roles editor.
+        // The names come from the same filtered map that wrote the mcp-config,
+        // so the config and the permission never name different servers.
+        let mut allowed = String::from(
             "Read Grep Glob WebFetch WebSearch ToolSearch TodoWrite BashOutput KillShell Bash mcp__bot-hq-signaling",
-        ]);
+        );
+        for name in &cfg.forwarded_mcp {
+            allowed.push_str(" mcp__");
+            allowed.push_str(name);
+        }
+        cmd.args(["--allowedTools", &allowed]);
         // Read-only enforcement for EYES: deny BY WRITE VERB (not blanket noun)
         // for tools whose read forms we keep (`git branch`, `gh`), so the reads
         // fall through to the allowed `Bash` (deny wins over allow). Verb lists +
@@ -2334,6 +2353,7 @@ mod tests {
             account_email: None,
             account_org: None,
             codex: None,
+            forwarded_mcp: Vec::new(),
         }
     }
 
@@ -3607,6 +3627,37 @@ mod tests {
             !bypass(&c),
             "an unreadable capability set must not get bypass mode"
         );
+    }
+
+    /// Feedback #141: a forwarded server reaches a restricted role's TOOLS,
+    /// not only its mcp-config — `dontAsk` denies `mcp__discord__*` unless
+    /// the server is allowed — and only the forwarded names are allowed. An
+    /// editing role runs in bypass mode and gets no allowlist at all.
+    #[test]
+    fn a_restricted_role_may_call_the_servers_forwarded_to_it() {
+        let mut c = eyes_cfg();
+        c.forwarded_mcp = vec!["discord".into(), "clockify".into()];
+        let argv = debug_command(&c);
+        let allowed = argv
+            .windows(2)
+            .find(|w| w[0] == "--allowedTools")
+            .map(|w| w[1].clone())
+            .expect("--allowedTools present");
+        let allowed: Vec<&str> = allowed.split_whitespace().collect();
+        assert!(allowed.contains(&"mcp__discord") && allowed.contains(&"mcp__clockify"), "{allowed:?}");
+        assert!(allowed.contains(&"mcp__bot-hq-signaling"), "bot-hq's own server stays allowed: {allowed:?}");
+        assert!(!allowed.iter().any(|t| *t == "mcp__brave-devtools"), "only the forwarded names: {allowed:?}");
+        assert!(!argv.iter().any(|a| a == "--dangerously-skip-permissions"));
+        // Nothing forwarded: the allowlist is exactly the read-only set.
+        let bare = debug_command(&eyes_cfg());
+        let bare_allowed = bare.windows(2).find(|w| w[0] == "--allowedTools").map(|w| w[1].clone()).unwrap();
+        assert!(!bare_allowed.contains("mcp__discord"));
+        // An editing role: bypass mode, no allowlist, whatever is forwarded.
+        let mut h = cfg();
+        h.forwarded_mcp = vec!["discord".into()];
+        let hv = debug_command(&h);
+        assert!(hv.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(!hv.iter().any(|a| a == "--allowedTools"));
     }
 
     #[test]

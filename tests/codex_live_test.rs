@@ -117,6 +117,7 @@ async fn a_codex_participant_runs_one_gated_turn_for_real() {
             hook_exe: Some(exe.clone()),
             model_catalog: None,
         }),
+        forwarded_mcp: Vec::new(),
     };
     let mut handle = spawn_codex_agent(cfg).await.expect("the participant starts");
     // One page, the way the sequencer delivers one: a persisted row of this

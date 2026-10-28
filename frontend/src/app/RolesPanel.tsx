@@ -8,8 +8,10 @@ import { cn } from "../lib/cn";
 import { FieldLabel } from "./contextLibraryShared";
 import { SaveIcon } from "../components/icons";
 import type {
+  AgentOverride,
   AppError,
   CapabilityView,
+  ClaudeConfigView,
   ClaudeOverrides,
   ModelView,
   RoleDraftInput,
@@ -433,6 +435,35 @@ function RoleForm({
     }
   };
 
+  // MCP servers per role (feedback #141): the same per-role slot, its `mcp`
+  // map. A tri-state per server — no key (Inherit: `_all`, else the
+  // capability's default), `true` (Forward), `false` (Off) — exactly what
+  // `resolve_agent_overrides` layers and `select_user_mcp_servers` reads.
+  const { data: claudeConfig } = useTauriQuery<ClaudeConfigView>("claude_config_read");
+  const [savingMcp, setSavingMcp] = useState(false);
+  const saveRoleMcp = async (server: string, pick: McpPick) => {
+    if (!role) return;
+    setSavingMcp(true);
+    try {
+      const perRole = { ...(claudeOverrides?.per_role ?? {}) };
+      const entry: AgentOverride = { ...(perRole[role.slug] ?? {}) };
+      const mcp = { ...(entry.mcp ?? {}) };
+      if (pick === "inherit") delete mcp[server];
+      else mcp[server] = pick === "on";
+      perRole[role.slug] = { ...entry, mcp };
+      const store: ClaudeOverrides = {
+        ...(claudeOverrides ?? {}),
+        per_role: perRole,
+      };
+      await setOverrides.mutateAsync({ overrides: store });
+      await refetchOverrides();
+    } catch (e) {
+      setError(e as AppError);
+    } finally {
+      setSavingMcp(false);
+    }
+  };
+
   const create = useTauriMutation<RoleView, { draft: RoleDraftInput }>(
     "create_role",
   );
@@ -693,6 +724,19 @@ function RoleForm({
           </label>
         )}
       </div>
+
+      {role && (
+        <RoleMcpServers
+          servers={(claudeConfig?.mcp_servers ?? [])
+            .filter((m) => !m.reserved_filtered)
+            .map((m) => m.name)}
+          canEdit={role.capabilities.includes(EDIT_FILES)}
+          global={claudeOverrides?._all?.mcp ?? {}}
+          own={claudeOverrides?.per_role?.[role.slug]?.mcp ?? {}}
+          saving={savingMcp}
+          onPick={(server, pick) => void saveRoleMcp(server, pick)}
+        />
+      )}
 
       <label className="block">
         <FieldLabel>Role instruction</FieldLabel>
@@ -986,6 +1030,84 @@ function RoleForm({
         }}
         onCancel={() => setConfirmArchive(false)}
       />
+    </div>
+  );
+}
+
+/** A role's choice for one user MCP server (feedback #141). */
+type McpPick = "inherit" | "on" | "off";
+
+/**
+ * Settings → Roles: which of the user's MCP servers this role's Claude
+ * participants get (feedback #141). Inherit shows the result it resolves
+ * to — the global Claude Config choice when there is one, else the
+ * capability's default (an editing role gets every server, any other role
+ * none) — so the label cannot misstate what a spawn will do. Written on
+ * change, like the default effort; reaches participants spawned after it.
+ */
+function RoleMcpServers({
+  servers,
+  canEdit,
+  global,
+  own,
+  saving,
+  onPick,
+}: {
+  servers: string[];
+  canEdit: boolean;
+  global: Partial<{ [key in string]: boolean }>;
+  own: Partial<{ [key in string]: boolean }>;
+  saving: boolean;
+  onPick: (server: string, pick: McpPick) => void;
+}) {
+  if (servers.length === 0) return null;
+  const inherited = (server: string) => {
+    const g = global[server];
+    if (g === true) return "forwarded — Force forward for every agent";
+    if (g === false) return "not forwarded — turned off for every agent";
+    return canEdit
+      ? "forwarded — this role can edit files"
+      : "not forwarded — this role cannot edit files";
+  };
+  const pickOf = (server: string): McpPick => {
+    const v = own[server];
+    return v === true ? "on" : v === false ? "off" : "inherit";
+  };
+  return (
+    <div className="block">
+      <FieldLabel>MCP servers</FieldLabel>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {servers.map((server) => (
+          <label key={server} className="flex items-center gap-2">
+            <span className="w-32 shrink-0 truncate font-code-sm text-code-sm text-on-surface" title={server}>
+              {server}
+            </span>
+            <select
+              value={pickOf(server)}
+              disabled={saving}
+              onChange={(e) => onPick(server, e.target.value as McpPick)}
+              className={fieldClass}
+              aria-label={`MCP server ${server}`}
+            >
+              <option value="inherit">Inherit ({inherited(server)})</option>
+              <option value="on">Forward for this role</option>
+              <option value="off">Off for this role</option>
+            </select>
+          </label>
+        ))}
+      </div>
+      <span
+        data-testid="mcp-role-blurb"
+        className="mt-1 block max-w-prose font-body-md text-body-md text-muted"
+      >
+        Which of your Claude Code MCP servers this role&rsquo;s participants
+        get. A role that can edit files gets every server unless one is Off; a
+        role that cannot edit files gets only the servers set to Forward here
+        (or Force forward for every agent in Claude Config). A server is
+        forwarded as a unit — every tool it has, writes included. Claude
+        connector participants only (Codex participants get no user MCP
+        servers), and only those spawned after the change.
+      </span>
     </div>
   );
 }

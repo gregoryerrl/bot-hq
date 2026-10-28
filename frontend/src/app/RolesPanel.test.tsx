@@ -645,6 +645,87 @@ describe("default effort (no-inherit, 2026-08-25)", () => {
   });
 });
 
+// Feedback #141: the user's MCP servers reach a role that cannot edit files
+// only through an explicit per-role allow. The Roles editor is where that is
+// chosen — a tri-state per configured server (Inherit, Forward, Off) for
+// every role, with the inherited result spelled out — Claude connector only.
+describe("MCP servers per role (feedback #141)", () => {
+  const SERVERS = [
+    { name: "discord", transport: "stdio", loaded_from: "~/.claude.json", effective: true, detail: "discord-mcp", forwarded_to_agents: ["roles that may edit files, plus roles it is forwarded to by Force forward or in Roles → MCP servers"], reserved_filtered: false },
+    { name: "clockify", transport: "http", loaded_from: "~/.claude.json", effective: true, detail: "https://clockify.example", forwarded_to_agents: ["roles that may edit files, plus roles it is forwarded to by Force forward or in Roles → MCP servers"], reserved_filtered: false },
+    { name: "bot-hq", transport: "stdio", loaded_from: "~/.claude.json", effective: true, detail: "bot-hq mcp", forwarded_to_agents: [], reserved_filtered: true },
+  ];
+  function mockBackendWithServers(roles: RoleView[], overrides: unknown) {
+    mockBackend(roles);
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd, args, opts) => {
+      if (cmd === "claude_config_read") return { core_knobs: [], mcp_servers: SERVERS };
+      if (cmd === "get_claude_overrides") return overrides;
+      return base!(cmd, args, opts);
+    });
+  }
+
+  it("offers a tri-state per server, says what Inherit means for a role that cannot edit, and never lists a reserved server", async () => {
+    mockBackendWithServers([role(), EYES], { per_role: {}, _all: {} });
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    await waitFor(() => expect(discord.value).toBe("inherit"));
+    const labels = Array.from(discord.options).map((o) => o.textContent ?? "");
+    expect(labels[0]).toMatch(/Inherit \(not forwarded/);
+    expect(labels).toEqual(expect.arrayContaining([expect.stringMatching(/^Forward/), expect.stringMatching(/^Off/)]));
+    expect(screen.queryByLabelText("MCP server bot-hq")).not.toBeInTheDocument();
+    expect(screen.getByTestId("mcp-role-blurb")).toHaveTextContent(/cannot edit files/);
+    expect(screen.getByTestId("mcp-role-blurb")).toHaveTextContent(/Claude connector/);
+  });
+
+  it("writes an explicit allow into the role's own slot, leaving _all alone", async () => {
+    mockBackendWithServers([role(), EYES], { per_role: { eyes: { effort: "max" } }, _all: { mcp: { clockify: true } } });
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    fireEvent.change(discord, { target: { value: "on" } });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            per_role: expect.objectContaining({ eyes: expect.objectContaining({ effort: "max", mcp: { discord: true } }) }),
+            _all: expect.objectContaining({ mcp: { clockify: true } }),
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("shows the global Force forward as the inherited result, and lets a role opt out of it", async () => {
+    mockBackendWithServers([role(), EYES], { per_role: {}, _all: { mcp: { clockify: true } } });
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const clockify = (await screen.findByLabelText("MCP server clockify")) as HTMLSelectElement;
+    await waitFor(() => expect(Array.from(clockify.options)[0]?.textContent).toMatch(/Inherit \(forwarded/));
+    fireEvent.change(clockify, { target: { value: "off" } });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "set_claude_overrides",
+        expect.objectContaining({
+          overrides: expect.objectContaining({
+            per_role: expect.objectContaining({ eyes: expect.objectContaining({ mcp: { clockify: false } }) }),
+          }),
+        }),
+      ),
+    );
+  });
+
+  it("tells an editing role that Inherit forwards", async () => {
+    mockBackendWithServers([role({ capabilities: ["read_channel", "edit_files"] }), EYES], { per_role: {}, _all: {} });
+    renderPanel();
+    await screen.findByText("HANDS");
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    await waitFor(() => expect(Array.from(discord.options)[0]?.textContent).toMatch(/Inherit \(forwarded/));
+  });
+});
+
 describe("shipped default (1.0.1 view-diff / reset)", () => {
   beforeEach(() => mockInvoke.mockReset());
 

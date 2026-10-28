@@ -159,6 +159,18 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   controller; a withdrawal reports the host's reason and no decider, and an
   unreadable answer record leaves the decider unknown. `gate_status` names the
   reviewer on a pending card (feedback #143).
+- A role that cannot edit files can now be given your Claude Code MCP servers,
+  one server at a time. Settings → Roles has an MCP servers section: per
+  server, Inherit (which says what it resolves to), Forward for this role, or
+  Off for this role. Settings → Claude Config's Force forward, a no-op until
+  now, forwards a server to every role; a role's own choice wins for that
+  role, so an editing role can still turn one off. A forwarded server is also
+  allowed in the restricted role's tool list — the config alone would have
+  handed it a server whose tools it could not call. A server is forwarded
+  whole, writes included; an unreadable roster still gets none, Codex
+  participants get no user MCP servers, and the change reaches participants
+  spawned after it. Before this a Driver asked to check a team channel had no
+  Discord (feedback #141).
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"
