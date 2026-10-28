@@ -590,6 +590,7 @@ impl SignalingBridge {
         use crate::storage::{review_state, ReviewState};
         let command = row.command_text.as_deref();
         let (status, note) = match review_state(row) {
+            ReviewState::Reviewed if row.reviewed_by.is_none() => ("reviewed", "the queued body was read and nothing blocking was filed, at `at`; who read it was not recorded (a read from before readers were recorded) — the session's current reviewer is not assumed"),
             ReviewState::Reviewed => ("reviewed", "the reviewer read the queued body and filed nothing blocking; the card was parked for the user after that read"),
             ReviewState::Skipped => ("skipped", "the card reached the user WITHOUT a reviewer's read; the prompt says why"),
             ReviewState::QueuedForReview => ("queued_for_review", "waiting for the reviewer's read; it parks for the user (or runs under auto_allow) after their turn"),
@@ -627,27 +628,57 @@ impl SignalingBridge {
                 "live_body_sha256 is the remote body this edit replaces, as it was when the reviewer saw the diff; it is re-read at approval and the edit is refused if it changed"
             } else { "not an edit of a live body, or none was recorded" }});
         // The decision's actor rides a column the row projection leaves out
-        // (`decision_actor_json`, written by the delegated-answer claim).
-        let actor: Option<String> = match self.storage_handle().await {
-            Some(storage) => sqlx::query_scalar("SELECT decision_actor_json FROM session_tray WHERE choice_id = ?")
+        // (`decision_actor_json`, written by the delegated-answer claim). The
+        // read's failure is kept: an unread actor is not a NULL one.
+        let actor = match self.storage_handle().await {
+            Some(storage) => sqlx::query_scalar::<_, Option<String>>("SELECT decision_actor_json FROM session_tray WHERE choice_id = ?")
                 .bind(&row.choice_id)
                 .fetch_optional(storage.pool())
                 .await
-                .ok()
-                .flatten()
-                .flatten(),
-            None => None,
+                .map_err(|e| e.to_string()),
+            None => Err("storage is not connected".to_string()),
         };
-        let decided_by = actor
-            .as_deref()
-            .and_then(|j| serde_json::from_str::<Value>(j).ok())
-            .and_then(|a| Some(format!("{} of {} (delegated controller)", a.get("slug")?.as_str()?, a.get("session_id")?.as_str()?)))
-            .or_else(|| row.picked_option.as_ref().map(|_| "the user".to_string()));
-        let decision = json!({"status": row.status, "picked": row.picked_option, "decided_by": decided_by, "answered_at": row.answered_at,
-            "note": "only the exact text `Approve` approves an Approve/Reject gate; `Reject — <reason>` carries the reason to the executor"});
+        let decision = decision_explained(&row.status, row.picked_option.as_deref(), row.answered_at.as_deref(), actor);
         json!({"review": review, "body_files": body_files, "live_body": live_body, "decision": decision})
     }
 
+}
+
+/// A tray row's decision as the record shows it (feedback #143, EYES
+/// `36985429`). Only an ANSWERED row has a decider. The human UI's resolve
+/// is the one answer path that writes no actor, so a successful read of a
+/// NULL `decision_actor_json` is the user; a parsed actor is the delegated
+/// controller it names. An actor that could not be read (`actor` is `Err`),
+/// a row that vanished (`Ok(None)`) or a record without its slug and session
+/// leaves the decider UNKNOWN, with the reason — never "the user". A
+/// withdrawal (a reviewer's blocking finding, the session's close, a body or
+/// recap that could not be posted) answered nothing: its `picked_option` is
+/// the host's reason and is reported as that.
+fn decision_explained(status: &str, picked: Option<&str>, answered_at: Option<&str>, actor: Result<Option<Option<String>>, String>) -> Value {
+    let note = "only the exact text `Approve` approves an Approve/Reject gate; `Reject — <reason>` carries the reason to the executor";
+    match status {
+        "answered" => {
+            let decider: Result<String, String> = match actor {
+                Ok(Some(None)) => Ok("the user".to_string()),
+                Ok(Some(Some(record))) => serde_json::from_str::<Value>(&record)
+                    .ok()
+                    .and_then(|a| Some(format!("{} of {} (delegated controller)", a.get("slug")?.as_str()?, a.get("session_id")?.as_str()?)))
+                    .ok_or_else(|| "the answer's actor record could not be read (malformed); who answered is unknown".to_string()),
+                Ok(None) => Err("the row could not be read again; who answered is unknown".to_string()),
+                Err(e) => Err(format!("the answer's actor record could not be read ({e}); who answered is unknown")),
+            };
+            match decider {
+                Ok(by) => json!({"status": status, "picked": picked, "decided_by": by, "answered_at": answered_at, "note": note}),
+                Err(why) => json!({"status": status, "picked": picked, "decided_by": null, "decided_by_unknown": why, "answered_at": answered_at, "note": note}),
+            }
+        }
+        "withdrawn" => json!({"status": status, "picked": null, "decided_by": null, "withdrawn_reason": picked,
+            "note": "withdrawn by bot-hq or the asker, not answered: `withdrawn_reason` is the host's reason when one was recorded"}),
+        _ => json!({"status": status, "picked": null, "decided_by": null, "answered_at": answered_at, "note": note}),
+    }
+}
+
+impl SignalingBridge {
     async fn control_answer(
         &self,
         choice_id: &str,
@@ -680,5 +711,42 @@ impl SignalingBridge {
                 json!({"status":"stale_gate_needs_confirmation", "choice_id":choice_id, "command":command, "asked_at":asked_at})
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decision_explained;
+
+    /// EYES `36985429`: every way the actor record can be missing or bad
+    /// keeps the decider unknown; only a NULL actor read back from an
+    /// answered row is the user; a withdrawal and an open row have no decider.
+    #[test]
+    fn a_decider_is_named_only_from_a_read_record_of_an_answer() {
+        let answered = |actor| decision_explained("answered", Some("Reject — wait"), Some("2026-10-28T22:00:00.000Z"), actor);
+        let d = answered(Ok(Some(None)));
+        assert_eq!(d["decided_by"], "the user", "{d}");
+        let d = answered(Ok(Some(Some(r#"{"slug":"driver","session_id":"s-91409754","participant_id":3}"#.into()))));
+        assert_eq!(d["decided_by"], "driver of s-91409754 (delegated controller)", "{d}");
+        for (actor, why) in [
+            (Err("database is locked".to_string()), "database is locked"),
+            (Ok(None), "could not be read again"),
+            (Ok(Some(Some("not json".into()))), "malformed"),
+            (Ok(Some(Some(r#"{"session_id":"s1"}"#.into()))), "malformed"),
+        ] {
+            let d = answered(actor);
+            assert!(d["decided_by"].is_null(), "{d}");
+            assert!(d["decided_by_unknown"].as_str().is_some_and(|w| w.contains(why)), "{why}: {d}");
+            assert_eq!(d["picked"], "Reject — wait");
+        }
+        let d = decision_explained("withdrawn", Some("withdrawn: the reviewer filed a blocking finding"), None, Ok(Some(None)));
+        assert!(d["decided_by"].is_null() && d["picked"].is_null(), "{d}");
+        assert_eq!(d["withdrawn_reason"], "withdrawn: the reviewer filed a blocking finding");
+        let d = decision_explained("withdrawn", None, None, Ok(Some(None)));
+        assert!(d["decided_by"].is_null() && d["withdrawn_reason"].is_null(), "an agent's own withdrawal records no reason: {d}");
+        for status in ["pending", "queued", "superseded", "auto_running", "auto_resolved"] {
+            let d = decision_explained(status, None, None, Ok(Some(None)));
+            assert!(d["decided_by"].is_null(), "{status}: no answer, no decider: {d}");
+        }
     }
 }

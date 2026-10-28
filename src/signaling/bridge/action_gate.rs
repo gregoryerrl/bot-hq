@@ -1096,11 +1096,15 @@ impl SignalingBridge {
                         self.repost_revised_body(&storage, session_id, agent, &existing, command, reviewer.id).await;
                         if let Some(prior) = upgraded.as_ref() {
                             if let Some(current) = storage.get_tray_entry(&existing).await? {
-                                if prior.reviewed_at.is_some() && prior.body_row_id == current.body_row_id {
-                                    let reader = prior.reviewed_by.as_deref().unwrap_or(&reviewer.slug);
+                                if let Some(at) = prior.reviewed_at.as_deref().filter(|_| prior.body_row_id == current.body_row_id) {
+                                    // The automatic read as it was recorded: its own
+                                    // time, and its reader only when one was recorded
+                                    // (a pre-0117 row has none) — never whoever reviews
+                                    // the session now (EYES `be5a457e`).
+                                    let read = crate::storage::ReviewRead::Earlier { by: prior.reviewed_by.as_deref(), at };
                                     if self.promote_queued_row(&storage, session_id, &current,
                                         format!("User approval is now required for reviewed publication {existing}. Nothing ran."),
-                                        review_completed_note(Some(reader)), Some(reader)).await {
+                                        review_completed_note(read), read).await {
                                         return Ok(ParkOutcome::Parked { gate_id: existing, existing: true, note: None });
                                     }
                                 } else if prior.body_row_id == current.body_row_id {
@@ -1520,6 +1524,7 @@ impl SignalingBridge {
                  re-issue it; the outcome will arrive as an out-of-band message.",
                 match (row.reviewed_by.as_deref(), row.reviewed_at.as_deref()) {
                     (Some(slug), Some(at)) => format!(" (reviewed by {slug} at {})", window_time(at)),
+                    (None, Some(at)) => format!(" (reviewed at {}; who read it was not recorded)", window_time(at)),
                     _ => String::new(),
                 }
             ),
@@ -2723,7 +2728,7 @@ impl SignalingBridge {
                         if current.approval_required && current.body_row_id == Some(body_row) {
                             self.promote_queued_row(&storage, session_id, &current,
                                 format!("Reviewed publication {} now requires the user's approval.", row.choice_id),
-                                review_completed_note(Some(&reviewer.slug)), Some(&reviewer.slug)).await;
+                                review_completed_note(crate::storage::ReviewRead::Now(&reviewer.slug)), crate::storage::ReviewRead::Now(&reviewer.slug)).await;
                         }
                     }
                 }
@@ -2743,7 +2748,8 @@ impl SignalingBridge {
                     row.choice_id
                 )
             };
-            self.promote_queued_row(&storage, session_id, &row, notice, review_completed_note(Some(&reviewer.slug)), Some(&reviewer.slug)).await;
+            let read = crate::storage::ReviewRead::Now(&reviewer.slug);
+            self.promote_queued_row(&storage, session_id, &row, notice, review_completed_note(read), read).await;
         }
     }
 
@@ -2788,28 +2794,23 @@ impl SignalingBridge {
                 _ => None,
             };
             if let Some(reason) = reason {
-                // The recorded reader first (the row came from `reviewed_auto_gates`,
-                // so its read is on it); the current reviewer only as a fallback.
-                let reviewer = match row.reviewed_by.clone() {
-                    Some(reader) => Some(reader),
-                    None => self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug),
-                };
+                // The read the row recorded (it came from `reviewed_auto_gates`),
+                // as recorded: its reader may be unknown on a pre-0117 row and is
+                // never filled from today's roster (EYES `be5a457e`).
+                let read = recorded_read(&row);
                 self.promote_queued_row(&storage, &row.session_id, &row,
                     format!("Automatic publication {} now needs user approval: {reason}. Nothing ran.", row.choice_id),
-                    review_completed_note(reviewer.as_deref()), reviewer.as_deref()).await;
+                    review_completed_note(read), read).await;
                 continue;
             }
             if self.execute_reviewed_auto_gate(&row).await {
                 ran += 1;
             } else if let Ok(Some(current)) = storage.get_tray_entry(&row.choice_id).await {
                 if current.approval_required && current.body_row_id == Some(body_row) {
-                    let reviewer = match row.reviewed_by.clone() {
-                        Some(reader) => Some(reader),
-                        None => self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug),
-                    };
+                    let read = recorded_read(&row);
                     self.promote_queued_row(&storage, &row.session_id, &current,
                         format!("Reviewed publication {} now requires the user's approval.", row.choice_id),
-                        review_completed_note(reviewer.as_deref()), reviewer.as_deref()).await;
+                        review_completed_note(read), read).await;
                 }
             }
         }
@@ -2844,7 +2845,7 @@ impl SignalingBridge {
             } else {
                 self.promote_queued_row(&storage, session, &row,
                     format!("Session agents changed; queued decision {} now needs your approval because its reviewer is no longer available. Nothing ran.", row.choice_id),
-                    review_skipped_note("the session's agents changed and no reviewer remains to read it"), None).await;
+                    review_skipped_note("the session's agents changed and no reviewer remains to read it"), crate::storage::ReviewRead::Skipped).await;
             }
         }
         Ok(())
@@ -2917,12 +2918,12 @@ impl SignalingBridge {
         row: &crate::storage::SessionTrayEntry,
         notice: String,
         review_note: String,
-        // The reviewer whose COMPLETED read this promotion follows — recorded
-        // on the card as `reviewed_at`/`reviewed_by` (0117, feedback #143);
-        // `None` is a skip and records nothing.
-        reviewed_by: Option<&str>,
+        // The reviewer's read this promotion follows, recorded on the card as
+        // `reviewed_at`/`reviewed_by` as it happened (0117, feedback #143);
+        // `Skipped` records nothing.
+        read: crate::storage::ReviewRead<'_>,
     ) -> bool {
-        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id, Some(&review_note), reviewed_by).await.unwrap_or(0) != 1 {
+        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id, Some(&review_note), read).await.unwrap_or(0) != 1 {
             return false;
         }
         let command = row.command_text.clone().unwrap_or_default();
@@ -3008,7 +3009,7 @@ impl SignalingBridge {
                 row.choice_id
             );
             if self.promote_queued_row(&storage, session_id, &row, notice,
-                review_skipped_note("released UNREVIEWED by the user-approved reviewer-down override"), None).await {
+                review_skipped_note("released UNREVIEWED by the user-approved reviewer-down override"), crate::storage::ReviewRead::Skipped).await {
                 released += 1;
             }
         }
@@ -3062,15 +3063,34 @@ impl SignalingBridge {
 /// The line a promoted card gains (feedback #127): the reviewer's read
 /// happened, by whom and when — so the user can tell a reviewed request from
 /// one that reached them on a skip.
-fn review_completed_note(reviewer: Option<&str>) -> String {
-    let when = window_time(&crate::storage::now_utc());
-    match reviewer {
-        Some(slug) => format!(
-            "\n\n✅ Review completed by {slug} at {when} — they read the queued row and filed nothing blocking."
+fn review_completed_note(read: crate::storage::ReviewRead<'_>) -> String {
+    use crate::storage::ReviewRead;
+    match read {
+        ReviewRead::Now(slug) => format!(
+            "\n\n✅ Review completed by {slug} at {} — they read the queued row and filed nothing blocking.",
+            window_time(&crate::storage::now_utc())
         ),
-        None => format!(
-            "\n\n✅ Review completed at {when} — the reviewer read the queued row and filed nothing blocking."
+        ReviewRead::Earlier { by: Some(slug), at } => format!(
+            "\n\n✅ Review completed by {slug} at {} — they read the queued row and filed nothing blocking.",
+            window_time(at)
         ),
+        // A read from before readers were recorded (0117): the time is
+        // known, the reader is not — and is not guessed (EYES `be5a457e`).
+        ReviewRead::Earlier { by: None, at } => format!(
+            "\n\n✅ Review completed at {} — the queued row was read and nothing blocking was filed; who read it was not recorded.",
+            window_time(at)
+        ),
+        ReviewRead::Skipped => review_skipped_note("no read was recorded for it"),
+    }
+}
+
+/// The read an automatic row recorded, for its promotion to the user's card:
+/// its own time and its reader, if any. A row with no read time has no read
+/// to carry (not one `reviewed_auto_gates` returns) and promotes as skipped.
+fn recorded_read(row: &crate::storage::SessionTrayEntry) -> crate::storage::ReviewRead<'_> {
+    match row.reviewed_at.as_deref() {
+        Some(at) => crate::storage::ReviewRead::Earlier { by: row.reviewed_by.as_deref(), at },
+        None => crate::storage::ReviewRead::Skipped,
     }
 }
 
@@ -4949,6 +4969,68 @@ mod tests {
             assert_eq!(status_of(&storage, &id).await, "pending");
             assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
             assert_eq!(storage.pending_gate_ids("s1").await.unwrap(), vec![id]);
+        }
+    }
+
+    /// EYES `be5a457e` (feedback #143): an automatic publication reviewed
+    /// before 0117 carries `reviewed_at` but no `reviewed_by`. Promoting it to
+    /// the user's card — a stronger request, or the worker refusing to run it
+    /// — keeps that read as it was recorded: its time, and no reader. The
+    /// session's CURRENT reviewer (here a replacement) is not evidence of who
+    /// read the old body, so it is neither recorded nor named on the card. A
+    /// recorded reader keeps its own name and time too.
+    #[tokio::test]
+    async fn a_promoted_earlier_review_keeps_its_recorded_reader_and_time() {
+        use crate::storage::{review_state, ReviewState};
+        const READ_AT: &str = "2026-10-27T10:00:00.000Z";
+        async fn replace_reviewer(bridge: &SignalingBridge, storage: &crate::storage::Storage) -> String {
+            let slug = "eyes-2".to_string();
+            storage.insert_participant("s1", &slug, "EYES 2", None, None, "[\"read_channel\",\"post_channel\"]", "active", 9).await.unwrap();
+            bridge.register_session_reviewers("s1".into(), vec![slug.clone()]);
+            slug
+        }
+        fn assert_kept(row: &crate::storage::SessionTrayEntry, by: Option<&str>, replacement: &str) {
+            assert_eq!(row.status, "pending", "{row:?}");
+            assert_eq!(row.reviewed_by.as_deref(), by, "the recorded reader, never the roster's: {row:?}");
+            assert_eq!(row.reviewed_at.as_deref(), Some(READ_AT), "the read's own time, not the promotion's: {row:?}");
+            assert_eq!(review_state(row), ReviewState::Reviewed, "a read happened; only its reader may be unknown");
+            assert!(!row.prompt.contains(&format!("by {replacement}")), "the card never credits the replacement: {}", row.prompt);
+            if by.is_none() {
+                assert!(!row.prompt.contains("Review completed by"), "no reader is named for an unknown one: {}", row.prompt);
+            }
+        }
+        for recorded in [None, Some("eyes")] {
+            // The stronger request promotes the reviewed automatic row.
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, _, path, _) = outward_fixture(&data, &repo).await;
+            let _ring = ring_for(&bridge).await;
+            tool_gate::save(data.path(), &[gk("gh", GateMode::AutoAllow)]).unwrap();
+            let command = format!("gh issue create --title fixture --body-file {path}");
+            bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
+            let id = storage.queued_gate_for_command("s1", &command).await.unwrap().unwrap();
+            sqlx::query("UPDATE session_tray SET reviewed_at = ?, reviewed_by = ? WHERE choice_id = ?")
+                .bind(READ_AT).bind(recorded).bind(&id).execute(storage.pool()).await.unwrap();
+            let replacement = replace_reviewer(&bridge, &storage).await;
+            bridge.action_gate("s1".into(), "hands".into(), command.clone(), true).await.unwrap();
+            assert_kept(&storage.get_tray_entry(&id).await.unwrap().unwrap(), recorded, &replacement);
+            let status = bridge.gate_status(&id).await.unwrap();
+            assert!(!status.contains(&replacement), "{status}");
+            match recorded {
+                Some(by) => assert!(status.contains(&format!("reviewed by {by} at 10:00Z")), "{status}"),
+                None => assert!(status.contains("reviewed at 10:00Z (Oct 27); who read it was not recorded"), "{status}"),
+            }
+
+            // The worker finds the command no longer auto-allowed.
+            let data = tempdir().unwrap();
+            let repo = tempdir().unwrap();
+            let (bridge, storage, ..) = automatic_publish_fixture(&data, &repo).await;
+            sqlx::query("UPDATE session_tray SET reviewed_at = ?, reviewed_by = ? WHERE choice_id = 'auto-publish'")
+                .bind(READ_AT).bind(recorded).execute(storage.pool()).await.unwrap();
+            let replacement = replace_reviewer(&bridge, &storage).await;
+            tool_gate::save(data.path(), &[]).unwrap();
+            assert_eq!(bridge.run_reviewed_auto_publications().await, 0);
+            assert_kept(&storage.get_tray_entry("auto-publish").await.unwrap().unwrap(), recorded, &replacement);
         }
     }
 

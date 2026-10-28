@@ -487,10 +487,11 @@ function gatePrompt(row: TrayRow): string {
 function reviewLine(row: TrayRow): string | null {
   switch (row.review_state) {
     case "reviewed": {
-      const by = row.reviewed_by ?? "the reviewer";
       const ms = row.reviewed_at ? parseUtcMs(row.reviewed_at) : NaN;
       const at = Number.isFinite(ms) ? ` · ${new Date(ms).toISOString().slice(11, 16)}Z` : "";
-      return `Reviewed by ${by}${at}`;
+      // A read from before readers were recorded names nobody: today's
+      // reviewer is not evidence of who read it (EYES be5a457e).
+      return row.reviewed_by ? `Reviewed by ${row.reviewed_by}${at}` : `Reviewed${at} — reader not recorded`;
     }
     case "skipped":
       return "Review skipped — reached you without the reviewer's read (the request says why)";

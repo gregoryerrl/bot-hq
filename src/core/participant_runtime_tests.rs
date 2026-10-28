@@ -783,6 +783,60 @@ async fn driver_choice_read_explains_review_state_body_pin_and_decision() {
     f.end().await;
 }
 
+/// EYES `36985429` (feedback #143): the `choice` read names a decider only
+/// for an ANSWERED row whose actor record was read — the user for the human
+/// UI's answer (no actor written), the controller for a delegated one. A
+/// withdrawal is the host's reason, not anybody's answer; a malformed or
+/// incomplete actor record leaves the decider unknown, never "the user".
+#[tokio::test]
+async fn driver_choice_read_attributes_only_answers_it_can_attribute() {
+    let f = driver_fixture(false).await;
+    let s = &f.state.storage;
+    let decision = |id: &'static str| {
+        let state = f.state.clone();
+        async move { driver_rpc(&state, serde_json::json!({"action":"choice","choice_id":id})).await.unwrap()["result"]["explained"]["decision"].clone() }
+    };
+    let gate_options = ["Approve".to_string(), "Reject".to_string()];
+    let gate = |id: &'static str| s.insert_tray_entry("s1", id, "hands", crate::storage::QuestionKind::Approval, "Run gated command?",
+        Some(&gate_options), None, Some("gh issue comment 1 --body x"));
+
+    // A queued publish the reviewer's blocking finding withdrew.
+    gate("vetoed").await.unwrap();
+    sqlx::query("UPDATE session_tray SET status = 'queued' WHERE choice_id = 'vetoed'").execute(s.pool()).await.unwrap();
+    s.withdraw_queued_gate("vetoed", crate::storage::FINDING_WITHDRAWAL_REASON).await.unwrap();
+    let d = decision("vetoed").await;
+    assert_eq!(d["status"], "withdrawn", "{d}");
+    assert!(d["decided_by"].is_null(), "a withdrawal is nobody's answer: {d}");
+    assert!(d["picked"].is_null(), "the host's reason is not a pick: {d}");
+    assert_eq!(d["withdrawn_reason"], crate::storage::FINDING_WITHDRAWAL_REASON, "{d}");
+
+    // The human UI's answer: no actor written, read back as NULL.
+    s.insert_tray_entry("s1", "human", "hands", crate::storage::QuestionKind::Choice, "Human?", Some(&["Yes".into()]), None, None).await.unwrap();
+    f.state.resolve_choice("human", "Yes".into(), false).await.unwrap();
+    let d = decision("human").await;
+    assert_eq!((d["status"].as_str(), d["picked"].as_str(), d["decided_by"].as_str()), (Some("answered"), Some("Yes"), Some("the user")), "{d}");
+
+    // A delegated answer names its controller.
+    s.insert_tray_entry("s1", "delegated", "hands", crate::storage::QuestionKind::Choice, "Next?", Some(&["Wait".into()]), None, None).await.unwrap();
+    let args = decision_args(&f, "delegated", "Wait").await;
+    driver_rpc(&f.state, args).await.unwrap();
+    let d = decision("delegated").await;
+    assert_eq!(d["decided_by"], "hands of s1 (delegated controller)", "{d}");
+
+    // An actor record that does not say who it was (the column's CHECK keeps
+    // it JSON; the shape is the reader's to verify): unknown.
+    for (id, record) in [("partial", "{\"slug\":\"hands\"}"), ("shapeless", "[]")] {
+        gate(id).await.unwrap();
+        s.answer_tray_entry(id, "Reject — wait").await.unwrap();
+        sqlx::query("UPDATE session_tray SET decision_actor_json = ? WHERE choice_id = ?").bind(record).bind(id).execute(s.pool()).await.unwrap();
+        let d = decision(id).await;
+        assert!(d["decided_by"].is_null(), "{id}: an unreadable actor is unknown, never the user: {d}");
+        assert!(d["decided_by_unknown"].as_str().is_some_and(|w| w.contains("could not be read")), "{id}: {d}");
+        assert_eq!(d["picked"], "Reject — wait", "{id}: the pick itself is on the row: {d}");
+    }
+    f.end().await;
+}
+
 #[tokio::test]
 async fn driver_live_hook_answer_records_actor_before_unblocking_the_waiter() {
     let f = driver_fixture(false).await;

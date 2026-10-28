@@ -61,6 +61,16 @@ describe("ApprovalGate", () => {
       />,
     );
     expect(screen.getByTestId("gate-review")).toHaveTextContent("Reviewed by eyes · 09:16Z");
+    // A read from before readers were recorded: the time, and no name —
+    // never "the reviewer" standing in for whoever reviews today.
+    rerender(
+      <ApprovalGate
+        rows={[approval({ review_state: "reviewed", reviewed_by: null, reviewed_at: "2026-10-27T10:00:00.000Z" })]}
+        onResolve={resolved()}
+      />,
+    );
+    expect(screen.getByTestId("gate-review")).toHaveTextContent("Reviewed · 10:00Z — reader not recorded");
+    expect(screen.getByTestId("gate-review")).not.toHaveTextContent(/Reviewed by/);
     rerender(<ApprovalGate rows={[approval({ review_state: "skipped" })]} onResolve={resolved()} />);
     expect(screen.getByTestId("gate-review")).toHaveTextContent("Review skipped");
     rerender(

@@ -84,13 +84,30 @@ pub fn is_gate_row(kind: &str, options_json: Option<&str>) -> bool {
 /// recognisable as a skip by it (0117, feedback #143).
 pub const REVIEW_SKIPPED_MARKER: &str = "⚠ Review SKIPPED";
 
+/// The reviewer's read a queued gate's promotion records (0117, feedback #143,
+/// EYES `be5a457e`) — as it happened, never reconstructed from who reviews
+/// the session now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRead<'a> {
+    /// The read completed now: the settling reviewer, now.
+    Now(&'a str),
+    /// A read recorded on the row earlier — an automatic gate's review, now
+    /// promoted to the user's card: its own time, and its reader when one
+    /// was recorded. A row reviewed before 0117 has none, and the current
+    /// roster is not evidence of who read the old body.
+    Earlier { by: Option<&'a str>, at: &'a str },
+    /// No read: the card reaches the user without one and records nothing.
+    Skipped,
+}
+
 /// What a card says about the reviewer's read, derived ONCE for every reader
 /// — the controller's `choice` explanation, the card's own line in the UI —
 /// so the two cannot disagree (feedback #143).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewState {
-    /// `reviewed_by`/`reviewed_at` are set: the read completed and the card
-    /// was parked after it.
+    /// `reviewed_at` (and, since 0117, `reviewed_by`) is set: the read
+    /// completed — only those two writers set them, each after a read. A row
+    /// reviewed before 0117 has the time and no reader.
     Reviewed,
     /// The card reached the user without a read; the prompt says why.
     Skipped,
@@ -119,7 +136,7 @@ impl ReviewState {
 /// `git push` command (0090) or the hook's prompt — it parks for the user
 /// directly, so "no read" is the design, not a gap.
 pub fn review_state(row: &SessionTrayEntry) -> ReviewState {
-    if row.reviewed_by.is_some() {
+    if row.reviewed_by.is_some() || row.reviewed_at.is_some() {
         return ReviewState::Reviewed;
     }
     if row.prompt.contains(REVIEW_SKIPPED_MARKER) {
@@ -513,22 +530,26 @@ impl Storage {
     /// `review_note` is appended to the card's prompt (feedback #127: the card
     /// says whether the reviewer's read happened, or why it was skipped).
     ///
-    /// `reviewed_by` is the reviewer whose COMPLETED read this promotion
-    /// follows (0117, feedback #143): the card then carries `reviewed_at` and
-    /// `reviewed_by` as data beside the prose note. `None` is a skip — the
-    /// card reaches the user without a read — and records nothing. A pending
-    /// card wearing the record is never automatic-run work: every automatic
-    /// reader also requires `approval_required = 0`, which this sets to 1.
+    /// `read` is the reviewer's read this promotion follows (0117, feedback
+    /// #143), recorded as it happened — the card then carries `reviewed_at`
+    /// and `reviewed_by` as data beside the prose note; see [`ReviewRead`].
+    /// A pending card wearing the record is never automatic-run work: every
+    /// automatic reader also requires `approval_required = 0`, which this
+    /// sets to 1.
     pub async fn promote_queued_gate_for_body(
         &self,
         choice_id: &str,
         body_row_id: Option<i64>,
         review_note: Option<&str>,
-        reviewed_by: Option<&str>,
+        read: ReviewRead<'_>,
     ) -> Result<u64> {
         let note = crate::policy::secret_scan::redact(review_note.unwrap_or_default());
         let now = now_utc();
-        let reviewed_at = reviewed_by.map(|_| now.clone());
+        let (reviewed_at, reviewed_by) = match read {
+            ReviewRead::Now(by) => (Some(now.clone()), Some(by)),
+            ReviewRead::Earlier { by, at } => (Some(at.to_string()), by),
+            ReviewRead::Skipped => (None, None),
+        };
         let res = sqlx::query(
             "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, \
                  reviewed_at = ?, reviewed_by = ?, prompt = prompt || ? \
@@ -1205,7 +1226,7 @@ mod tests {
             .unwrap();
         let body = s.post_to_channel("s-1", "system", None, "system_notice", "body", None).await.unwrap().message_id();
         s.set_tray_body_row("q-1", body).await.unwrap();
-        assert_eq!(s.promote_queued_gate_for_body("q-1", Some(body), Some("\n\n✅ Review completed by eyes"), Some("eyes")).await.unwrap(), 1);
+        assert_eq!(s.promote_queued_gate_for_body("q-1", Some(body), Some("\n\n✅ Review completed by eyes"), ReviewRead::Now("eyes")).await.unwrap(), 1);
         let row = s.get_tray_entry("q-1").await.unwrap().unwrap();
         assert_eq!(row.status, "pending");
         assert_eq!(row.reviewed_by.as_deref(), Some("eyes"));
@@ -1219,7 +1240,7 @@ mod tests {
             .await
             .unwrap();
         s.set_tray_body_row("q-2", body).await.unwrap();
-        assert_eq!(s.promote_queued_gate_for_body("q-2", Some(body), Some("\n\n⚠ Review SKIPPED"), None).await.unwrap(), 1);
+        assert_eq!(s.promote_queued_gate_for_body("q-2", Some(body), Some("\n\n⚠ Review SKIPPED"), ReviewRead::Skipped).await.unwrap(), 1);
         let row = s.get_tray_entry("q-2").await.unwrap().unwrap();
         assert!(row.reviewed_at.is_none() && row.reviewed_by.is_none(), "{row:?}");
 
@@ -1267,6 +1288,11 @@ mod tests {
         assert_eq!(state(&s, "cmd").await, ReviewState::Unrecorded);
         sqlx::query("UPDATE session_tray SET reviewed_at = 'now', reviewed_by = 'eyes' WHERE choice_id = 'cmd'").execute(s.pool()).await.unwrap();
         assert_eq!(state(&s, "cmd").await, ReviewState::Reviewed);
+        // A read from before 0117: its time, no reader — still a read (only
+        // completed reads ever set `reviewed_at`), never filled in.
+        s.insert_tray_entry("s-1", "legacy", "hands", QuestionKind::Approval, "Run gated command?", Some(&gate), None, Some("gh issue comment 4 --body z")).await.unwrap();
+        sqlx::query("UPDATE session_tray SET reviewed_at = '2026-10-27T10:00:00.000Z' WHERE choice_id = 'legacy'").execute(s.pool()).await.unwrap();
+        assert_eq!(state(&s, "legacy").await, ReviewState::Reviewed);
         s.insert_tray_entry("s-1", "skip", "hands", QuestionKind::Approval, &format!("Run gated command?\n\n{REVIEW_SKIPPED_MARKER} — a solo roster."), Some(&gate), None, Some("gh pr merge 2")).await.unwrap();
         assert_eq!(state(&s, "skip").await, ReviewState::Skipped);
         s.insert_queued_gate("s-1", "queued", "hands", "Run gated command?", "gh issue close 3").await.unwrap();

@@ -82,7 +82,7 @@ pub use session_history::{HistoryRequest, HistorySource, HistoryPage, HistoryRec
 #[cfg(test)]
 pub(crate) use participants::untimed_wire;
 pub use tray::{
-    is_gate_options, is_gate_row, review_state, ReviewState, FINDING_WITHDRAWAL_REASON, GATE_OPTIONS_JSON, REVIEW_SKIPPED_MARKER, TRAY_STATUS_QUEUED,
+    is_gate_options, is_gate_row, review_state, ReviewRead, ReviewState, FINDING_WITHDRAWAL_REASON, GATE_OPTIONS_JSON, REVIEW_SKIPPED_MARKER, TRAY_STATUS_QUEUED,
 };
 pub use findings::{FindingUidResolution, OPEN_BLOCKING_FOR_SESSION};
 pub use row_types::{
