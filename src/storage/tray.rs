@@ -11,7 +11,7 @@ const TRAY_COLUMNS: &str = "id, session_id, choice_id, agent, kind, prompt, \
      options_json, status, picked_option, asked_at, answered_at, supersedes_id, command_text, \
      body_row_id, body_sha256, run_refusal, result_row_id, exit_code, ran_ms, live_body_sha256, exec_kind, \
      run_timeout_secs, pinned_scripts, urgent_reason, run_not_before, run_not_after, run_started_at, \
-     approval_required, reviewed_at, close_archive";
+     approval_required, reviewed_at, reviewed_by, close_archive";
 
 /// The statuses a tray row passes through. `queued` (0080) is the one that is
 /// NOT a user-facing item: an outward publish waiting for the reviewer to read
@@ -77,6 +77,66 @@ pub fn is_gate_row(kind: &str, options_json: Option<&str>) -> bool {
     kind == QuestionKind::Approval.as_str()
         || kind == QuestionKind::Close.as_str()
         || (kind == QuestionKind::Choice.as_str() && is_gate_options(options_json))
+}
+
+/// The marker every review-skip note opens with (`bridge::action_gate`
+/// writes it): a card from before the `reviewed_by` column is still
+/// recognisable as a skip by it (0117, feedback #143).
+pub const REVIEW_SKIPPED_MARKER: &str = "⚠ Review SKIPPED";
+
+/// What a card says about the reviewer's read, derived ONCE for every reader
+/// — the controller's `choice` explanation, the card's own line in the UI —
+/// so the two cannot disagree (feedback #143).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewState {
+    /// `reviewed_by`/`reviewed_at` are set: the read completed and the card
+    /// was parked after it.
+    Reviewed,
+    /// The card reached the user without a read; the prompt says why.
+    Skipped,
+    /// Still waiting for the reviewer's read.
+    QueuedForReview,
+    /// A push gate (no reviewer step), a question or a request.
+    NotApplicable,
+    /// No structured provenance — a row older than the column, or one that
+    /// never went through the review queue. Not evidence of an unread card.
+    Unrecorded,
+}
+
+impl ReviewState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewState::Reviewed => "reviewed",
+            ReviewState::Skipped => "skipped",
+            ReviewState::QueuedForReview => "queued_for_review",
+            ReviewState::NotApplicable => "not_applicable",
+            ReviewState::Unrecorded => "unrecorded",
+        }
+    }
+}
+
+/// The review state of a tray row. A push gate is recognised by its rebuilt
+/// `git push` command (0090) or the hook's prompt — it parks for the user
+/// directly, so "no read" is the design, not a gap.
+pub fn review_state(row: &SessionTrayEntry) -> ReviewState {
+    if row.reviewed_by.is_some() {
+        return ReviewState::Reviewed;
+    }
+    if row.prompt.contains(REVIEW_SKIPPED_MARKER) {
+        return ReviewState::Skipped;
+    }
+    if row.status == TRAY_STATUS_QUEUED {
+        return ReviewState::QueuedForReview;
+    }
+    let is_push_gate = row
+        .command_text
+        .as_deref()
+        .is_some_and(|c| crate::policy::push_rerun_refspecs(c).is_some())
+        || row.prompt.starts_with("Allow `git push`");
+    if is_push_gate || !is_gate_row(&row.kind, row.options_json.as_deref()) {
+        return ReviewState::NotApplicable;
+    }
+    ReviewState::Unrecorded
 }
 
 impl Storage {
@@ -315,7 +375,7 @@ impl Storage {
     /// Record which posted body row a queued gate waits on.
     pub async fn set_tray_body_row(&self, choice_id: &str, body_row_id: i64) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_tray SET body_row_id = ?, reviewed_at = NULL \
+            "UPDATE session_tray SET body_row_id = ?, reviewed_at = NULL, reviewed_by = NULL \
              WHERE choice_id = ? AND status = 'queued' AND run_started_at IS NULL",
         )
         .bind(body_row_id)
@@ -330,7 +390,7 @@ impl Storage {
     /// invalidates automatic review authority before a run can be claimed.
     pub async fn require_queued_gate_approval(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_tray SET approval_required = 1, reviewed_at = NULL \
+            "UPDATE session_tray SET approval_required = 1, reviewed_at = NULL, reviewed_by = NULL \
              WHERE choice_id = ? AND status = 'queued' AND run_started_at IS NULL",
         ).bind(choice_id).execute(&self.pool).await
             .context("requiring user approval for queued gate")?;
@@ -343,7 +403,7 @@ impl Storage {
     /// The re-poster must stop when this loses to a run claim or newer revision.
     pub async fn begin_queued_gate_revision(&self, choice_id: &str, body_row_id: i64) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE session_tray SET body_row_id = NULL, reviewed_at = NULL \
+            "UPDATE session_tray SET body_row_id = NULL, reviewed_at = NULL, reviewed_by = NULL \
              WHERE choice_id = ? AND body_row_id = ? AND status = 'queued' AND run_started_at IS NULL",
         ).bind(choice_id).bind(body_row_id).execute(&self.pool).await
             .context("revoking queued gate review before revision")?;
@@ -353,8 +413,15 @@ impl Storage {
     /// Record review of exactly the body that the caller checked. A concurrent
     /// revision, stronger approval requirement or second settlement loses.
     pub async fn mark_auto_gate_reviewed(&self, choice_id: &str, body_row_id: i64) -> Result<bool> {
+        self.mark_auto_gate_reviewed_by(choice_id, body_row_id, None).await
+    }
+
+    /// [`Self::mark_auto_gate_reviewed`] naming the reviewer whose read it was
+    /// (0117, feedback #143) — the production path; the unnamed form is kept
+    /// for the fixtures that only exercise the authority.
+    pub async fn mark_auto_gate_reviewed_by(&self, choice_id: &str, body_row_id: i64, reviewer: Option<&str>) -> Result<bool> {
         let res = sqlx::query(
-            "UPDATE session_tray SET reviewed_at = ? \
+            "UPDATE session_tray SET reviewed_at = ?, reviewed_by = ? \
              WHERE choice_id = ? AND status = 'queued' AND kind = 'approval' \
                AND approval_required = 0 AND body_row_id = ? AND reviewed_at IS NULL \
                AND NOT EXISTS (SELECT 1 FROM session_participant_changes pc WHERE pc.session_id = session_tray.session_id AND pc.status = 'applying') \
@@ -362,13 +429,13 @@ impl Storage {
                AND command_text IS NOT NULL AND result_row_id IS NULL \
                AND exec_kind IS NULL AND urgent_reason IS NULL \
                AND run_not_before IS NULL AND run_not_after IS NULL",
-        ).bind(now_utc()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+        ).bind(now_utc()).bind(reviewer).bind(choice_id).bind(body_row_id).execute(&self.pool).await
             .context("recording review authority for automatic gate")?;
         Ok(res.rows_affected() == 1)
     }
 
     pub async fn invalidate_auto_gate_review(&self, choice_id: &str, body_row_id: i64) -> Result<()> {
-        sqlx::query("UPDATE session_tray SET reviewed_at = NULL WHERE choice_id = ? AND body_row_id = ? AND status = 'queued' AND approval_required = 0")
+        sqlx::query("UPDATE session_tray SET reviewed_at = NULL, reviewed_by = NULL WHERE choice_id = ? AND body_row_id = ? AND status = 'queued' AND approval_required = 0")
             .bind(choice_id).bind(body_row_id).execute(&self.pool).await
             .context("invalidating automatic review after a revision request")?;
         Ok(())
@@ -430,7 +497,7 @@ impl Storage {
     /// call did the flip, so a racing second settlement cannot double-latch.
     pub async fn promote_queued_gate(&self, choice_id: &str) -> Result<u64> {
         let res = sqlx::query(
-            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL \
+            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL, reviewed_by = NULL \
              WHERE choice_id = ? AND status = 'queued'",
         )
         .bind(now_utc())
@@ -445,18 +512,28 @@ impl Storage {
     /// changed/cleared its body pointer must not inherit that promotion.
     /// `review_note` is appended to the card's prompt (feedback #127: the card
     /// says whether the reviewer's read happened, or why it was skipped).
+    ///
+    /// `reviewed_by` is the reviewer whose COMPLETED read this promotion
+    /// follows (0117, feedback #143): the card then carries `reviewed_at` and
+    /// `reviewed_by` as data beside the prose note. `None` is a skip — the
+    /// card reaches the user without a read — and records nothing. A pending
+    /// card wearing the record is never automatic-run work: every automatic
+    /// reader also requires `approval_required = 0`, which this sets to 1.
     pub async fn promote_queued_gate_for_body(
         &self,
         choice_id: &str,
         body_row_id: Option<i64>,
         review_note: Option<&str>,
+        reviewed_by: Option<&str>,
     ) -> Result<u64> {
         let note = crate::policy::secret_scan::redact(review_note.unwrap_or_default());
+        let now = now_utc();
+        let reviewed_at = reviewed_by.map(|_| now.clone());
         let res = sqlx::query(
-            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, reviewed_at = NULL, \
-                 prompt = prompt || ? \
+            "UPDATE session_tray SET status = 'pending', asked_at = ?, approval_required = 1, \
+                 reviewed_at = ?, reviewed_by = ?, prompt = prompt || ? \
              WHERE choice_id = ? AND body_row_id IS ? AND status = 'queued' AND run_started_at IS NULL",
-        ).bind(now_utc()).bind(note.as_ref()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
+        ).bind(&now).bind(reviewed_at).bind(reviewed_by).bind(note.as_ref()).bind(choice_id).bind(body_row_id).execute(&self.pool).await
             .context("promoting the reviewed body to user approval")?;
         Ok(res.rows_affected())
     }
@@ -1111,6 +1188,93 @@ mod tests {
         let row = s.get_tray_entry("auto").await.unwrap().unwrap();
         assert!(row.approval_required && row.reviewed_at.is_none());
         assert_eq!(row.status, "pending");
+    }
+
+    /// Feedback #143: the reviewer's read is recorded on the card as data —
+    /// `reviewed_at` + `reviewed_by` — when a queued publish is promoted after
+    /// a COMPLETED read; a SKIP promotion records nothing; every revision or
+    /// invalidation clears both; and a pending card wearing the record is
+    /// never automatic-run work (every auto reader also needs
+    /// `approval_required = 0`).
+    #[tokio::test]
+    async fn promotion_after_a_completed_read_records_the_reviewer_and_revisions_clear_it() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "S", None).await.unwrap();
+        s.insert_queued_gate("s-1", "q-1", "hands", "Run gated command?", "gh pr edit 1 --body-file b.md")
+            .await
+            .unwrap();
+        let body = s.post_to_channel("s-1", "system", None, "system_notice", "body", None).await.unwrap().message_id();
+        s.set_tray_body_row("q-1", body).await.unwrap();
+        assert_eq!(s.promote_queued_gate_for_body("q-1", Some(body), Some("\n\n✅ Review completed by eyes"), Some("eyes")).await.unwrap(), 1);
+        let row = s.get_tray_entry("q-1").await.unwrap().unwrap();
+        assert_eq!(row.status, "pending");
+        assert_eq!(row.reviewed_by.as_deref(), Some("eyes"));
+        assert!(row.reviewed_at.is_some(), "the read happened: {row:?}");
+        assert!(row.approval_required);
+        assert!(s.reviewed_auto_gates().await.unwrap().is_empty(), "a reviewed user card is not automatic work");
+        assert!(!s.claim_auto_gate_run("q-1", body).await.unwrap());
+
+        // A skip promotion records no read.
+        s.insert_queued_gate("s-1", "q-2", "hands", "Run gated command?", "gh pr edit 2 --body-file b.md")
+            .await
+            .unwrap();
+        s.set_tray_body_row("q-2", body).await.unwrap();
+        assert_eq!(s.promote_queued_gate_for_body("q-2", Some(body), Some("\n\n⚠ Review SKIPPED"), None).await.unwrap(), 1);
+        let row = s.get_tray_entry("q-2").await.unwrap().unwrap();
+        assert!(row.reviewed_at.is_none() && row.reviewed_by.is_none(), "{row:?}");
+
+        // On the automatic path the read is recorded with its reviewer too,
+        // and every revision/invalidation clears both columns together.
+        s.create_session("s-auto", "fixture", None).await.unwrap();
+        let auto_body = automatic_gate(&s, "auto").await;
+        assert!(s.mark_auto_gate_reviewed_by("auto", auto_body, Some("eyes")).await.unwrap());
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert_eq!((row.reviewed_by.as_deref(), row.reviewed_at.is_some()), (Some("eyes"), true));
+        assert!(s.begin_queued_gate_revision("auto", auto_body).await.unwrap());
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert!(row.reviewed_at.is_none() && row.reviewed_by.is_none(), "a revision clears the read: {row:?}");
+        let revision = s.post_to_channel("s-auto", "system", None, "system_notice", "revised", None).await.unwrap().message_id();
+        s.set_tray_body_row("auto", revision).await.unwrap();
+        assert!(s.mark_auto_gate_reviewed_by("auto", revision, Some("eyes-2")).await.unwrap());
+        assert_eq!(s.get_tray_entry("auto").await.unwrap().unwrap().reviewed_by.as_deref(), Some("eyes-2"), "the second reviewer is the one recorded");
+        s.invalidate_auto_gate_review("auto", revision).await.unwrap();
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert!(row.reviewed_at.is_none() && row.reviewed_by.is_none(), "invalidation clears both: {row:?}");
+        assert!(s.mark_auto_gate_reviewed_by("auto", revision, Some("eyes-2")).await.unwrap());
+        assert_eq!(s.require_queued_gate_approval("auto").await.unwrap(), 1);
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert!(row.reviewed_at.is_none() && row.reviewed_by.is_none(), "a stronger request clears both: {row:?}");
+        assert!(s.mark_auto_gate_reviewed_by("auto", revision, Some("eyes-2")).await.unwrap() == false, "approval now required: no auto authority");
+        let again = s.post_to_channel("s-auto", "system", None, "system_notice", "revised again", None).await.unwrap().message_id();
+        assert_eq!(s.set_tray_body_row("auto", again).await.unwrap(), 1);
+        let row = s.get_tray_entry("auto").await.unwrap().unwrap();
+        assert!(row.reviewed_at.is_none() && row.reviewed_by.is_none());
+    }
+
+    /// The one derivation every card reader shares (feedback #143), case by
+    /// case — including the two rows that must NOT read as unreviewed: a push
+    /// gate (no reviewer step) and a prose-only card from before the column.
+    #[tokio::test]
+    async fn review_state_is_derived_the_same_way_for_every_reader() {
+        use crate::storage::{review_state, ReviewState};
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s-1", "S", None).await.unwrap();
+        let gate = ["Approve".to_string(), "Reject".to_string()];
+        async fn state(s: &Storage, id: &str) -> ReviewState {
+            review_state(&s.get_tray_entry(id).await.unwrap().unwrap())
+        }
+        s.insert_tray_entry("s-1", "cmd", "hands", QuestionKind::Approval, "Run gated command?", Some(&gate), None, Some("gh issue comment 1 --body x")).await.unwrap();
+        assert_eq!(state(&s, "cmd").await, ReviewState::Unrecorded);
+        sqlx::query("UPDATE session_tray SET reviewed_at = 'now', reviewed_by = 'eyes' WHERE choice_id = 'cmd'").execute(s.pool()).await.unwrap();
+        assert_eq!(state(&s, "cmd").await, ReviewState::Reviewed);
+        s.insert_tray_entry("s-1", "skip", "hands", QuestionKind::Approval, &format!("Run gated command?\n\n{REVIEW_SKIPPED_MARKER} — a solo roster."), Some(&gate), None, Some("gh pr merge 2")).await.unwrap();
+        assert_eq!(state(&s, "skip").await, ReviewState::Skipped);
+        s.insert_queued_gate("s-1", "queued", "hands", "Run gated command?", "gh issue close 3").await.unwrap();
+        assert_eq!(state(&s, "queued").await, ReviewState::QueuedForReview);
+        s.insert_tray_entry("s-1", "push", "hands", QuestionKind::Approval, "Allow `git push` to `main` in this session's repo?", Some(&gate), None, Some("git push origin abc123:refs/heads/main")).await.unwrap();
+        assert_eq!(state(&s, "push").await, ReviewState::NotApplicable);
+        s.insert_tray_entry("s-1", "q", "hands", QuestionKind::Choice, "Next?", Some(&["a".to_string(), "b".to_string()]), None, None).await.unwrap();
+        assert_eq!(state(&s, "q").await, ReviewState::NotApplicable);
     }
 
     #[tokio::test]

@@ -450,8 +450,12 @@ impl SignalingBridge {
                     offset_bytes.saturating_add(5000).min(body.len()),
                 );
                 use sha2::{Digest, Sha256};
+                // Beside the row, never inside it: `sha256` stays the hash of
+                // the row alone, which is what the answer claim recomputes.
+                let explained = self.explain_tray_row(&row).await;
                 json!({"choice_id":row.choice_id,"session_id":row.session_id,"sha256":format!("{:x}",Sha256::digest(body.as_bytes())),
-                    "total_bytes":body.len(),"offset_bytes":offset_bytes,"body":&body[offset_bytes..end],"next_offset_bytes":(end<body.len()).then_some(end)})
+                    "total_bytes":body.len(),"offset_bytes":offset_bytes,"body":&body[offset_bytes..end],"next_offset_bytes":(end<body.len()).then_some(end),
+                    "explained": explained})
             }
             Document {
                 session_id,
@@ -575,6 +579,73 @@ impl SignalingBridge {
         core.notify_session_created(session_id);
         Ok(json!({"status":"started", "session_id":session_id,
             "note":"Agents are available or orienting. Send after start (retry the same message request_id if it was queued while dormant). Resume explicitly to release Pause or a declared halt."}))
+    }
+
+    /// The tray row in plain words, for a controller reading a card (feedback
+    /// #143): the reviewer's read as recorded (or why there is none), whether
+    /// the body files the review covered still match, and the decision. A
+    /// read, never a check that authorizes anything — the approval re-hashes
+    /// the files itself and refuses a changed or missing one.
+    pub(crate) async fn explain_tray_row(&self, row: &crate::storage::SessionTrayEntry) -> Value {
+        use crate::storage::{review_state, ReviewState};
+        let command = row.command_text.as_deref();
+        let (status, note) = match review_state(row) {
+            ReviewState::Reviewed => ("reviewed", "the reviewer read the queued body and filed nothing blocking; the card was parked for the user after that read"),
+            ReviewState::Skipped => ("skipped", "the card reached the user WITHOUT a reviewer's read; the prompt says why"),
+            ReviewState::QueuedForReview => ("queued_for_review", "waiting for the reviewer's read; it parks for the user (or runs under auto_allow) after their turn"),
+            ReviewState::NotApplicable if row.command_text.is_some() => ("not_applicable", "a push gate has no reviewer step: the pre-push hook parks it for the user directly; whether the pushed commits were reviewed is a matter of the session's review record, not of this card"),
+            ReviewState::NotApplicable => ("not_applicable", "a question or request is answered, not reviewed"),
+            ReviewState::Unrecorded => ("unrecorded", "no structured review provenance on this row (a card older than the column, or one that never went through the review queue); this is not evidence that it was unreviewed — read the prompt"),
+        };
+        let review = json!({"status": status, "by": row.reviewed_by, "at": row.reviewed_at, "note": note});
+        let body_files = match command {
+            None => json!({"pinned": false, "paths": [], "current": "none", "note": "no command"}),
+            Some(command) => match self.body_files_snapshot(&row.session_id, command).await {
+                None => json!({"pinned": false, "paths": [], "current": "none", "note": "the command reads no body file"}),
+                Some(Err(path)) => json!({"pinned": row.body_sha256.is_some(), "paths": [path.clone()], "current": format!("missing {path}"),
+                    "note": "a body file the command reads does not exist now; an approval would refuse the run"}),
+                Some(Ok((now, files))) => {
+                    let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+                    let current = match row.body_sha256.as_deref() {
+                        None => "not_pinned",
+                        Some(then) if then == now => "unchanged",
+                        Some(_) => "changed",
+                    };
+                    json!({"pinned": row.body_sha256.is_some(), "paths": paths, "current": current,
+                        "digest": "body_sha256 is one sha256 over every body file's path and bytes in command order — not a plain file hash, so it will not match shasum; compare `current` instead",
+                        "note": match current {
+                            "unchanged" => "the body files are byte-identical to what was pinned when this parked (what the reviewer read, if there was a read)",
+                            "changed" => "a body file changed after it was pinned: an approval re-hashes and REFUSES the run (nothing is published); the agent must re-issue the command, which is re-read by the reviewer",
+                            "not_pinned" => "no body hash was recorded when this parked (it predates the check); the files are not re-checked at approval",
+                            _ => "",
+                        }})
+                }
+            },
+        };
+        let live_body = json!({"pinned": row.live_body_sha256.is_some(),
+            "note": if row.live_body_sha256.is_some() {
+                "live_body_sha256 is the remote body this edit replaces, as it was when the reviewer saw the diff; it is re-read at approval and the edit is refused if it changed"
+            } else { "not an edit of a live body, or none was recorded" }});
+        // The decision's actor rides a column the row projection leaves out
+        // (`decision_actor_json`, written by the delegated-answer claim).
+        let actor: Option<String> = match self.storage_handle().await {
+            Some(storage) => sqlx::query_scalar("SELECT decision_actor_json FROM session_tray WHERE choice_id = ?")
+                .bind(&row.choice_id)
+                .fetch_optional(storage.pool())
+                .await
+                .ok()
+                .flatten()
+                .flatten(),
+            None => None,
+        };
+        let decided_by = actor
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Value>(j).ok())
+            .and_then(|a| Some(format!("{} of {} (delegated controller)", a.get("slug")?.as_str()?, a.get("session_id")?.as_str()?)))
+            .or_else(|| row.picked_option.as_ref().map(|_| "the user".to_string()));
+        let decision = json!({"status": row.status, "picked": row.picked_option, "decided_by": decided_by, "answered_at": row.answered_at,
+            "note": "only the exact text `Approve` approves an Approve/Reject gate; `Reject — <reason>` carries the reason to the executor"});
+        json!({"review": review, "body_files": body_files, "live_body": live_body, "decision": decision})
     }
 
     async fn control_answer(

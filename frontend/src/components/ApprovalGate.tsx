@@ -4,7 +4,7 @@ import { Dialog } from "./ui/Dialog";
 import { errorMessage } from "../hooks/useInvoke";
 import { cn } from "../lib/cn";
 import { authorColorClass } from "./authorColor";
-import { formatRelative, formatTimestamp } from "../lib/time";
+import { formatRelative, formatTimestamp, parseUtcMs } from "../lib/time";
 import type { TrayRow } from "./HaltBanner";
 import { fileArgsInCommand } from "./FileViewerDialog";
 import { clampOverflows, useMeasuredClampOverflow } from "../hooks/useClampOverflow";
@@ -199,6 +199,17 @@ export function ApprovalGate({
         </p>
       )}
       <ClampedPrompt key={row.choice_id} text={gatePrompt(row)} />
+      {/* Feedback #143: the reviewer's read as data, beside the prose note in
+          the prompt. Nothing is shown for a row with no recorded provenance
+          — an unrecorded read is not an unreviewed card. */}
+      {reviewLine(row) && (
+        <p
+          data-testid="gate-review"
+          className="mt-1.5 font-code-sm text-code-sm text-on-surface-variant"
+        >
+          {reviewLine(row)}
+        </p>
+      )}
       {row.kind === "close" && isActing?.(row.agent) && (
         <p
           data-testid="close-still-acting"
@@ -464,6 +475,32 @@ function gatePrompt(row: TrayRow): string {
   const at = row.prompt.indexOf(fenced);
   const after = at >= 0 ? row.prompt.slice(at + fenced.length).trim() : "";
   return after ? `${question}\n${after}` : question;
+}
+
+/**
+ * The reviewer's read as one line (feedback #143), from the row's structured
+ * state — never parsed out of the prompt. `null` when there is nothing to
+ * say: a row whose provenance is unrecorded (older than the column, or never
+ * through the review queue) is not called unreviewed, and a question has no
+ * read. The time is UTC `HH:MMZ`, the way every host timestamp reads.
+ */
+function reviewLine(row: TrayRow): string | null {
+  switch (row.review_state) {
+    case "reviewed": {
+      const by = row.reviewed_by ?? "the reviewer";
+      const ms = row.reviewed_at ? parseUtcMs(row.reviewed_at) : NaN;
+      const at = Number.isFinite(ms) ? ` · ${new Date(ms).toISOString().slice(11, 16)}Z` : "";
+      return `Reviewed by ${by}${at}`;
+    }
+    case "skipped":
+      return "Review skipped — reached you without the reviewer's read (the request says why)";
+    case "queued_for_review":
+      return "Waiting for the reviewer's read";
+    case "not_applicable":
+      return row.command_text ? "No reviewer step (push gate) — it parks for you directly" : null;
+    default:
+      return null;
+  }
 }
 
 /**

@@ -722,6 +722,67 @@ async fn driver_answers_through_http_without_impersonating_human_or_running_twic
     f.end().await;
 }
 
+/// Feedback #143: a controller reading a card gets the review state and the
+/// body pin EXPLAINED beside the raw row — who read it and when, or why there
+/// is no read; whether the pinned body files still match (the compound
+/// path+bytes digest is not a file's sha256); and the decision — while the
+/// `body`/`sha256` the answer claim hashes stay the row alone.
+#[tokio::test]
+async fn driver_choice_read_explains_review_state_body_pin_and_decision() {
+    let f = driver_fixture(false).await;
+    let s = &f.state.storage;
+    let body_file = f._temp.path().join("body.md");
+    std::fs::write(&body_file, "first draft\n").unwrap();
+    let command = format!("gh pr edit 954 --body-file '{}'", body_file.display());
+    s.insert_tray_entry("s1", "edit954", "hands", crate::storage::QuestionKind::Approval, "Run gated command?",
+        Some(&["Approve".into(), "Reject".into()]), None, Some(&command)).await.unwrap();
+    let sha = f.state.bridge.body_files_digest("s1", &command).await.unwrap().unwrap();
+    s.set_tray_body_sha("edit954", &sha).await.unwrap();
+    sqlx::query("UPDATE session_tray SET reviewed_at = '2026-10-28T09:16:00.000Z', reviewed_by = 'eyes' WHERE choice_id = 'edit954'")
+        .execute(s.pool()).await.unwrap();
+
+    let read = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":"edit954"})).await.unwrap();
+    let explained = &read["result"]["explained"];
+    assert_eq!(explained["review"]["status"], "reviewed");
+    assert_eq!(explained["review"]["by"], "eyes");
+    assert_eq!(explained["review"]["at"], "2026-10-28T09:16:00.000Z");
+    assert_eq!(explained["body_files"]["pinned"], true);
+    assert_eq!(explained["body_files"]["paths"][0], body_file.display().to_string());
+    assert_eq!(explained["body_files"]["current"], "unchanged");
+    assert!(explained["body_files"]["digest"].as_str().unwrap().contains("not a plain file hash"), "{explained}");
+    assert_eq!(explained["decision"]["status"], "pending");
+    // The row itself — what the answer claim hashes — is untouched by the explanation.
+    let row: serde_json::Value = serde_json::from_str(read["result"]["body"].as_str().unwrap()).unwrap();
+    assert!(row.get("explained").is_none());
+    let raw = s.get_tray_entry("edit954").await.unwrap().unwrap();
+    use sha2::{Digest, Sha256};
+    assert_eq!(read["result"]["sha256"], format!("{:x}", Sha256::digest(serde_json::to_string(&raw).unwrap().as_bytes())));
+
+    // The file changes after the read: the card says so, and an approval would refuse.
+    std::fs::write(&body_file, "second draft\n").unwrap();
+    let read = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":"edit954"})).await.unwrap();
+    assert_eq!(read["result"]["explained"]["body_files"]["current"], "changed");
+    std::fs::remove_file(&body_file).unwrap();
+    let read = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":"edit954"})).await.unwrap();
+    assert!(read["result"]["explained"]["body_files"]["current"].as_str().unwrap().starts_with("missing"));
+
+    // A push gate has no reviewer step; a skipped read says so; an old
+    // prose-only card is "unrecorded", never called unreviewed.
+    s.insert_tray_entry("s1", "push1", "hands", crate::storage::QuestionKind::Approval, "Allow `git push` to `main` in this session's repo?",
+        Some(&["Approve".into(), "Reject".into()]), None, Some("git push origin abc123:refs/heads/main")).await.unwrap();
+    let read = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":"push1"})).await.unwrap();
+    assert_eq!(read["result"]["explained"]["review"]["status"], "not_applicable", "{}", read["result"]["explained"]);
+    s.insert_tray_entry("s1", "skipped", "hands", crate::storage::QuestionKind::Approval, "Run gated command?\n\n⚠ Review SKIPPED — a solo roster.",
+        Some(&["Approve".into(), "Reject".into()]), None, Some("gh issue comment 1 --body x")).await.unwrap();
+    let read = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":"skipped"})).await.unwrap();
+    assert_eq!(read["result"]["explained"]["review"]["status"], "skipped");
+    s.insert_tray_entry("s1", "old", "hands", crate::storage::QuestionKind::Approval, "Run gated command?\n\n✅ Review completed by eyes at 09:00Z",
+        Some(&["Approve".into(), "Reject".into()]), None, Some("gh issue comment 2 --body y")).await.unwrap();
+    let read = driver_rpc(&f.state, serde_json::json!({"action":"choice","choice_id":"old"})).await.unwrap();
+    assert_eq!(read["result"]["explained"]["review"]["status"], "unrecorded");
+    f.end().await;
+}
+
 #[tokio::test]
 async fn driver_live_hook_answer_records_actor_before_unblocking_the_waiter() {
     let f = driver_fixture(false).await;

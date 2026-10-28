@@ -1097,9 +1097,10 @@ impl SignalingBridge {
                         if let Some(prior) = upgraded.as_ref() {
                             if let Some(current) = storage.get_tray_entry(&existing).await? {
                                 if prior.reviewed_at.is_some() && prior.body_row_id == current.body_row_id {
+                                    let reader = prior.reviewed_by.as_deref().unwrap_or(&reviewer.slug);
                                     if self.promote_queued_row(&storage, session_id, &current,
                                         format!("User approval is now required for reviewed publication {existing}. Nothing ran."),
-                                        review_completed_note(Some(&reviewer.slug))).await {
+                                        review_completed_note(Some(reader)), Some(reader)).await {
                                         return Ok(ParkOutcome::Parked { gate_id: existing, existing: true, note: None });
                                     }
                                 } else if prior.body_row_id == current.body_row_id {
@@ -1515,8 +1516,12 @@ impl SignalingBridge {
                  withdrawn if they file a blocking finding. Do not re-issue it."
             ),
             ("pending", _) => format!(
-                "pending — `{command}` is still awaiting the user's approval. Do not \
-                 re-issue it; the outcome will arrive as an out-of-band message."
+                "pending — `{command}` is still awaiting the user's approval{}. Do not \
+                 re-issue it; the outcome will arrive as an out-of-band message.",
+                match (row.reviewed_by.as_deref(), row.reviewed_at.as_deref()) {
+                    (Some(slug), Some(at)) => format!(" (reviewed by {slug} at {})", window_time(at)),
+                    _ => String::new(),
+                }
             ),
             ("answered", _) => {
                 let picked = row.picked_option.as_deref().unwrap_or("");
@@ -2711,14 +2716,14 @@ impl SignalingBridge {
                 // Settlement is on the reviewer pump's completion path. The
                 // background tick owns execution; even a slow publish must
                 // not hold this turn (or another session's reviewer) open.
-                if !storage.mark_auto_gate_reviewed(&row.choice_id, body_row).await.unwrap_or(false) {
+                if !storage.mark_auto_gate_reviewed_by(&row.choice_id, body_row, Some(&reviewer.slug)).await.unwrap_or(false) {
                     if let Ok(Some(current)) = storage.get_tray_entry(&row.choice_id).await {
                         // A stronger request raced the old auto-mode snapshot.
                         // This completed review still covers the same body.
                         if current.approval_required && current.body_row_id == Some(body_row) {
                             self.promote_queued_row(&storage, session_id, &current,
                                 format!("Reviewed publication {} now requires the user's approval.", row.choice_id),
-                                review_completed_note(Some(&reviewer.slug))).await;
+                                review_completed_note(Some(&reviewer.slug)), Some(&reviewer.slug)).await;
                         }
                     }
                 }
@@ -2738,7 +2743,7 @@ impl SignalingBridge {
                     row.choice_id
                 )
             };
-            self.promote_queued_row(&storage, session_id, &row, notice, review_completed_note(Some(&reviewer.slug))).await;
+            self.promote_queued_row(&storage, session_id, &row, notice, review_completed_note(Some(&reviewer.slug)), Some(&reviewer.slug)).await;
         }
     }
 
@@ -2783,20 +2788,28 @@ impl SignalingBridge {
                 _ => None,
             };
             if let Some(reason) = reason {
-                let reviewer = self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug);
+                // The recorded reader first (the row came from `reviewed_auto_gates`,
+                // so its read is on it); the current reviewer only as a fallback.
+                let reviewer = match row.reviewed_by.clone() {
+                    Some(reader) => Some(reader),
+                    None => self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug),
+                };
                 self.promote_queued_row(&storage, &row.session_id, &row,
                     format!("Automatic publication {} now needs user approval: {reason}. Nothing ran.", row.choice_id),
-                    review_completed_note(reviewer.as_deref())).await;
+                    review_completed_note(reviewer.as_deref()), reviewer.as_deref()).await;
                 continue;
             }
             if self.execute_reviewed_auto_gate(&row).await {
                 ran += 1;
             } else if let Ok(Some(current)) = storage.get_tray_entry(&row.choice_id).await {
                 if current.approval_required && current.body_row_id == Some(body_row) {
-                    let reviewer = self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug);
+                    let reviewer = match row.reviewed_by.clone() {
+                        Some(reader) => Some(reader),
+                        None => self.queued_reviewer(&row.session_id, &row.agent).await.map(|r| r.slug),
+                    };
                     self.promote_queued_row(&storage, &row.session_id, &current,
                         format!("Reviewed publication {} now requires the user's approval.", row.choice_id),
-                        review_completed_note(reviewer.as_deref())).await;
+                        review_completed_note(reviewer.as_deref()), reviewer.as_deref()).await;
                 }
             }
         }
@@ -2831,7 +2844,7 @@ impl SignalingBridge {
             } else {
                 self.promote_queued_row(&storage, session, &row,
                     format!("Session agents changed; queued decision {} now needs your approval because its reviewer is no longer available. Nothing ran.", row.choice_id),
-                    review_skipped_note("the session's agents changed and no reviewer remains to read it")).await;
+                    review_skipped_note("the session's agents changed and no reviewer remains to read it"), None).await;
             }
         }
         Ok(())
@@ -2904,8 +2917,12 @@ impl SignalingBridge {
         row: &crate::storage::SessionTrayEntry,
         notice: String,
         review_note: String,
+        // The reviewer whose COMPLETED read this promotion follows — recorded
+        // on the card as `reviewed_at`/`reviewed_by` (0117, feedback #143);
+        // `None` is a skip and records nothing.
+        reviewed_by: Option<&str>,
     ) -> bool {
-        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id, Some(&review_note)).await.unwrap_or(0) != 1 {
+        if storage.promote_queued_gate_for_body(&row.choice_id, row.body_row_id, Some(&review_note), reviewed_by).await.unwrap_or(0) != 1 {
             return false;
         }
         let command = row.command_text.clone().unwrap_or_default();
@@ -2991,7 +3008,7 @@ impl SignalingBridge {
                 row.choice_id
             );
             if self.promote_queued_row(&storage, session_id, &row, notice,
-                review_skipped_note("released UNREVIEWED by the user-approved reviewer-down override")).await {
+                review_skipped_note("released UNREVIEWED by the user-approved reviewer-down override"), None).await {
                 released += 1;
             }
         }
@@ -3058,9 +3075,10 @@ fn review_completed_note(reviewer: Option<&str>) -> String {
 }
 
 /// The line a card gains when it reaches the user WITHOUT the reviewer's read
-/// (#127): the reason, never silence.
+/// (#127): the reason, never silence. Opens with the shared marker every
+/// review-state reader recognises (`storage::REVIEW_SKIPPED_MARKER`).
 fn review_skipped_note(why: &str) -> String {
-    format!("\n\n⚠ Review SKIPPED — {why}.")
+    format!("\n\n{} — {why}.", crate::storage::REVIEW_SKIPPED_MARKER)
 }
 
 fn parked_gate_text(
@@ -4914,8 +4932,11 @@ mod tests {
             }
             bridge.action_gate("s1".into(), "hands".into(), command.clone(), true).await.unwrap();
             let row = storage.get_tray_entry(&id).await.unwrap().unwrap();
-            assert!(row.approval_required);
-            assert!(row.reviewed_at.is_none());
+            assert!(row.approval_required, "the stronger request wins; `approval_required` is the one auto-run guard");
+            // Feedback #143: a card promoted after the completed read keeps
+            // the read as provenance; an unread queued row records nothing.
+            assert_eq!(row.reviewed_at.is_some(), reviewed, "{row:?}");
+            assert_eq!(row.reviewed_by.as_deref(), reviewed.then_some("eyes"));
             assert_eq!(row.status, if reviewed { "pending" } else { "queued" });
             // The later weaker request neither creates a new queue nor revokes approval.
             let reply = bridge.action_gate("s1".into(), "hands".into(), command.clone(), false).await.unwrap();
@@ -7183,6 +7204,9 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         let ready = storage.get_tray_entry(&id).await.unwrap().unwrap();
         assert_eq!(ready.status, "pending");
         assert!(ready.prompt.contains("Review completed by eyes"), "{}", ready.prompt);
+        // Feedback #143: the read is on the card as data too, not prose alone.
+        assert_eq!(ready.reviewed_by.as_deref(), Some("eyes"));
+        assert!(ready.reviewed_at.is_some() && ready.approval_required);
         assert_eq!(gate_opened_in(&drain(&mut ring)), vec![id.clone()]);
         let again = bridge.action_gate("s1".into(), "hands".into(), command, true).await.unwrap();
         assert_eq!(gate_id_in(&again), id);

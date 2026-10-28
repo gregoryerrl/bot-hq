@@ -248,12 +248,22 @@ pub struct SessionTrayView {
     /// these so "approved" is never shown over a run that failed.
     pub exit_code: Option<i64>,
     pub run_refusal: Option<String>,
+    /// The reviewer's read as data (0117, feedback #143): `reviewed`,
+    /// `skipped`, `queued_for_review`, `not_applicable` (a push gate, a
+    /// question) or `unrecorded` — derived by `storage::review_state`, the
+    /// same derivation the controller's `choice` explanation uses. The card
+    /// renders a line from it; `unrecorded` renders nothing (an unrecorded
+    /// read is not an unreviewed card).
+    pub review_state: String,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<String>,
 }
 
 impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
     fn from(e: crate::storage::SessionTrayEntry) -> Self {
         let options = e.options().unwrap_or_default();
         let scheduled = crate::signaling::is_scheduled(&e);
+        let review_state = crate::storage::review_state(&e).as_str().to_string();
         Self {
             id: e.id,
             session_id: e.session_id,
@@ -274,6 +284,9 @@ impl From<crate::storage::SessionTrayEntry> for SessionTrayView {
             stale: false,
             exit_code: e.exit_code,
             run_refusal: e.run_refusal,
+            review_state,
+            reviewed_by: e.reviewed_by,
+            reviewed_at: e.reviewed_at,
         }
     }
 }
@@ -394,6 +407,9 @@ mod tests {
             stale: false,
             exit_code: None,
             run_refusal: None,
+            review_state: "unrecorded".into(),
+            reviewed_by: None,
+            reviewed_at: None,
         }
     }
 
@@ -524,6 +540,7 @@ mod tests {
             run_started_at: None,
             approval_required: true,
             reviewed_at: None,
+            reviewed_by: None,
         };
         let view: SessionTrayView = entry.into();
         assert_eq!(view.urgent_reason.as_deref(), Some("prod budget overrun"));

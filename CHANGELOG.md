@@ -138,6 +138,18 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   wakes. The halt tools no longer attach the "you already had an unanswered
   halt" note when the new or the standing halt is temporary — re-declaring an
   external wait is the documented pattern, not a restatement (feedback #144).
+- A gate card records the reviewer's read as data. A queued publish promoted
+  after the reviewer's read keeps `reviewed_at` and gains `reviewed_by`
+  (migration 0117); both clear on every revision and stay empty when the read
+  was skipped. The card shows "Reviewed by eyes · 09:16Z", "Review skipped" or
+  "No reviewer step (push gate)"; a row with no recorded provenance shows
+  nothing rather than being called unreviewed. A controller's `choice` read
+  gains an `explained` object beside the raw row: the review state, the body
+  files the review covered and whether they still match now (the pinned
+  digest is one hash over every file's path and bytes, not a file's sha256; an
+  approval refuses a changed or missing file), the live body an edit replaces,
+  and the decision with who made it. `gate_status` names the reviewer on a
+  pending card (feedback #143).
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"

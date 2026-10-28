@@ -49,6 +49,33 @@ describe("ApprovalGate", () => {
     expect(screen.queryByTestId("gate-urgent-reason")).not.toBeInTheDocument();
   });
 
+  // Feedback #143: the reviewer's read is a structured line on the card —
+  // who and when — not only a sentence inside the prompt; a skipped read and
+  // a push gate (no reviewer step) say so; a row with no recorded provenance
+  // shows nothing rather than calling the card unreviewed.
+  it("shows the review provenance as data: reviewed by, skipped, or no reviewer step", () => {
+    const { rerender } = render(
+      <ApprovalGate
+        rows={[approval({ review_state: "reviewed", reviewed_by: "eyes", reviewed_at: "2026-10-28T09:16:00.000Z" })]}
+        onResolve={resolved()}
+      />,
+    );
+    expect(screen.getByTestId("gate-review")).toHaveTextContent("Reviewed by eyes · 09:16Z");
+    rerender(<ApprovalGate rows={[approval({ review_state: "skipped" })]} onResolve={resolved()} />);
+    expect(screen.getByTestId("gate-review")).toHaveTextContent("Review skipped");
+    rerender(
+      <ApprovalGate
+        rows={[approval({ review_state: "not_applicable", prompt: "Allow `git push` to `main` in this session's repo?", command_text: "git push origin abc:refs/heads/main" })]}
+        onResolve={resolved()}
+      />,
+    );
+    expect(screen.getByTestId("gate-review")).toHaveTextContent("No reviewer step (push gate)");
+    rerender(<ApprovalGate rows={[approval({ review_state: "unrecorded" })]} onResolve={resolved()} />);
+    expect(screen.queryByTestId("gate-review")).not.toBeInTheDocument();
+    rerender(<ApprovalGate rows={[approval()]} onResolve={resolved()} />);
+    expect(screen.queryByTestId("gate-review")).not.toBeInTheDocument();
+  });
+
   // Feedback #87 c: the executor's close card said the recap's detail was
   // "yours to act on while the card is up", and the user approved before it
   // had finished. The card now says when its declarer is still mid-turn — a

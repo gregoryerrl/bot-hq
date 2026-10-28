@@ -35,6 +35,13 @@ export type TrayRow = {
    *  ran, or why the run was refused; both absent until then. */
   exit_code?: number | null;
   run_refusal?: string | null;
+  /** The reviewer's read as data (feedback #143): `reviewed` (with who and
+   *  when), `skipped`, `queued_for_review`, `not_applicable` (a push gate has
+   *  no reviewer step; questions are not reviewed) or `unrecorded` — a row
+   *  with no structured provenance, which the card does not call unreviewed. */
+  review_state?: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
 };
 
 /**

@@ -412,10 +412,18 @@ pub struct SessionTrayEntry {
     /// Old serialized rows remain approval-required, never implicitly auto.
     #[serde(default = "approval_required_by_default")]
     pub approval_required: bool,
-    /// When the current body row cleared review for an automatic run (0104).
-    /// Reposting a revised body invalidates this proof.
+    /// When the reviewer's read of the current body completed (0104): on an
+    /// `approval_required = 0` row it is the automatic run's authority; on a
+    /// promoted user card it is provenance for the card (0117, feedback #143).
+    /// Reposting a revised body clears it.
     #[serde(default)]
     pub reviewed_at: Option<String>,
+    /// Who completed that read (0117), set and cleared with `reviewed_at`.
+    /// NULL for a skipped read and for rows older than the column — those are
+    /// not called unreviewed, their provenance is simply unrecorded.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub reviewed_by: Option<String>,
     /// The close card's approved intent (0105); retries cannot change it.
     #[serde(default)]
     #[sqlx(default)]

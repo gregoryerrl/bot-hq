@@ -2738,7 +2738,16 @@ stale: boolean;
  * yet, and on rows from before 0085/0087. The chat's gate chip reads
  * these so "approved" is never shown over a run that failed.
  */
-exit_code: number | null; run_refusal: string | null }
+exit_code: number | null; run_refusal: string | null; 
+/**
+ * The reviewer's read as data (0117, feedback #143): `reviewed`,
+ * `skipped`, `queued_for_review`, `not_applicable` (a push gate, a
+ * question) or `unrecorded` — derived by `storage::review_state`, the
+ * same derivation the controller's `choice` explanation uses. The card
+ * renders a line from it; `unrecorded` renders nothing (an unrecorded
+ * read is not an unreviewed card).
+ */
+review_state: string; reviewed_by: string | null; reviewed_at: string | null }
 /**
  * One scalar/env setting with provenance + inheritance.
  */
