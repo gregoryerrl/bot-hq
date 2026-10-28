@@ -183,7 +183,11 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   while the saved overrides were still loading, or after the read failed,
   replaced every other role's entries; the Roles controls now wait (and say
   why), Claude Config's Save refuses with the reason, and two quick edits in
-  Roles are written one after the other over a fresh read.
+  Roles are written one after the other over a fresh read. A
+  `claude-overrides.json` that exists but cannot be read or parsed is now an
+  error both editors show, with the file left as it is — it used to load as an
+  empty store, which the next save would have written over it. Spawning still
+  treats such a file as empty, so a participant is never blocked by it.
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"

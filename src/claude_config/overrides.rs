@@ -122,6 +122,32 @@ pub fn load_overrides(data_dir: &Path) -> ClaudeOverrides {
     }
 }
 
+/// Load the override store for an EDITOR — a caller that will write it back
+/// whole (`set_claude_overrides` replaces the file). **Fail-closed**, unlike
+/// [`load_overrides`]: a missing file is a fresh, empty store, but a file that
+/// cannot be read or parsed is an error naming it, so an editor never shows —
+/// and then saves — an empty store in its place (EYES `5e7ef17e`). Nothing is
+/// written here; the file's bytes are left as they were.
+pub fn load_overrides_checked(data_dir: &Path) -> Result<ClaudeOverrides> {
+    let path = config_path(data_dir);
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ClaudeOverrides::default()),
+        Err(e) => {
+            return Err(anyhow::Error::new(e).context(format!(
+                "{} could not be read, so it was not loaded for editing (nothing was changed)",
+                path.display()
+            )))
+        }
+    };
+    serde_json::from_str::<ClaudeOverrides>(&body).with_context(|| {
+        format!(
+            "{} is not a valid override store, so it was not loaded for editing (nothing was changed; fix or remove the file)",
+            path.display()
+        )
+    })
+}
+
 /// Persist the override store (pretty JSON, 0600). Creates the data dir.
 ///
 /// Written to a sibling temp file that is CREATED 0600 on unix, then renamed

@@ -7,7 +7,7 @@
 //!   merges into the `--settings`/env/mcp-config it injects.
 
 use crate::claude_config::{
-    config_dir, load_overrides, read_claude_config, save_overrides, set_bool, set_plugin_enabled,
+    config_dir, load_overrides_checked, read_claude_config, save_overrides, set_bool, set_plugin_enabled,
     set_string, ClaudeConfigView, ClaudeOverrides,
 };
 use crate::signaling::SignalingBridge;
@@ -33,7 +33,14 @@ pub async fn get_claude_overrides(
         .data_dir()
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?
         .clone();
-    Ok(load_overrides(&data_dir))
+    overrides_for_editor(&data_dir)
+}
+
+/// The store as the editors read it before they write it back whole: the
+/// checked read, so an unreadable or malformed file is an error the editors
+/// refuse to save over — never an empty store (EYES `5e7ef17e`).
+fn overrides_for_editor(data_dir: &std::path::Path) -> Result<ClaudeOverrides, AppError> {
+    Ok(load_overrides_checked(data_dir)?)
 }
 
 #[tauri::command]
@@ -105,5 +112,36 @@ mod tests {
             .insert("note".into(), SkillVisibility::UserInvocableOnly);
         save_overrides(dir.path(), &store).unwrap();
         assert_eq!(load_overrides(dir.path()), store);
+    }
+
+    /// EYES `5e7ef17e`: the editors write the store back WHOLE, so their read
+    /// must not turn a file it could not read into an empty store — that
+    /// empty store would be saved over it. Missing is a fresh, empty store; a
+    /// valid file reads as itself; a malformed or unreadable one is an error
+    /// naming the file, and its bytes are left as they were. (Spawn keeps the
+    /// tolerant loader: a bad file must not brick a participant.)
+    #[test]
+    fn the_editor_read_refuses_a_store_it_cannot_read() {
+        use crate::claude_config::overrides::config_path;
+        let dir = tempdir().unwrap();
+        assert_eq!(super::overrides_for_editor(dir.path()).unwrap(), ClaudeOverrides::default(), "missing: a fresh store");
+
+        let mut store = ClaudeOverrides::default();
+        store.per_role.entry("eyes".into()).or_default().mcp.insert("discord".into(), true);
+        save_overrides(dir.path(), &store).unwrap();
+        assert_eq!(super::overrides_for_editor(dir.path()).unwrap(), store, "valid: itself");
+
+        let path = config_path(dir.path());
+        let garbled = b"{\"per_role\": {\"eyes\": {\"mcp\": {\"discord\": tru";
+        std::fs::write(&path, garbled).unwrap();
+        let err = super::overrides_for_editor(dir.path()).expect_err("a malformed store is not an empty one");
+        assert!(format!("{err:?}").contains("claude-overrides.json"), "names the file: {err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), garbled, "the bytes are left as they were");
+        assert_eq!(load_overrides(dir.path()), ClaudeOverrides::default(), "spawn's loader stays tolerant");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        let err = super::overrides_for_editor(dir.path()).expect_err("an unreadable store is not an empty one");
+        assert!(format!("{err:?}").contains("claude-overrides.json"), "{err:?}");
     }
 }
