@@ -81,9 +81,8 @@ impl SignalingBridge {
     /// Create or replace `file_path` under `project`'s CL root with `content`.
     /// Missing parent folders are created; the write is atomic (tmp+rename in
     /// the same directory). On success the project index is rescanned
-    /// (warn-on-fail — the write itself already landed) and the session's
-    /// close-out gate is marked, so persisting a learnings delta through this
-    /// tool suppresses the close nudge exactly like `cl_rescan` does.
+    /// and the session's close-out gate is marked. A post-save index failure
+    /// reports the retained write/snapshot and requests rescan, not a re-write.
     pub async fn cl_write_file(
         self: &Arc<Self>,
         session_id: String,
@@ -247,7 +246,7 @@ impl SignalingBridge {
         // never wrote the whole file (`dropped_lines`).
         let mut session_start = None;
         if let Some(storage) = storage {
-            if let Ok(Some(row)) = storage.get_cl_index(&project, &file_path).await {
+            if let Some(row) = storage.get_cl_index(&project, &file_path).await? {
                 if !row.agent_visible {
                     anyhow::bail!(
                         "'{file_path}' is marked user-only (hidden from agents) — \
@@ -281,8 +280,13 @@ impl SignalingBridge {
             // write landed in between, and the replace guard must see the file
             // as it is when the write happens, not as it was a moment before.
             let _library_git = LIBRARY_GIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let root_real = project_root.canonicalize().with_context(|| {
-                format!("canonicalizing CL project root {}", project_root.display())
+            let root_real = project_root.canonicalize().map_err(|error| {
+                let message = if error.kind() == std::io::ErrorKind::NotFound {
+                    format!("project '{proj}' has no CL folder yet at {}. Create or register its folder in Context Library, then retry; nothing was written", project_root.display())
+                } else {
+                    format!("cannot open the CL folder for project '{proj}' at {}. Check that it is readable, then retry; nothing was written", project_root.display())
+                };
+                anyhow::Error::new(error).context(message)
             })?;
             let exists = root_real.join(&fp).exists();
             if !exists && matches!(op, WriteOp::Edit { .. }) {
@@ -473,16 +477,11 @@ impl SignalingBridge {
             .map(|d| crate::paths::Paths::for_data_dir(d.clone()).cl_dir.display().to_string())
             .unwrap_or_default();
         let concurrent = note_cl_writer(&library, &project, &file_path, &session_id);
-        if let Err(err) = self.cl_rescan(&project).await {
-            tracing::warn!(
-                %err,
-                project = %project,
-                file_path,
-                "cl_rescan failed after cl_write_file; index may be stale"
-            );
+        let index_error = self.cl_rescan(&project).await.err();
+        if index_error.is_none() {
+            // Only successful indexing earns successful-rescan bookkeeping.
+            self.mark_cl_rescan(&session_id).await;
         }
-        // Writing a CL delta lifts the close-out nudge, same as cl_rescan.
-        self.mark_cl_rescan(&session_id).await;
         // …and back the library up (rc3 P6). The remote existed and nothing
         // ever pushed to it, so the library drifted from the first session
         // onward — a snapshot, not a backup. Detached, because a network round
@@ -552,6 +551,10 @@ impl SignalingBridge {
                     msg.push_str(&status);
                 }
             }
+        }
+        if let Some(error) = index_error {
+            let error = crate::policy::secret_scan::redact_string(format!("{error:#}"));
+            anyhow::bail!("written but NOT indexed: {msg}. Indexing failed: {error}. The saved bytes are retained; snapshot status is shown above. Run cl_rescan for project {project:?}; do NOT repeat the write or append.");
         }
         Ok(msg)
     }
@@ -1955,6 +1958,72 @@ mod tests {
             .await
             .unwrap()
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_first_cl_write_registers_its_project_and_is_retrievable() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        std::fs::create_dir_all(tmp.path().join("library/projects/new-project")).unwrap();
+        assert!(storage.get_project("new-project").await.unwrap().is_none());
+        bridge.cl_write_file("s1".into(), "hands".into(), "new-project".into(), "focus.md".into(),
+            "# Focus\n\nOrchid retrieval sentinel.\n".into(), false, false).await.unwrap();
+        assert_eq!(storage.get_project("new-project").await.unwrap().unwrap().display_name, "new-project");
+        let atoms = bridge.cl_retrieve("new-project", "Orchid", None, 1000, false).await.unwrap();
+        assert!(atoms.iter().any(|a| a.body.contains("Orchid retrieval sentinel")));
+    }
+
+    #[tokio::test]
+    async fn cl_rescan_recovers_an_orphan_without_changing_bytes_or_project_metadata() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        let root = tmp.path().join("library/projects/orphan"); std::fs::create_dir_all(&root).unwrap();
+        let body = "# Old file\n\nOrchid orphan recovery.\n";
+        std::fs::write(root.join("focus.md"), body).unwrap();
+        let report = bridge.cl_rescan("orphan").await.unwrap();
+        assert_eq!(report.added, ["focus.md"]);
+        assert!(storage.get_cl_index("orphan", "focus.md").await.unwrap().is_some());
+        assert_eq!(std::fs::read_to_string(root.join("focus.md")).unwrap(), body);
+        let custom = tmp.path().join("custom-library"); std::fs::create_dir_all(&custom).unwrap();
+        std::fs::write(custom.join("notes.md"), body).unwrap();
+        storage.upsert_project("custom", "User display name", Some("/a/user/repo"), Some("User description"), Some(custom.to_str().unwrap())).await.unwrap();
+        let before = serde_json::to_value(storage.get_project("custom").await.unwrap()).unwrap();
+        bridge.cl_rescan("custom").await.unwrap();
+        let after = serde_json::to_value(storage.get_project("custom").await.unwrap()).unwrap();
+        assert_eq!(after, before, "rescan must not overwrite any registered metadata");
+        assert!(storage.get_cl_index("custom", "notes.md").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_indexing_reports_the_saved_append_without_claiming_rescan_success() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        let file = tmp.path().join("library/projects/bot-hq/focus.md");
+        std::fs::write(&file, "# Focus\n\nOriginal.\n").unwrap();
+        sqlx::query("CREATE TRIGGER reject_test_index BEFORE INSERT ON cl_index BEGIN SELECT RAISE(ABORT, 'test index unavailable'); END")
+            .execute(storage.pool()).await.unwrap();
+        let error = bridge.cl_write_file("s1".into(), "hands".into(), "bot-hq".into(), "focus.md".into(),
+            "Added exactly once.".into(), true, false).await.unwrap_err().to_string();
+        assert!(error.starts_with("written but NOT indexed:"), "{error}");
+        assert!(error.contains("cl_rescan") && error.contains("do NOT repeat"), "{error}");
+        assert!(error.contains("snapshot") || error.contains("not a git"), "snapshot outcome must be retained: {error}");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(saved.contains("Original.")); assert_eq!(saved.matches("Added exactly once.").count(), 1);
+        assert!(!bridge.session_close_gate.lock().await.get("s1").is_some_and(|s| s.cl_written));
+        sqlx::query("DROP TRIGGER reject_test_index").execute(storage.pool()).await.unwrap();
+        bridge.cl_rescan("bot-hq").await.unwrap();
+        assert!(storage.get_cl_index("bot-hq", "focus.md").await.unwrap().is_some());
+        assert_eq!(std::fs::read_to_string(file).unwrap(), saved);
+    }
+
+    #[tokio::test]
+    async fn refused_cl_write_does_not_register_a_project_or_create_its_folder() {
+        let (bridge, storage, tmp) = bridge_with_data_dir().await;
+        assert!(bridge.cl_write_file("s1".into(), "hands".into(), "new-project".into(), "../escape.md".into(),
+            "refused".into(), false, false).await.is_err());
+        let missing = bridge.cl_write_file("s1".into(), "hands".into(), "new-project".into(), "focus.md".into(),
+            "refused".into(), false, false).await.unwrap_err().to_string();
+        assert!(missing.contains("project 'new-project' has no CL folder yet"), "{missing}");
+        assert!(missing.contains("Context Library") && missing.contains("nothing was written"), "{missing}");
+        assert!(storage.get_project("new-project").await.unwrap().is_none());
+        assert!(!tmp.path().join("library/projects/new-project").exists());
     }
 
     #[tokio::test]

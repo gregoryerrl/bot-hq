@@ -108,6 +108,16 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
 
 ### Fixed
 
+- Context Library writes and rescans now register a missing project before
+  indexing its files, preserving existing project metadata and custom paths.
+  A file saved before an indexing failure returns "written but NOT indexed"
+  with a rescan recovery step and its snapshot status; it no longer reports
+  ordinary success or lifts the close-out learnings gate. User editor saves
+  also report this partial result. Rescanning recovers orphan files without
+  rewriting their contents. Driver tool guidance now names action-specific
+  arguments, history page limits and inferred project scope.
+  A missing project CL folder refuses with a create/register step instead of
+  a generic canonicalization error.
 - Managed Claude agents now neutralize settings-file effort pins and record
   the effort their process actually reports at startup and after a retry.
   On this installation, live effort changes under `afcf738` always failed

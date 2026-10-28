@@ -369,28 +369,28 @@ impl SignalingBridge {
     ///     (it points at a file the agent can no longer read) and report it
     pub async fn cl_rescan(&self, project: &str) -> Result<ClRescanReport> {
         let mut report = ClRescanReport::default();
-        // Clone the Storage handle out of the bridge mutex BEFORE calling
-        // cl_project_root, which also acquires the same mutex. tokio's Mutex
-        // is not reentrant — holding the guard across that call deadlocks.
+        // Release the bridge mutex before storage/filesystem work. Unlike the
+        // optional UI root helper, this path must propagate database errors:
+        // a failed lookup must not become a successful, empty rescan.
         let storage = match self.storage.lock().await.clone() {
             Some(s) => s,
             None => return Ok(report),
         };
-        let Some(root) = self.cl_project_root(project).await else {
+        let Some(data_dir) = self.data_dir.as_ref() else {
             return Ok(report);
         };
+        let root = storage.cl_path_for_project(data_dir, project).await?;
         if !root.is_dir() {
             return Ok(report);
         }
+        storage.ensure_project(project).await?;
 
         // The project's CODE repo (for atom->code stale-flagging): atoms cite
         // source paths relative to this root. None when unregistered / _globals,
         // so code_hash stays None and nothing is stale-flagged.
         let repo_root = storage
             .get_project(project)
-            .await
-            .ok()
-            .flatten()
+            .await?
             .and_then(|p| p.working_repo_path)
             .map(PathBuf::from);
 
@@ -586,6 +586,17 @@ mod tests {
         assert_eq!(retrieved[0].file_path, "notes.md");
 
         let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn cl_rescan_does_not_turn_database_failure_into_an_empty_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("library/projects/missing")).unwrap();
+        let storage = Storage::memory().await.unwrap();
+        let bridge = SignalingBridge::new_with(None, Some(tmp.path().into()));
+        bridge.set_storage(storage.clone()).await;
+        storage.pool().close().await;
+        assert!(bridge.cl_rescan("missing").await.is_err());
     }
 
     /// End-to-end P1.2: an atom that cites repo code is flagged stale once that

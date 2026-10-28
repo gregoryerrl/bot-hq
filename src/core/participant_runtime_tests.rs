@@ -1319,6 +1319,27 @@ async fn driver_create_reports_start_failure_and_rejects_invalid_picks_before_in
 }
 
 #[tokio::test]
+async fn driver_create_without_project_preserves_repo_based_scope_and_never_falls_into_driver_hq() {
+    let f = driver_fixture(false).await;
+    f.state.set_session_starter(Arc::new(|_| Box::pin(async { anyhow::bail!("fixture has no native runtime") })));
+    f.state.storage.upsert_project("driver-hq", "Driver HQ", None, None, None).await.unwrap();
+    let repo = f._temp.path().join("unregistered-repo"); std::fs::create_dir_all(repo.join(".git")).unwrap();
+    for (id, with_repo, expected) in [("inferred", true, Some("unregistered-repo")), ("mapped", true, Some("registered-name")), ("without-repo", false, None)] {
+        if id == "mapped" {
+            f.state.storage.upsert_project("registered-name", "Custom name", Some(repo.to_str().unwrap()), None, None).await.unwrap();
+        }
+        let mut args = serde_json::json!({"action":"create","session_id":id,"title":"Scope resolution","participants":[{"roleId":f.rows[0].role_id}],"use_worktree":false});
+        if with_repo { args["repo_path"] = serde_json::json!(repo); }
+        let result = driver_rpc(&f.state, args).await.unwrap();
+        assert_eq!(result["result"]["status"], "created");
+        let session = f.state.storage.get_session(id).await.unwrap().unwrap();
+        let (scope, _) = crate::core::session::resolve_session_project(&f.state.storage, session.base_repo_path.as_deref(), session.working_repo_path.as_deref().map(std::path::Path::new)).await;
+        assert_eq!(scope.as_deref(), expected);
+    }
+    f.end().await;
+}
+
+#[tokio::test]
 async fn driver_create_rechecks_the_claim_after_waiting_for_creation_ownership() {
     for revoked in [false, true] {
         let f = driver_fixture(false).await;

@@ -455,12 +455,22 @@ pub async fn cl_write_file(
     file_path: String,
     content: String,
 ) -> Result<(), AppError> {
+    cl_write_file_inner(Arc::clone(bridge.inner()), project, file_path, content).await
+}
+
+async fn cl_write_file_inner(
+    bridge: Arc<SignalingBridge>,
+    project: String,
+    file_path: String,
+    content: String,
+) -> Result<(), AppError> {
     let project_root = bridge
         .cl_project_root(&project)
         .await
         .ok_or_else(|| AppError::Internal("bridge data_dir not configured".into()))?;
-    let bridge = Arc::clone(bridge.inner());
-
+    let writer = bridge.clone();
+    let saved_project = project.clone();
+    let saved_file_path = file_path.clone();
     tokio::task::spawn_blocking(move || {
         let project_root_real = project_root
             .canonicalize()
@@ -472,13 +482,17 @@ pub async fn cl_write_file(
         // before, a save waited for the next agent write to sweep it into
         // that agent's snapshot, and could land between an agent's snapshot
         // and its write.
-        bridge
+        writer
             .cl_save_user_edit_blocking(&candidate_real, &content)
             .map_err(|e| AppError::Internal(format!("saving '{file_path}': {e}")))?;
         Ok::<(), AppError>(())
     })
     .await
-    .map_err(|e| AppError::Internal(format!("cl_write_file task panicked: {e}")))?
+    .map_err(|e| AppError::Internal(format!("cl_write_file task panicked: {e}")))??;
+    bridge.cl_rescan(&saved_project).await.map_err(|e| AppError::Internal(format!(
+        "written but NOT indexed: '{saved_file_path}' was saved. Indexing failed: {e}. Run cl_rescan for project {saved_project:?}; do not repeat the save to repair the index."
+    )))?;
+    Ok(())
 }
 
 /// Upsert a folder's description + tags (`cl_folders`). Used by the Context
@@ -1147,6 +1161,24 @@ mod tests {
         assert!(resolve_existing_cl_file(&root, "../escape.md").is_err());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn user_cl_save_indexes_an_orphan_and_reports_a_saved_but_unindexed_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library/projects/new-project"); std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("notes.md"); std::fs::write(&file, "old").unwrap();
+        let bridge = SignalingBridge::new_with(None, Some(tmp.path().into()));
+        let storage = Storage::memory().await.unwrap(); bridge.set_storage(storage.clone()).await;
+        cl_write_file_inner(bridge.clone(), "new-project".into(), "notes.md".into(), "# User notes\n\nOrchid saved.\n".into()).await.unwrap();
+        assert!(storage.get_cl_index("new-project", "notes.md").await.unwrap().is_some());
+        sqlx::query("UPDATE cl_index SET updated_at = '2000-01-01T00:00:00Z'").execute(storage.pool()).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_user_index BEFORE UPDATE ON cl_index BEGIN SELECT RAISE(ABORT, 'test index unavailable'); END")
+            .execute(storage.pool()).await.unwrap();
+        let body = "# Changed user title\n\nKept exactly as typed.\n";
+        let error = cl_write_file_inner(bridge, "new-project".into(), "notes.md".into(), body.into()).await.unwrap_err().to_string();
+        assert!(error.contains("written but NOT indexed") && error.contains("cl_rescan"), "{error}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), body);
     }
 
     #[test]

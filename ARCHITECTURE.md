@@ -2369,7 +2369,15 @@ cap, atomic tmp+rename, mkdir-p for new subfolders, an automatic
 an agent can't rewrite its own standing rules. The session-close learnings
 delta (≤~5 non-obvious one-liners appended under `notes.md`'s
 `## Learnings` with the full replacement body) rides this path, and a
-`cl_write_file` lifts the close-out nudge exactly like `cl_rescan`. (A
+successfully indexed `cl_write_file` lifts the close-out nudge exactly like `cl_rescan`.
+Rescan inserts a missing project row without replacing existing metadata or
+custom paths, so first writes and older orphan files become retrievable. A
+post-save indexing error returns **written but NOT indexed**, retains the saved
+bytes and snapshot status, and asks for rescan rather than another append.
+The user's editor save follows the same index/error behavior while preserving
+its user attribution and unredacted content. A missing project CL root is
+refused with an instruction to create/register its folder in Context Library;
+the write path does not create a new root or relax path guards. (A
 human-review-queue predecessor — migrations 0025→0035 — was removed
 2026-07-21: in practice its approvals were rubber-stamped, so the
 friction bought nothing. The user still edits any CL file in the

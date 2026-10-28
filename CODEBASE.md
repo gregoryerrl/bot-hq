@@ -354,7 +354,7 @@ lives in 14 registries on one struct (12 keyed by session id, 2 by `(session, ag
 | `src/signaling/bridge/turn_digest.rs` | the reviewer's turn digest (feedback #76 + #61): `ClWriteRecord` log (`log_cl_write`, cap 200), `DigestCursor`, `turn_digest` (peers' CL + doc writes, gates answered, running gates re-listed when finished) → `TurnDigest` the ring prefaces the first page with; `commit_turn_digest` on landing; `render_digest` (newest 30 / 6,000 bytes) | S |
 | `src/signaling/bridge/terminal_tools.rs` | `terminal_exec`/`terminal_read` over the PTY registry + Tool-Gate parity | M |
 | `src/signaling/bridge/feedback.rs` | `file_feedback` | S |
-| `src/signaling/bridge/cl_facade.rs` | `cl_index_search`/`cl_retrieve`/`cl_stale_refs`/folder/register/`cl_rescan` | L |
+| `src/signaling/bridge/cl_facade.rs` | `cl_index_search`/`cl_retrieve`/`cl_stale_refs`/folder/register/`cl_rescan` (insert-only project registration and orphan recovery; database failures propagate) | L |
 | `src/signaling/bridge/cl_write.rs` | `cl_write_file` + `cl_edit_file` over one guarded `write_cl` path (`WriteOp`), all under `LIBRARY_GIT_LOCK`: path guards, atomic write, shrink guard, explicit retirement declarations (`declared_retirements`, #119), `snapshot_outside_changes` (other pending changes, their own commit), the replace guard (`dropped_lines`, git blame from the session's last full write), `git_version_library` (the target alone, subject names agent + session + kind), `changed_lines`, push trigger, `sweep_project`; `save_user_edit` (the app's own save, committed as `(user)`) | L |
 | `src/signaling/bridge/cl_push.rs` | secret scan of tracked files, then `git push` of the library | M |
 | `src/signaling/bridge/cl_refs.rs` | code refs + sha256 | S |
@@ -510,7 +510,7 @@ applied migration again, add a forward no-op). One timestamp helper
 | `src/storage/participant_mutations.rs` | `prepare_participant_change` snapshots and appends/disables/resets atomically; initial invite frontier, frozen spawn inputs and delivered cursor, `publish_participant_spawn` (metadata + applied status under preparation revision/frontier), owned-field rollback, cold-start recovery, and close/reopen settlement; caller must hold the ring boundary | M |
 | `src/storage/account_marks.rs` | `account_marks` — the advisory usage-limit mark per Claude account (config dir + organisation, 0091) | S |
 | `src/storage/agent_config.rs` | `agent_configs` — read by the spawn chain. Its `emma\|brian\|rain` CHECK made it unreachable for every rc3 role slug until 0060 rebuilt the table without it; the test that pinned the refusal now pins the acceptance | S |
-| `src/storage/projects.rs` | `projects` registry, CL path resolution | M |
+| `src/storage/projects.rs` | `projects` registry, insert-only `ensure_project` for indexing without changing custom metadata, CL path resolution | M |
 | `src/storage/plugins.rs`, `src/storage/plugin_kv.rs` | plugin registry + per-plugin kv | M / S |
 | `src/storage/cl_index.rs`, `src/storage/cl_atoms.rs` | CL index/folders/reads; FTS5 atoms + `cl_retrieve` | M / M |
 | `migrations/` | ordered append-only SQL migrations (0056 absent) | — |

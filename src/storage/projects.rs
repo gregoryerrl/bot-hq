@@ -9,6 +9,15 @@ use std::path::PathBuf;
 const PROJECT_COLUMNS: &str = "name, display_name, working_repo_path, description, created_at, cl_path";
 
 impl Storage {
+    /// Supply the index's FK parent for a discovered CL folder, without
+    /// changing any metadata the user already registered for that project.
+    pub async fn ensure_project(&self, name: &str) -> Result<()> {
+        sqlx::query("INSERT INTO projects (name, display_name, created_at) VALUES (?, ?, ?) ON CONFLICT(name) DO NOTHING")
+            .bind(name).bind(name).bind(now_utc()).execute(&self.pool).await
+            .with_context(|| format!("ensuring CL project {name}"))?;
+        Ok(())
+    }
+
     /// Upsert a project. Used by the project-registration flow and by the
     /// startup backfill (which auto-creates a row for every projects/<name>
     /// directory it scans).
