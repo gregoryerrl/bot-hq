@@ -32,7 +32,7 @@
 //! **Loop guards.** A watch never matches its own session; `targets: null`
 //! means every other session WITHOUT a controller (two controllers watching
 //! "everything" never see each other); `kinds: null` means the attention kinds
-//! (`decision_pending`, `halt_declared`, `gate_urgent`, `health`,
+//! (`decision_pending`, `halt_declared`, `gate_urgent`, `health` when a runtime is `dead`,
 //! `session_closed`) — `message` and `activity` wake only when named; a row the
 //! controller itself caused (`source_session`/`source_slug`) never arms its
 //! watch; a wake's own notice is `watch_wake` and arms nothing; and a watch
@@ -43,7 +43,7 @@
 //! choice the controller made.
 
 use super::*;
-use crate::storage::{ControlActor, ControlEvent, ControlWatch, NewControlEvent, ATTENTION_KINDS, MAX_WATCHES_PER_CONTROLLER, WATCHABLE_KINDS};
+use crate::storage::{default_kind_matches, ControlActor, ControlEvent, ControlWatch, NewControlEvent, MAX_WATCHES_PER_CONTROLLER, WATCHABLE_KINDS};
 use anyhow::Context;
 
 /// How long the controller-session list is trusted.
@@ -80,7 +80,7 @@ pub fn watch_matches(watch: &ControlWatch, event: &ControlEvent, controller_sess
     }
     match &watch.kinds {
         Some(kinds) => kinds.iter().any(|k| *k == event.kind),
-        None => ATTENTION_KINDS.contains(&event.kind.as_str()),
+        None => default_kind_matches(&event.kind, event.detail.as_deref()),
     }
 }
 
@@ -372,6 +372,42 @@ impl WatchEngine {
         let resuming = watch.woke_for == Some(pending);
         if resuming && watch.wake_delivered_at.is_some() {
             return FireOutcome::AlreadyFired;
+        }
+        // **The pending event is re-validated against the watch's filter
+        // before a claim** (feedback #144). A persisted pending is what an
+        // earlier build armed: a default watch left on `health: stalled` must
+        // not wake now that the default is dead-only. An event the retention
+        // swept is judged by the kind kept on the watch — a swept default
+        // `health` is stale by construction (its detail is gone and it is
+        // old news). Disarmed without moving the ack cursor; the re-arm from
+        // the cursor then finds the next event that does match. A claimed
+        // wake is in flight and is left to its own path.
+        if !resuming {
+            let still_matches = match storage.control_event_by_id(pending).await {
+                Ok(Some(event)) => {
+                    let controllers = self.controller_sessions(storage).await;
+                    watch_matches(&watch, &event, &controllers)
+                }
+                Ok(None) => !(watch.kinds.is_none() && watch.pending_kind.as_deref() == Some("health")),
+                Err(_) => return FireOutcome::Deferred("pending event read failed"),
+            };
+            if !still_matches {
+                match storage.disarm_control_watch(watch.id, pending).await {
+                    Ok(true) => {
+                        tracing::info!(watch = watch.id, pending, "watch pending event no longer matches its filter; disarmed");
+                        // Boxed: the re-arm fires the next match through this
+                        // same function, a recursion the future's size cannot
+                        // hold inline. It ends: a re-arm arms only an event
+                        // that matches, and a matching pending never disarms.
+                        if let Err(e) = Box::pin(self.rearm_from_cursor(bridge, storage, watch.id)).await {
+                            tracing::warn!(?e, watch = watch.id, "re-arm after disarming failed");
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(_) => return FireOutcome::Deferred("disarm failed"),
+                }
+                return FireOutcome::NothingPending;
+            }
         }
         if resuming {
             // The ring's own receipt outlives a crash between its deal and
@@ -756,7 +792,23 @@ mod tests {
         assert!(watch_matches(&default, &ev("t", "decision_pending"), &controllers));
         assert!(watch_matches(&default, &ev("t", "halt_declared"), &controllers));
         assert!(watch_matches(&default, &ev("t", "gate_urgent"), &controllers));
-        assert!(watch_matches(&default, &ev("t", "health"), &controllers));
+        // Feedback #144: by default, health wakes only for a runtime that
+        // DIED. The stall watchdog flips running↔stalled at 90 s without a
+        // tool event — a slow reasoning model crosses that routinely, and
+        // each flip woke the controller (four paid turns in nine minutes).
+        let health = |detail: Option<&str>| {
+            let mut e = ev("t", "health");
+            e.detail = detail.map(str::to_string);
+            e
+        };
+        assert!(watch_matches(&default, &health(Some("dead")), &controllers), "a dead runtime wakes by default");
+        assert!(!watch_matches(&default, &health(Some("stalled")), &controllers), "a stall is transient");
+        assert!(!watch_matches(&default, &health(Some("running")), &controllers));
+        assert!(!watch_matches(&default, &health(Some("retrying")), &controllers), "the supervisor is handling it");
+        assert!(!watch_matches(&default, &health(None), &controllers), "no detail: nothing known to have died");
+        let every_transition = watch("a", None, Some(&["health"]));
+        assert!(watch_matches(&every_transition, &health(Some("stalled")), &controllers), "naming health keeps every transition");
+        assert!(watch_matches(&every_transition, &health(Some("running")), &controllers));
         assert!(watch_matches(&default, &ev("t", "session_closed"), &controllers));
         assert!(!watch_matches(&default, &ev("t", "message"), &controllers), "chatter does not wake by default");
         assert!(!watch_matches(&default, &ev("t", "activity"), &controllers));
@@ -894,6 +946,49 @@ mod tests {
             (event.session_id.as_str(), event.kind.as_str(), event.ref_id.as_deref()),
             ("late-target", "decision_pending", Some("late-choice")),
         );
+    }
+
+    /// Feedback #144, the upgrade residue: a default watch left PENDING on a
+    /// `health: stalled` row by a build that matched every health transition
+    /// must not wake under the dead-only rule. The retry re-validates the
+    /// persisted pending event, disarms it WITHOUT moving the ack cursor, and
+    /// the watch re-arms from that cursor — so a later `dead` wakes, and a
+    /// swept pending health row (kind kept on the watch, detail unknowable) is
+    /// treated as stale too. Explicit `kinds:["health"]` keeps the old wake.
+    #[tokio::test]
+    async fn a_pending_transient_health_event_is_disarmed_not_woken() {
+        let mut r = rig().await;
+        let actor = r.storage.controller_actor("c", "hands").await.unwrap();
+        let w = r.bridge.control_watch_upsert(&r.storage, &actor, "w1", None, None, true).await.unwrap();
+        let engine = r.journal.watches();
+        drain(&mut r.rx);
+        let stalled = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some("stalled".into()), ..Default::default() }).await.unwrap();
+        // Armed the way the old build left it.
+        assert!(r.storage.arm_control_watch(w.id, stalled, "health").await.unwrap());
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, w.id).await, FireOutcome::NothingPending, "a transient health state is not a wake");
+        let after = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!((after.pending_since, after.pending_kind.as_deref(), after.woke_for), (None, None, None), "disarmed: {after:?}");
+        assert_eq!(after.cursor, w.cursor, "the ack cursor is the controller's alone");
+        assert!(pump(&r.bridge, "c", &mut r.rx).await.is_empty(), "nothing handed to the ring");
+        // A dead runtime after it: found from the cursor and woken.
+        let dead = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some("dead".into()), ..Default::default() }).await.unwrap();
+        r.bridge.retry_all_watches().await;
+        let woke = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!((woke.pending_since, woke.woke_for), (Some(dead), Some(dead)), "{woke:?}");
+        assert_eq!(pump(&r.bridge, "c", &mut r.rx).await.len(), 1);
+        // A swept pending health row under default kinds: stale, disarmed.
+        let end = r.storage.max_control_event_id().await.unwrap();
+        r.bridge.control_watch_ack(&r.storage, &actor, "w1", end).await.unwrap();
+        let swept = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), detail: Some("stalled".into()), ..Default::default() }).await.unwrap();
+        assert!(r.storage.arm_control_watch(w.id, swept, "health").await.unwrap());
+        sqlx::query("DELETE FROM control_events WHERE id = ?").bind(swept).execute(r.storage.pool()).await.unwrap();
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, w.id).await, FireOutcome::NothingPending);
+        assert!(r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap().pending_since.is_none());
+        // Named health keeps every transition, persisted or live.
+        let named = r.bridge.control_watch_upsert(&r.storage, &actor, "w2", None, Some(vec!["health".to_string()]), true).await.unwrap();
+        let stalled2 = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some("stalled".into()), ..Default::default() }).await.unwrap();
+        assert!(r.storage.arm_control_watch(named.id, stalled2, "health").await.unwrap());
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, named.id).await, FireOutcome::Released);
     }
 
     /// The wake, end to end through the real bridge: a decision parked in the
@@ -1311,7 +1406,7 @@ mod tests {
         // The journal's start does the same for a journaled-but-unarmed row.
         let end = r.storage.max_control_event_id().await.unwrap();
         r.bridge.control_watch_ack(&r.storage, &actor, "w1", end).await.unwrap();
-        let unseen = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some("stalled".into()), ..Default::default() }).await.unwrap();
+        let unseen = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some("dead".into()), ..Default::default() }).await.unwrap();
         r.journal.start().await;
         let w4 = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
         assert_eq!((w4.pending_since, w4.woke_for), (Some(unseen), Some(unseen)), "{w4:?}");

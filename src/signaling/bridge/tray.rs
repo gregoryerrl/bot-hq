@@ -2582,6 +2582,11 @@ impl SignalingBridge {
     /// clears the slot); a paused session or one with a gate open does not
     /// wake. Timers are in-memory; [`Self::rearm_temporary_halts`] re-arms them
     /// at boot.
+    ///
+    /// Returns no prior halt (feedback #144): declaring an external wait over
+    /// a standing halt is the documented pattern — "re-declare if the wait
+    /// continues"; a background task that re-invokes the declarer "may
+    /// re-declare a fresher halt" — not a restatement of an unchanged state.
     pub async fn mark_temporary_halt(
         self: &Arc<Self>,
         session_id: String,
@@ -2589,7 +2594,6 @@ impl SignalingBridge {
         reason: String,
         wake_after: std::time::Duration,
     ) -> Option<String> {
-        let prior = self.pending_halt_prompt(&session_id, &agent).await;
         let wake_at = (chrono::Utc::now() + chrono::Duration::from_std(wake_after).unwrap_or_default())
             .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         self.emit_halt_row(
@@ -2601,7 +2605,7 @@ impl SignalingBridge {
         )
         .await;
         self.arm_temporary_halt(session_id, agent, wake_at);
-        prior
+        None
     }
 
     /// Spawn the timer for a temporary halt: wait until `wake_at` (or fire now
@@ -2884,6 +2888,13 @@ impl SignalingBridge {
         // The session's ONE halt slot (rc3 D35): a prior halt from this same
         // agent that the user has not acted on yet.
         let storage = self.storage.lock().await.clone()?;
+        // A standing TEMPORARY halt is an external wait, not a state the
+        // agent is restating (feedback #144): a plain halt declared over it
+        // says the wait ended and the floor is the user's. Read from the
+        // stored wake instant, never from the reason's words.
+        if storage.session_halt_wake_at(session_id).await.ok().flatten().is_some() {
+            return None;
+        }
         storage
             .session_halt(session_id)
             .await
@@ -4291,6 +4302,41 @@ mod tests {
             Some("temp.md ready, awaiting go"),
             "a second yield with no user reply must surface the earlier one"
         );
+    }
+
+    /// Feedback #144: re-declaring an EXTERNAL wait is the documented pattern
+    /// — "re-declare if the wait continues", "a background task may re-declare
+    /// a fresher halt" — not the treadmill the note is for. No prior is
+    /// reported when the new halt is temporary or the standing one is; a
+    /// plain halt over a plain halt still reports, and the temporary-ness is
+    /// read from the stored wake instant, never from the reason's words.
+    #[tokio::test]
+    async fn re_declaring_a_temporary_halt_is_not_a_repeat() {
+        let bridge = SignalingBridge::new();
+        let storage = crate::storage::Storage::memory().await.unwrap();
+        bridge.set_storage(storage.clone()).await;
+        storage.create_session("s1", "t", None).await.unwrap();
+        let hour = std::time::Duration::from_secs(3600);
+
+        // temporary → temporary (a background task re-invoked the declarer).
+        assert!(bridge.mark_temporary_halt("s1".into(), "hands".into(), "waiting on CI".into(), hour).await.is_none());
+        assert!(
+            bridge.mark_temporary_halt("s1".into(), "hands".into(), "still waiting on CI; telegram 44 received".into(), hour).await.is_none(),
+            "a refreshed external wait is not a repeat"
+        );
+        // temporary → plain: the wait is over, the floor is the user's.
+        assert!(
+            bridge.mark_awaiting_user("s1".into(), "hands".into(), "CI is red; your call".into()).await.is_none(),
+            "a plain halt over a temporary one is a new state, not a repeat"
+        );
+        // plain → plain: the treadmill, still reported.
+        assert_eq!(
+            bridge.mark_awaiting_user("s1".into(), "hands".into(), "CI is still red".into()).await.as_deref(),
+            Some("CI is red; your call")
+        );
+        // plain → temporary: starting an external wait over a plain halt is
+        // not restating it either.
+        assert!(bridge.mark_temporary_halt("s1".into(), "hands".into(), "re-running CI".into(), hour).await.is_none());
     }
 
     /// **A question is withdrawn by the participant that parked it, and by

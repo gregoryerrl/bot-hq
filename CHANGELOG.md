@@ -128,6 +128,16 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   goes to them now" for a controller's message too. Before this the task sat
   queued behind "nobody takes a turn until you do" until the controller sent it
   again (feedback #138).
+- A controller's default watch no longer wakes on every health flip. With
+  `kinds` omitted, `health` matches only a runtime that died; the stall
+  watchdog's running↔stalled flips (90 s without a tool event, routine for a
+  slow reasoning model) and the supervisor's retrying state wake nothing. A
+  watch that names `health` still receives every transition. A pending health
+  event an earlier build armed is re-checked on the next retry and disarmed
+  without moving the acknowledgement cursor; a dead runtime after it still
+  wakes. The halt tools no longer attach the "you already had an unanswered
+  halt" note when the new or the standing halt is temporary — re-declaring an
+  external wait is the documented pattern, not a restatement (feedback #144).
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"

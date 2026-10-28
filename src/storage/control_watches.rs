@@ -10,8 +10,27 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 
 /// The kinds a watch wakes on when it names none: the states that need a
-/// controller, not the running commentary.
+/// controller, not the running commentary. `health` is in the list for its
+/// terminal state only — see [`default_kind_matches`].
 pub const ATTENTION_KINDS: &[&str] = &["decision_pending", "halt_declared", "gate_urgent", "health", "session_closed"];
+
+/// The health detail a DEFAULT watch wakes for: the runtime is gone and the
+/// supervisor is not bringing it back. `running`/`stalled` flip on the stall
+/// watchdog's 90-second rule (a reasoning model crosses it without a tool
+/// event) and `retrying` is the supervisor's own recovery; none of them needs
+/// a controller's turn (feedback #144).
+pub const DEFAULT_HEALTH_WAKE_DETAIL: &str = "dead";
+
+/// Does an event of `kind` with `detail` match a watch that names NO kinds?
+/// The attention kinds, with `health` narrowed to [`DEFAULT_HEALTH_WAKE_DETAIL`].
+/// A watch that names `health` explicitly is matched by kind alone (every
+/// transition) — that is the caller's comparison, not this one.
+pub fn default_kind_matches(kind: &str, detail: Option<&str>) -> bool {
+    if !ATTENTION_KINDS.contains(&kind) {
+        return false;
+    }
+    kind != "health" || detail == Some(DEFAULT_HEALTH_WAKE_DETAIL)
+}
 /// Every kind the journal writes that a watch may name.
 pub const WATCHABLE_KINDS: &[&str] = &[
     "message", "decision_pending", "decision_resolved", "halt_declared", "halt_cleared", "session_closed", "health",
@@ -212,6 +231,27 @@ impl Storage {
         .bind(now_utc())
         .bind(id)
         .bind(event_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    /// Drop a pending event the watch's CURRENT filter no longer matches —
+    /// a `health: stalled` row a build that matched every health transition
+    /// left armed (feedback #144) — so the re-arm can look again from the
+    /// cursor. Only an UNCLAIMED pending (`woke_for` not this event): a claim
+    /// is a wake in flight and settles through its own path. The cursor is
+    /// untouched: it moves on the controller's explicit `ack` and nothing else.
+    pub async fn disarm_control_watch(&self, id: i64, pending_since: i64) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE control_watches SET pending_since = NULL, pending_kind = NULL, wake_attempt_at = NULL, updated_at = ? \
+             WHERE id = ? AND pending_since = ? AND (woke_for IS NULL OR woke_for <> ?)",
+        )
+        .bind(now_utc())
+        .bind(id)
+        .bind(pending_since)
+        .bind(pending_since)
         .execute(&self.pool)
         .await?
         .rows_affected()

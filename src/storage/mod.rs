@@ -28,7 +28,7 @@ mod account_marks;
 mod application_control;
 pub use application_control::{ControlActor, ControlAudit, CONTROL_GRANT, RELAY_GRANT};
 pub use control_events::{AttentionRow, ControlEvent, ControlEventPage, NewControlEvent, CONTROL_EVENT_MAX_ROWS, CONTROL_EVENT_PAGE_MAX, CONTROL_EVENT_RETENTION_DAYS, JOURNAL_SESSION};
-pub use control_watches::{ControlWatch, ATTENTION_KINDS, MAX_WATCHES_PER_CONTROLLER, WAKE_ATTEMPT_LEASE_SECS, WATCHABLE_KINDS};
+pub use control_watches::{default_kind_matches, ControlWatch, ATTENTION_KINDS, DEFAULT_HEALTH_WAKE_DETAIL, MAX_WATCHES_PER_CONTROLLER, WAKE_ATTEMPT_LEASE_SECS, WATCHABLE_KINDS};
 mod codex_hook_trust;
 mod control_events;
 mod control_watches;
