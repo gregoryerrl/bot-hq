@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTauriQuery, useTauriMutation } from "../hooks/useInvoke";
 import { lineDiff, normalizeLineEndings } from "../lib/lineDiff";
 import { Button } from "../components/ui/Button";
@@ -404,30 +404,51 @@ function RoleForm({
   // spawn applies, so display and resolution cannot disagree. Read-modify-write
   // of the whole store via the existing set_claude_overrides; refetch keeps
   // every other reader in sync.
-  const { data: claudeOverrides, refetch: refetchOverrides } =
-    useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  const overridesQuery = useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  const { data: claudeOverrides, refetch: refetchOverrides } = overridesQuery;
   const setOverrides = useTauriMutation<null, { overrides: ClaudeOverrides }>(
     "set_claude_overrides",
   );
+  // `set_claude_overrides` REPLACES the whole store, so a write built from a
+  // store nobody read — still loading, or a read that failed — would erase
+  // `_all` and every other role's entries (EYES 3c50b179). Nothing here
+  // writes until a complete read succeeded, and this form's writes run one at
+  // a time, each over a FRESH read, so two quick edits (an effort, then a
+  // server) never write each other's stale snapshot.
+  const storeReady = overridesQuery.isSuccess && claudeOverrides !== undefined;
+  const storeNote = storeReady
+    ? null
+    : overridesQuery.isError
+      ? `Your saved Claude overrides could not be read (${overridesQuery.error?.message ?? "unknown error"}); nothing here is saved until they load.`
+      : "Loading your saved Claude overrides… nothing here is saved until they load.";
+  const writes = useRef<Promise<unknown>>(Promise.resolve());
+  const writeOverrides = (edit: (store: ClaudeOverrides) => ClaudeOverrides) => {
+    const run = writes.current.then(async () => {
+      const fresh = await refetchOverrides();
+      if (!fresh.isSuccess || fresh.data === undefined) {
+        throw fresh.error ?? { kind: "Internal", message: "the saved Claude overrides could not be read" };
+      }
+      await setOverrides.mutateAsync({ overrides: edit(fresh.data) });
+      await refetchOverrides();
+    });
+    writes.current = run.catch(() => undefined);
+    return run;
+  };
   const [savingEffort, setSavingEffort] = useState(false);
   const roleEffort = role
     ? roleDefaultEffort(claudeOverrides?.per_role?.[role.slug])
     : DEFAULT_EFFORT;
   const saveRoleEffort = async (value: string) => {
-    if (!role) return;
+    if (!role || !storeReady) return;
     setSavingEffort(true);
     try {
-      const perRole = { ...(claudeOverrides?.per_role ?? {}) };
-      // A choice decomposes to the stored pair: "ultracode" →
-      // {effort:"xhigh", ultracode:true}; a level → {effort, ultracode:false}.
-      const entry = { ...(perRole[role.slug] ?? {}), ...pickToFields(value) };
-      perRole[role.slug] = entry;
-      const store: ClaudeOverrides = {
-        ...(claudeOverrides ?? {}),
-        per_role: perRole,
-      };
-      await setOverrides.mutateAsync({ overrides: store });
-      await refetchOverrides();
+      await writeOverrides((store) => {
+        const perRole = { ...(store.per_role ?? {}) };
+        // A choice decomposes to the stored pair: "ultracode" →
+        // {effort:"xhigh", ultracode:true}; a level → {effort, ultracode:false}.
+        perRole[role.slug] = { ...(perRole[role.slug] ?? {}), ...pickToFields(value) };
+        return { ...store, per_role: perRole };
+      });
     } catch (e) {
       setError(e as AppError);
     } finally {
@@ -442,21 +463,18 @@ function RoleForm({
   const { data: claudeConfig } = useTauriQuery<ClaudeConfigView>("claude_config_read");
   const [savingMcp, setSavingMcp] = useState(false);
   const saveRoleMcp = async (server: string, pick: McpPick) => {
-    if (!role) return;
+    if (!role || !storeReady) return;
     setSavingMcp(true);
     try {
-      const perRole = { ...(claudeOverrides?.per_role ?? {}) };
-      const entry: AgentOverride = { ...(perRole[role.slug] ?? {}) };
-      const mcp = { ...(entry.mcp ?? {}) };
-      if (pick === "inherit") delete mcp[server];
-      else mcp[server] = pick === "on";
-      perRole[role.slug] = { ...entry, mcp };
-      const store: ClaudeOverrides = {
-        ...(claudeOverrides ?? {}),
-        per_role: perRole,
-      };
-      await setOverrides.mutateAsync({ overrides: store });
-      await refetchOverrides();
+      await writeOverrides((store) => {
+        const perRole = { ...(store.per_role ?? {}) };
+        const entry: AgentOverride = { ...(perRole[role.slug] ?? {}) };
+        const mcp = { ...(entry.mcp ?? {}) };
+        if (pick === "inherit") delete mcp[server];
+        else mcp[server] = pick === "on";
+        perRole[role.slug] = { ...entry, mcp };
+        return { ...store, per_role: perRole };
+      });
     } catch (e) {
       setError(e as AppError);
     } finally {
@@ -696,7 +714,7 @@ function RoleForm({
             <FieldLabel>Default effort</FieldLabel>
             <select
               value={roleEffort}
-              disabled={savingEffort}
+              disabled={savingEffort || !storeReady}
               onChange={(e) => void saveRoleEffort(e.target.value)}
               className={fieldClass}
               aria-label="Default effort"
@@ -721,6 +739,11 @@ function RoleForm({
               dialog picks otherwise. New roles start at {DEFAULT_EFFORT};
               sessions record the resolved value on their spawn badge.
             </span>
+            {storeNote && (
+              <span data-testid="role-overrides-store" className="mt-1 block font-body-md text-body-md text-warning">
+                {storeNote}
+              </span>
+            )}
           </label>
         )}
       </div>
@@ -733,6 +756,7 @@ function RoleForm({
           canEdit={role.capabilities.includes(EDIT_FILES)}
           global={claudeOverrides?._all?.mcp ?? {}}
           own={claudeOverrides?.per_role?.[role.slug]?.mcp ?? {}}
+          ready={storeReady}
           saving={savingMcp}
           onPick={(server, pick) => void saveRoleMcp(server, pick)}
         />
@@ -1050,6 +1074,7 @@ function RoleMcpServers({
   canEdit,
   global,
   own,
+  ready,
   saving,
   onPick,
 }: {
@@ -1057,6 +1082,8 @@ function RoleMcpServers({
   canEdit: boolean;
   global: Partial<{ [key in string]: boolean }>;
   own: Partial<{ [key in string]: boolean }>;
+  /** The saved store was read: until then nothing is shown as resolved and nothing saves. */
+  ready: boolean;
   saving: boolean;
   onPick: (server: string, pick: McpPick) => void;
 }) {
@@ -1078,18 +1105,18 @@ function RoleMcpServers({
       <FieldLabel>MCP servers</FieldLabel>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         {servers.map((server) => (
-          <label key={server} className="flex items-center gap-2">
-            <span className="w-32 shrink-0 truncate font-code-sm text-code-sm text-on-surface" title={server}>
+          <label key={server} className="flex min-w-0 items-center gap-2">
+            <span className="w-32 min-w-0 shrink truncate font-code-sm text-code-sm text-on-surface" title={server}>
               {server}
             </span>
             <select
               value={pickOf(server)}
-              disabled={saving}
+              disabled={saving || !ready}
               onChange={(e) => onPick(server, e.target.value as McpPick)}
-              className={fieldClass}
+              className={cn(fieldClass, "min-w-0 flex-1")}
               aria-label={`MCP server ${server}`}
             >
-              <option value="inherit">Inherit ({inherited(server)})</option>
+              <option value="inherit">{ready ? `Inherit (${inherited(server)})` : "Inherit"}</option>
               <option value="on">Forward for this role</option>
               <option value="off">Off for this role</option>
             </select>

@@ -171,6 +171,12 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   participants get no user MCP servers, and the change reaches participants
   spawned after it. Before this a Driver asked to check a team channel had no
   Discord (feedback #141).
+- Settings → Roles and Settings → Claude Config never save Claude overrides
+  over a store they have not read. Both write the whole store, so an edit made
+  while the saved overrides were still loading, or after the read failed,
+  replaced every other role's entries; the Roles controls now wait (and say
+  why), Claude Config's Save refuses with the reason, and two quick edits in
+  Roles are written one after the other over a fresh read.
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"

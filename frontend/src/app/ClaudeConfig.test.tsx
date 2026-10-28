@@ -235,6 +235,27 @@ describe("Claude Config panel", () => {
     expect(screen.getByText(/Codex participants get none/i)).toBeInTheDocument();
   });
 
+  // EYES 3c50b179's class, on this tab: `set_claude_overrides` replaces the
+  // whole store, so an override edit saved while the store was never read
+  // (the read failed) would erase every role's entries. The override write
+  // is refused, and the bar says why; nothing else is lost.
+  it("never saves overrides over a store it could not read", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "claude_config_read") return CONFIG;
+      if (cmd === "get_claude_overrides") throw { kind: "Internal", message: "claude-overrides.json is unreadable" };
+      if (cmd === "list_roles") return ROLES;
+      if (cmd === "list_sessions") return [];
+      return undefined;
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /skills/i }));
+    const select = await screen.findByRole("combobox");
+    fireEvent.change(select, { target: { value: "user-invocable-only" } });
+    fireEvent.click(await screen.findByRole("button", { name: /save changes/i }));
+    expect(await screen.findByText(/could not be read/i)).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_claude_overrides", expect.anything());
+  });
+
   it("carries per_role entries through a save untouched", async () => {
     // The section that edited per_role is gone, but the store it edited is
     // shared with the Roles tab — a save from THIS tab (which only patches

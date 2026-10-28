@@ -623,6 +623,9 @@ describe("default effort (no-inherit, 2026-08-25)", () => {
       'option[value="ultracode"]',
     ) as HTMLOptionElement;
     expect(ultracode.disabled).toBe(false);
+    // The control saves only over a store it has read (EYES 3c50b179): wait
+    // for the read, as a user waits for the select to enable.
+    await waitFor(() => expect(select).not.toBeDisabled());
 
     fireEvent.change(select, { target: { value: "ultracode" } });
     // xhigh is ultracode's implied level, stored explicitly so even a spawn
@@ -714,6 +717,100 @@ describe("MCP servers per role (feedback #141)", () => {
           }),
         }),
       ),
+    );
+  });
+
+  // EYES 3c50b179: `set_claude_overrides` REPLACES the whole store, so a
+  // write built from a store that was never read (still loading, or the read
+  // failed) erases `_all` and every other role's entries. Nothing writes
+  // until a complete read succeeded — the controls say why they wait — and
+  // a loaded store is carried through whole.
+  it("writes nothing while the saved overrides are still loading", async () => {
+    mockBackend([role(), EYES]);
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd, args, opts) => {
+      if (cmd === "claude_config_read") return { core_knobs: [], mcp_servers: SERVERS };
+      if (cmd === "get_claude_overrides") return new Promise(() => {});
+      return base!(cmd, args, opts);
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    expect(discord).toBeDisabled();
+    expect(screen.getByTestId("role-overrides-store")).toHaveTextContent(/loading/i);
+    expect(Array.from(discord.options)[0]?.textContent).not.toMatch(/forwarded/);
+    fireEvent.change(discord, { target: { value: "on" } });
+    const effort = screen.getByLabelText("Default effort") as HTMLSelectElement;
+    expect(effort).toBeDisabled();
+    fireEvent.change(effort, { target: { value: "high" } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_claude_overrides", expect.anything());
+  });
+
+  it("writes nothing when the saved overrides could not be read, and says so", async () => {
+    mockBackend([role(), EYES]);
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd, args, opts) => {
+      if (cmd === "claude_config_read") return { core_knobs: [], mcp_servers: SERVERS };
+      if (cmd === "get_claude_overrides") throw { kind: "Internal", message: "claude-overrides.json is unreadable" };
+      return base!(cmd, args, opts);
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    await waitFor(() => expect(screen.getByTestId("role-overrides-store")).toHaveTextContent(/could not be read/i));
+    expect(discord).toBeDisabled();
+    fireEvent.change(discord, { target: { value: "off" } });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockInvoke).not.toHaveBeenCalledWith("set_claude_overrides", expect.anything());
+  });
+
+  it("carries the whole loaded store through an MCP edit", async () => {
+    const stored = {
+      _all: { effort: "high", mcp: { clockify: false } },
+      per_role: { hands: { effort: "max", mcp: { discord: false } }, eyes: { effort: "low" } },
+    };
+    mockBackendWithServers([role(), EYES], stored);
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    await waitFor(() => expect(discord).not.toBeDisabled());
+    fireEvent.change(discord, { target: { value: "on" } });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("set_claude_overrides", {
+        overrides: {
+          _all: { effort: "high", mcp: { clockify: false } },
+          per_role: { hands: { effort: "max", mcp: { discord: false } }, eyes: { effort: "low", mcp: { discord: true } } },
+        },
+      }),
+    );
+  });
+
+  it("writes two quick edits one after the other, each over a fresh read", async () => {
+    let store: Record<string, unknown> = { per_role: { eyes: { effort: "low" } }, _all: { mcp: { clockify: true } } };
+    mockBackend([role(), EYES]);
+    const base = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd, args, opts) => {
+      if (cmd === "claude_config_read") return { core_knobs: [], mcp_servers: SERVERS };
+      if (cmd === "get_claude_overrides") return JSON.parse(JSON.stringify(store));
+      if (cmd === "set_claude_overrides") {
+        await new Promise((r) => setTimeout(r, 15));
+        store = (args as { overrides: Record<string, unknown> }).overrides;
+        return null;
+      }
+      return base!(cmd, args, opts);
+    });
+    renderPanel();
+    fireEvent.click(await screen.findByText("EYES"));
+    const discord = (await screen.findByLabelText("MCP server discord")) as HTMLSelectElement;
+    await waitFor(() => expect(discord).not.toBeDisabled());
+    fireEvent.change(screen.getByLabelText("Default effort"), { target: { value: "high" } });
+    fireEvent.change(discord, { target: { value: "on" } });
+    await waitFor(() =>
+      expect(store).toEqual({
+        per_role: { eyes: { effort: "high", ultracode: false, mcp: { discord: true } } },
+        _all: { mcp: { clockify: true } },
+      }),
     );
   });
 

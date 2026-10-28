@@ -80,8 +80,13 @@ export function ClaudeConfigPanel() {
     isLoading: configLoading,
     refetch: refetchConfig,
   } = useTauriQuery<ClaudeConfigView>("claude_config_read");
-  const { data: serverOverrides, refetch: refetchOverrides } =
-    useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  const overridesQuery = useTauriQuery<ClaudeOverrides>("get_claude_overrides");
+  const { data: serverOverrides, refetch: refetchOverrides } = overridesQuery;
+  // `set_claude_overrides` replaces the whole store, and the draft starts from
+  // `{}` until the read lands: an override edit is saved only over a store
+  // that was actually read, or a pending/failed read would erase every role's
+  // entries (EYES 3c50b179).
+  const overridesReady = overridesQuery.isSuccess && serverOverrides !== undefined;
   const save = useTauriMutation<void, { overrides: ClaudeOverrides }>(
     "set_claude_overrides",
   );
@@ -195,6 +200,14 @@ export function ClaudeConfigPanel() {
 
   const onSave = async () => {
     setSaveError(null);
+    if (overridesDirty && !overridesReady) {
+      setSaveError(
+        overridesQuery.isError
+          ? `your saved overrides could not be read (${overridesQuery.error?.message ?? "unknown error"}), so nothing was saved — writing now would replace every role's entries`
+          : "your saved overrides are still loading, so nothing was saved yet",
+      );
+      return;
+    }
     try {
       // Flush staged global settings.json edits, then per-agent overrides.
       for (const [key, value] of Object.entries(pendingStrings)) {
