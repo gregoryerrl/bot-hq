@@ -134,8 +134,11 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   slow reasoning model) and the supervisor's retrying state wake nothing. A
   watch that names `health` still receives every transition. A pending health
   event an earlier build armed is re-checked on the next retry and disarmed
-  without moving the acknowledgement cursor; a dead runtime after it still
-  wakes. The halt tools no longer attach the "you already had an unanswered
+  without moving the acknowledgement cursor; one it had already claimed but
+  never delivered is retired the same way once no live attempt holds it (a
+  wake the controller was actually dealt stays delivered), so a boot no longer
+  respawns the controller for it; a dead runtime after it still wakes. The
+  halt tools no longer attach the "you already had an unanswered
   halt" note when the new or the standing halt is temporary — re-declaring an
   external wait is the documented pattern, not a restatement (feedback #144).
 - A gate card records the reviewer's read as data. A queued publish promoted

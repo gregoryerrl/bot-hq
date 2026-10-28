@@ -56,6 +56,14 @@ const REARM_PAGE: usize = 500;
 /// periodic retry fires it after the gap.
 pub const WAKE_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// An attempt stamped before this has lost its lease
+/// ([`crate::storage::WAKE_ATTEMPT_LEASE_SECS`]): what a resume and a stale
+/// claim's retirement both compare against.
+fn wake_lease_cutoff() -> String {
+    (chrono::Utc::now() - chrono::Duration::seconds(crate::storage::WAKE_ATTEMPT_LEASE_SECS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// Whether `event` is one `watch` subscribes to. Pure; `controller_sessions`
 /// are the open sessions holding a controller, excluded from a `targets: null`
 /// watch.
@@ -373,47 +381,12 @@ impl WatchEngine {
         if resuming && watch.wake_delivered_at.is_some() {
             return FireOutcome::AlreadyFired;
         }
-        // **The pending event is re-validated against the watch's filter
-        // before a claim** (feedback #144). A persisted pending is what an
-        // earlier build armed: a default watch left on `health: stalled` must
-        // not wake now that the default is dead-only. An event the retention
-        // swept is judged by the kind kept on the watch — a swept default
-        // `health` is stale by construction (its detail is gone and it is
-        // old news). Disarmed without moving the ack cursor; the re-arm from
-        // the cursor then finds the next event that does match. A claimed
-        // wake is in flight and is left to its own path.
-        if !resuming {
-            let still_matches = match storage.control_event_by_id(pending).await {
-                Ok(Some(event)) => {
-                    let controllers = self.controller_sessions(storage).await;
-                    watch_matches(&watch, &event, &controllers)
-                }
-                Ok(None) => !(watch.kinds.is_none() && watch.pending_kind.as_deref() == Some("health")),
-                Err(_) => return FireOutcome::Deferred("pending event read failed"),
-            };
-            if !still_matches {
-                match storage.disarm_control_watch(watch.id, pending).await {
-                    Ok(true) => {
-                        tracing::info!(watch = watch.id, pending, "watch pending event no longer matches its filter; disarmed");
-                        // Boxed: the re-arm fires the next match through this
-                        // same function, a recursion the future's size cannot
-                        // hold inline. It ends: a re-arm arms only an event
-                        // that matches, and a matching pending never disarms.
-                        if let Err(e) = Box::pin(self.rearm_from_cursor(bridge, storage, watch.id)).await {
-                            tracing::warn!(?e, watch = watch.id, "re-arm after disarming failed");
-                        }
-                    }
-                    Ok(false) => {}
-                    Err(_) => return FireOutcome::Deferred("disarm failed"),
-                }
-                return FireOutcome::NothingPending;
-            }
-        }
         if resuming {
             // The ring's own receipt outlives a crash between its deal and
             // the delivery marker: a notice already dealt to the controller
-            // is a delivered wake. An unreadable receipt is unknown — it
-            // defers, it never authorizes another release (eyes-2 `4fe7a60d`).
+            // is a delivered wake — whatever the filter says of it now. An
+            // unreadable receipt is unknown — it defers, it never authorizes
+            // another release (eyes-2 `4fe7a60d`).
             match storage.wake_notice_message_id(&watch, pending).await {
                 Ok(Some(notice)) => match storage.wake_notice_delivered(watch.participant_id, notice).await {
                     Ok(true) => {
@@ -426,9 +399,54 @@ impl WatchEngine {
                 Ok(None) => {}
                 Err(_) => return FireOutcome::Deferred("notice lookup failed"),
             }
+        }
+        // **The pending event is re-validated against the watch's filter
+        // before a claim, or before an undelivered claim resumes** (feedback
+        // #144, EYES `0d2d8ae5`). A persisted pending is what an earlier build
+        // armed — and may have claimed: a default watch left on
+        // `health: stalled` must not wake now that the default is dead-only.
+        // An event the retention swept is judged by the kind kept on the
+        // watch — a swept default `health` is stale by construction (its
+        // detail is gone and it is old news). An unclaimed one is disarmed; an
+        // undelivered claim is retired under its lease (a live attempt keeps
+        // it). Neither moves the ack cursor; the re-arm from the cursor then
+        // finds the next event that does match.
+        let still_matches = match storage.control_event_by_id(pending).await {
+            Ok(Some(event)) => {
+                let controllers = self.controller_sessions(storage).await;
+                watch_matches(&watch, &event, &controllers)
+            }
+            Ok(None) => !(watch.kinds.is_none() && watch.pending_kind.as_deref() == Some("health")),
+            Err(_) => return FireOutcome::Deferred("pending event read failed"),
+        };
+        if !still_matches {
+            let dropped = if resuming {
+                storage.retire_stale_wake_claim(watch.id, pending, &wake_lease_cutoff()).await
+            } else {
+                storage.disarm_control_watch(watch.id, pending).await
+            };
+            match dropped {
+                Ok(true) => {
+                    tracing::info!(watch = watch.id, pending, claimed = resuming, "watch pending event no longer matches its filter; dropped");
+                    // Boxed: the re-arm fires the next match through this
+                    // same function, a recursion the future's size cannot
+                    // hold inline. It ends: a re-arm arms only an event
+                    // that matches, and a matching pending never disarms.
+                    if let Err(e) = Box::pin(self.rearm_from_cursor(bridge, storage, watch.id)).await {
+                        tracing::warn!(?e, watch = watch.id, "re-arm after disarming failed");
+                    }
+                }
+                // The claim's lease is live (or the claim moved on): that
+                // attempt settles first; a later retry looks again.
+                Ok(false) if resuming => return FireOutcome::Deferred("another attempt holds the wake"),
+                Ok(false) => {}
+                Err(_) => return FireOutcome::Deferred("disarm failed"),
+            }
+            return FireOutcome::NothingPending;
+        }
+        if resuming {
             // One attempt at a time: the lease (eyes-2 `9912471a`).
-            let cutoff = (chrono::Utc::now() - chrono::Duration::seconds(crate::storage::WAKE_ATTEMPT_LEASE_SECS))
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            let cutoff = wake_lease_cutoff();
             match storage.take_wake_attempt(watch.id, pending, &cutoff).await {
                 Ok(true) => {}
                 Ok(false) => return FireOutcome::Deferred("another attempt holds the wake"),
@@ -989,6 +1007,96 @@ mod tests {
         let stalled2 = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some("stalled".into()), ..Default::default() }).await.unwrap();
         assert!(r.storage.arm_control_watch(named.id, stalled2, "health").await.unwrap());
         assert_eq!(engine.try_fire(&r.bridge, &r.storage, named.id).await, FireOutcome::Released);
+    }
+
+    /// EYES `0d2d8ae5` (feedback #144): the upgrade residue includes a
+    /// CLAIMED wake — an earlier build claimed a default watch's
+    /// `health: stalled` event and crashed before delivering it. Resuming
+    /// that claim would pay for the transient wake the dead-only default
+    /// removed. The delivery receipt is checked first (a dealt notice stays a
+    /// delivered wake); an undelivered stale claim is retired only when no
+    /// live attempt holds its lease — never resumed, never re-noticed — the
+    /// ack cursor untouched, the boot respawn no longer owed, and a later
+    /// `dead` still wakes. A watch that names `health` resumes its claim.
+    #[tokio::test]
+    async fn a_claimed_undelivered_transient_health_wake_is_retired_not_resumed() {
+        let mut r = rig().await;
+        let actor = r.storage.controller_actor("c", "hands").await.unwrap();
+        let w = r.bridge.control_watch_upsert(&r.storage, &actor, "w1", None, None, true).await.unwrap();
+        let engine = r.journal.watches();
+        drain(&mut r.rx);
+        let health = |detail: &str| NewControlEvent { session_id: "t".into(), kind: "health".into(), agent: Some("eyes".into()), detail: Some(detail.into()), ..Default::default() };
+        let lapse = |id: i64| {
+            let pool = r.storage.pool().clone();
+            async move {
+                sqlx::query("UPDATE control_watches SET wake_attempt_at = '2000-01-01T00:00:00.000Z' WHERE id = ?").bind(id).execute(&pool).await.unwrap();
+            }
+        };
+        let notices = |s: &Storage| {
+            let s = s.clone();
+            async move { s.messages_for_session("c", None).await.unwrap().into_iter().filter(|m| m.content.contains("watch w1 woke")).count() }
+        };
+        // Claimed, nothing written, nothing delivered: the old build's crash.
+        let stalled = r.storage.insert_control_event(&health("stalled")).await.unwrap();
+        assert!(r.storage.arm_control_watch(w.id, stalled, "health").await.unwrap());
+        assert!(r.storage.claim_control_watch_wake(w.id, stalled).await.unwrap());
+        // A live lease is another attempt's: nothing is retired under it.
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, w.id).await, FireOutcome::Deferred("another attempt holds the wake"));
+        let held = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!((held.pending_since, held.woke_for), (Some(stalled), Some(stalled)), "{held:?}");
+        lapse(w.id).await;
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, w.id).await, FireOutcome::NothingPending, "a stale claim is retired, not resumed");
+        let retired = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!(
+            (retired.pending_since, retired.pending_kind.as_deref(), retired.woke_for, retired.woke_at.as_deref(), retired.wake_attempt_at.as_deref(), retired.wake_delivered_at.as_deref()),
+            (None, None, None, None, None, None),
+            "{retired:?}"
+        );
+        assert_eq!(retired.cursor, w.cursor, "the ack cursor is the controller's alone");
+        assert!(pump(&r.bridge, "c", &mut r.rx).await.is_empty(), "nothing handed to the ring");
+        assert_eq!(notices(&r.storage).await, 0, "no notice written for it");
+        assert!(r.storage.sessions_with_pending_attention_watch().await.unwrap().is_empty(), "a boot no longer respawns the controller for it");
+        // Claimed with its notice written but never dealt: retired the same
+        // way; the notice stands as written and is not repeated or released.
+        let stalled2 = r.storage.insert_control_event(&health("stalled")).await.unwrap();
+        assert!(r.storage.arm_control_watch(w.id, stalled2, "health").await.unwrap());
+        assert!(r.storage.claim_control_watch_wake(w.id, stalled2).await.unwrap());
+        r.storage.post_wake_notice("c", r.hands, &format!("watch:{}:{stalled2}", w.id), "[System: watch w1 woke hands — written before the crash]").await.unwrap().expect("written");
+        lapse(w.id).await;
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, w.id).await, FireOutcome::NothingPending);
+        let retired = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!((retired.pending_since, retired.woke_for), (None, None), "{retired:?}");
+        assert!(pump(&r.bridge, "c", &mut r.rx).await.is_empty());
+        assert_eq!(notices(&r.storage).await, 1, "the crashed attempt's notice, and no other");
+        // Claimed, noticed AND dealt (the ring's receipt), the marker lost in
+        // a crash: a delivered wake — recorded, never retired or repeated.
+        let stalled3 = r.storage.insert_control_event(&health("stalled")).await.unwrap();
+        assert!(r.storage.arm_control_watch(w.id, stalled3, "health").await.unwrap());
+        assert!(r.storage.claim_control_watch_wake(w.id, stalled3).await.unwrap());
+        let dealt = r.storage.post_wake_notice("c", r.hands, &format!("watch:{}:{stalled3}", w.id), "[System: watch w1 woke hands — dealt before the crash]").await.unwrap().expect("written");
+        r.storage.commit_delivery(r.hands, &[(dealt, None)]).await.unwrap();
+        lapse(w.id).await;
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, w.id).await, FireOutcome::AlreadyFired);
+        let delivered = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!((delivered.pending_since, delivered.woke_for), (Some(stalled3), Some(stalled3)), "{delivered:?}");
+        assert!(delivered.wake_delivered_at.is_some(), "the receipt is recorded as the delivery: {delivered:?}");
+        assert!(pump(&r.bridge, "c", &mut r.rx).await.is_empty());
+        // A later dead runtime, after the controller's ack, still wakes.
+        let end = r.storage.max_control_event_id().await.unwrap();
+        r.bridge.control_watch_ack(&r.storage, &actor, "w1", end).await.unwrap();
+        let dead = r.storage.insert_control_event(&health("dead")).await.unwrap();
+        r.bridge.retry_all_watches().await;
+        let woke = r.storage.control_watch(r.hands, "w1").await.unwrap().unwrap();
+        assert_eq!((woke.pending_since, woke.woke_for), (Some(dead), Some(dead)), "{woke:?}");
+        assert_eq!(pump(&r.bridge, "c", &mut r.rx).await.len(), 1);
+        // Naming health keeps every transition: its claimed stall resumes.
+        let named = r.bridge.control_watch_upsert(&r.storage, &actor, "w2", None, Some(vec!["health".to_string()]), true).await.unwrap();
+        let stalled4 = r.storage.insert_control_event(&health("stalled")).await.unwrap();
+        assert!(r.storage.arm_control_watch(named.id, stalled4, "health").await.unwrap());
+        assert!(r.storage.claim_control_watch_wake(named.id, stalled4).await.unwrap());
+        lapse(named.id).await;
+        assert_eq!(engine.try_fire(&r.bridge, &r.storage, named.id).await, FireOutcome::Released);
+        assert_eq!(pump(&r.bridge, "c", &mut r.rx).await.len(), 1);
     }
 
     /// The wake, end to end through the real bridge: a decision parked in the

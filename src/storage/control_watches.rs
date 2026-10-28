@@ -241,8 +241,9 @@ impl Storage {
     /// a `health: stalled` row a build that matched every health transition
     /// left armed (feedback #144) — so the re-arm can look again from the
     /// cursor. Only an UNCLAIMED pending (`woke_for` not this event): a claim
-    /// is a wake in flight and settles through its own path. The cursor is
-    /// untouched: it moves on the controller's explicit `ack` and nothing else.
+    /// is retired by [`Self::retire_stale_wake_claim`], under its lease. The
+    /// cursor is untouched: it moves on the controller's explicit `ack` and
+    /// nothing else.
     pub async fn disarm_control_watch(&self, id: i64, pending_since: i64) -> Result<bool> {
         Ok(sqlx::query(
             "UPDATE control_watches SET pending_since = NULL, pending_kind = NULL, wake_attempt_at = NULL, updated_at = ? \
@@ -252,6 +253,34 @@ impl Storage {
         .bind(id)
         .bind(pending_since)
         .bind(pending_since)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    /// Retire a CLAIMED, undelivered wake whose pending event the watch's
+    /// current filter no longer matches — a default watch's `health: stalled`
+    /// wake an earlier build claimed and never delivered (EYES `0d2d8ae5`,
+    /// feedback #144). Fenced as a resume is: only when no live attempt holds
+    /// the claim's lease (`wake_attempt_at` unset or older than
+    /// `lease_cutoff`) and nothing marked it delivered — the caller has
+    /// already found no delivery receipt. The claim and the pending marker
+    /// clear in one statement, so the ring's `HostWake` check finds the wake
+    /// stale; `woke_at` clears with the claim because nothing woke (the rate
+    /// limit spaces real wakes). The cursor is untouched.
+    pub async fn retire_stale_wake_claim(&self, id: i64, pending_since: i64, lease_cutoff: &str) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE control_watches SET pending_since = NULL, pending_kind = NULL, woke_for = NULL, woke_at = NULL, \
+             wake_attempt_at = NULL, wake_delivered_at = NULL, updated_at = ? \
+             WHERE id = ? AND pending_since = ? AND woke_for = ? AND wake_delivered_at IS NULL \
+             AND (wake_attempt_at IS NULL OR wake_attempt_at < ?)",
+        )
+        .bind(now_utc())
+        .bind(id)
+        .bind(pending_since)
+        .bind(pending_since)
+        .bind(lease_cutoff)
         .execute(&self.pool)
         .await?
         .rows_affected()
