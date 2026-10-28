@@ -171,6 +171,14 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   participants get no user MCP servers, and the change reaches participants
   spawned after it. Before this a Driver asked to check a team channel had no
   Discord (feedback #141).
+- A controller's watch set to `wake: false` now records its pending event:
+  `watches` shows the first unacknowledged matching event, for sessions created
+  after the watch too, and nothing wakes the controller — no notice, no turn,
+  its halt left standing, no boot respawn. A retry or a wake on/off change
+  keeps the watch's pending event and its delivery record (turning wake on
+  wakes once for the tracked event; a delivered wake is not repeated), while
+  a change of sessions or kinds re-derives it. A passive watch is dropped when
+  its controller loses the grant, as a waking one is (feedback #135).
 - A gated command in a session with no working repo is refused when it is
   issued — "has no working_repo_path … cannot run here, so nothing was
   parked" — instead of parking a card whose approval could only end in "could

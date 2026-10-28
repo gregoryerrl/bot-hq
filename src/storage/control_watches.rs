@@ -184,6 +184,15 @@ impl Storage {
         rows.into_iter().map(ControlWatch::try_from).collect()
     }
 
+    /// Every watch, waking or passive — what the journal arms (feedback #135:
+    /// a `wake: false` watch still tracks its first unacknowledged match).
+    pub async fn all_control_watches(&self) -> Result<Vec<ControlWatch>> {
+        let rows: Vec<WatchRow> = sqlx::query_as(&format!("SELECT {COLS} FROM control_watches ORDER BY id"))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(ControlWatch::try_from).collect()
+    }
+
     /// Every watch that asked to wake its controller.
     pub async fn armed_control_watches(&self) -> Result<Vec<ControlWatch>> {
         let rows: Vec<WatchRow> = sqlx::query_as(&format!("SELECT {COLS} FROM control_watches WHERE wake <> 0 ORDER BY id"))
@@ -285,11 +294,6 @@ impl Storage {
         .await?
         .rows_affected()
             > 0)
-    }
-
-    /// Every wake-enabled watch, for the periodic retry and the start-up re-arm.
-    pub async fn wake_control_watches(&self) -> Result<Vec<ControlWatch>> {
-        self.armed_control_watches().await
     }
 
     /// The wake was decided but is being withheld (a newer halt, a Pause, a

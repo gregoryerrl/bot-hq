@@ -279,7 +279,7 @@ impl SignalingBridge {
                 Err(e) => Err(e),
                 Ok(()) => self.control_watch_upsert(&storage, &actor, &request_id, sessions, kinds, wake).await.map(|watch| {
                     json!({"status":"watching", "watch": watch,
-                        "note":"cursor is the last acknowledged journal id; pending_since the first unacknowledged matching event (the wake, if asked, fires once for it when you are idle, unpaused, ungated and still granted); ack {request_id, up_to} moves the cursor forward and re-arms. sessions omitted = every other session without a controller; kinds omitted = decision_pending, halt_declared, gate_urgent, session_closed, and health only when a runtime is dead (name health in kinds to receive every transition: running, stalled, retrying, dead)."})
+                        "note":"cursor is the last acknowledged journal id; pending_since the first unacknowledged matching event, recorded with or without wake (the wake, if asked, fires once for it when you are idle, unpaused, ungated and still granted); a retry or a wake change keeps it and its receipts, a filter change re-derives it; ack {request_id, up_to} moves the cursor forward and re-arms. sessions omitted = every other session without a controller; kinds omitted = decision_pending, halt_declared, gate_urgent, session_closed, and health only when a runtime is dead (name health in kinds to receive every transition: running, stalled, retrying, dead)."})
                 }),
             },
             AppControlRequest::Ack { request_id, up_to } => match claim.as_ref().unwrap().check(self) {

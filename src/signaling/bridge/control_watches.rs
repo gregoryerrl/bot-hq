@@ -3,7 +3,10 @@
 //! kinds, and whether a matching event may WAKE it. The journal task hands
 //! every row it writes to [`WatchEngine::on_event`]; a watch whose filters
 //! match is ARMED with that row's id (once — the first unacknowledged match
-//! stays the one), and the engine tries to fire.
+//! stays the one), and the engine tries to fire. A `wake: false` watch is
+//! armed the same way — its `pending_since` is the first unacknowledged
+//! match it reports — and never fired (feedback #135); it is tracked only
+//! while its owner holds the grant.
 //!
 //! **What a wake is.** `fire_temporary_halt`'s discipline, not a `Summon` (a
 //! summons queues behind a declared halt, and an AFK controller waits halted):
@@ -56,6 +59,12 @@ const REARM_PAGE: usize = 500;
 /// periodic retry fires it after the gap.
 pub const WAKE_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Whether a failed grant check is a CONFIRMED loss of control (the watch is
+/// dropped) rather than a read that failed (nothing decided).
+fn confirmed_loss(text: &str) -> bool {
+    text.contains("not granted") || text.contains("revoked") || text.contains("no longer an enabled participant")
+}
+
 /// An attempt stamped before this has lost its lease
 /// ([`crate::storage::WAKE_ATTEMPT_LEASE_SECS`]): what a resume and a stale
 /// claim's retirement both compare against.
@@ -90,6 +99,20 @@ pub fn watch_matches(watch: &ControlWatch, event: &ControlEvent, controller_sess
         Some(kinds) => kinds.iter().any(|k| *k == event.kind),
         None => default_kind_matches(&event.kind, event.detail.as_deref()),
     }
+}
+
+/// Whether an upsert left a watch's filters as they were — the same targets
+/// and kinds as sets (order and repeats aside), whatever `wake` became.
+fn same_filters(a: &ControlWatch, b: &ControlWatch) -> bool {
+    let norm = |v: &Option<Vec<String>>| {
+        v.as_ref().map(|v| {
+            let mut v = v.clone();
+            v.sort();
+            v.dedup();
+            v
+        })
+    };
+    norm(&a.targets) == norm(&b.targets) && norm(&a.kinds) == norm(&b.kinds)
 }
 
 /// The wake engine the journal task owns. Holds only the controller-session
@@ -191,22 +214,27 @@ impl WatchEngine {
     /// the pending watches of the session it is about (the controller's own
     /// state changed).
     pub async fn on_event(&self, bridge: &SignalingBridge, storage: &Storage, event: &ControlEvent) {
-        let armed = match storage.armed_control_watches().await {
+        let watches = match storage.all_control_watches().await {
             Ok(w) => w,
             Err(e) => {
-                tracing::warn!(?e, "could not list the armed watches");
+                tracing::warn!(?e, "could not list the watches");
                 return;
             }
         };
-        if !armed.is_empty() {
+        if !watches.is_empty() {
             let controllers = self.controller_sessions(storage).await;
-            for watch in armed.iter().filter(|w| w.pending_since.is_none()) {
+            for watch in watches.iter().filter(|w| w.pending_since.is_none()) {
                 if watch_matches(watch, event, &controllers) {
+                    // A passive watch has no fire to check its grant: it is
+                    // checked here, before tracking.
+                    if !watch.wake && !self.passive_may_track(storage, watch).await {
+                        continue;
+                    }
                     match storage.arm_control_watch(watch.id, event.id, &event.kind).await {
-                        Ok(true) => {
+                        Ok(true) if watch.wake => {
                             self.try_fire(bridge, storage, watch.id).await;
                         }
-                        Ok(false) => {}
+                        Ok(_) => {}
                         Err(e) => tracing::warn!(?e, watch = watch.id, "could not arm a watch"),
                     }
                 }
@@ -238,18 +266,41 @@ impl WatchEngine {
     /// fires a wake deferred for busyness, a gate or the rate limit once
     /// nothing else prompts it.
     pub async fn rearm_all(&self, bridge: &SignalingBridge, storage: &Storage) {
-        let watches = match storage.wake_control_watches().await {
+        let watches = match storage.all_control_watches().await {
             Ok(w) => w,
             Err(e) => {
-                tracing::warn!(?e, "could not list the wake watches");
+                tracing::warn!(?e, "could not list the watches");
                 return;
             }
         };
         for watch in watches {
             if watch.pending_since.is_some() {
-                self.try_fire(bridge, storage, watch.id).await;
+                if watch.wake {
+                    self.try_fire(bridge, storage, watch.id).await;
+                } else {
+                    // Nothing to fire; a confirmed loss of the grant still
+                    // drops the passive watch.
+                    self.passive_may_track(storage, &watch).await;
+                }
             } else if let Err(e) = self.rearm_from_cursor(bridge, storage, watch.id).await {
                 tracing::warn!(?e, watch = watch.id, "re-arm failed");
+            }
+        }
+    }
+
+    /// Whether a passive (`wake: false`) watch may track now (EYES, plan
+    /// review of #135): its owner must still hold the grant. A confirmed loss
+    /// drops the watch, as a fire would; a grant that could not be read is
+    /// unknown — nothing is tracked this time, nothing dropped.
+    async fn passive_may_track(&self, storage: &Storage, watch: &ControlWatch) -> bool {
+        match storage.controller_actor(&watch.session_id, &watch.slug).await {
+            Ok(_) => true,
+            Err(e) => {
+                let text = e.to_string();
+                if confirmed_loss(&text) {
+                    self.drop_watch(storage, watch, &text).await;
+                }
+                false
             }
         }
     }
@@ -259,15 +310,18 @@ impl WatchEngine {
     /// fire.
     pub async fn rearm_from_cursor(&self, bridge: &SignalingBridge, storage: &Storage, watch_id: i64) -> Result<Option<ControlWatch>> {
         let Some(watch) = storage.control_watch_by_id(watch_id).await? else { return Ok(None) };
-        if !watch.wake || watch.pending_since.is_some() {
+        if watch.pending_since.is_some() {
             return Ok(Some(watch));
+        }
+        if !watch.wake && !self.passive_may_track(storage, &watch).await {
+            return storage.control_watch_by_id(watch_id).await;
         }
         let controllers = self.controller_sessions(storage).await;
         let mut from = watch.cursor;
         loop {
             let page = storage.control_events_after(from, REARM_PAGE).await?;
             if let Some(first) = page.iter().find(|e| watch_matches(&watch, e, &controllers)) {
-                if storage.arm_control_watch(watch.id, first.id, &first.kind).await? {
+                if storage.arm_control_watch(watch.id, first.id, &first.kind).await? && watch.wake {
                     self.try_fire(bridge, storage, watch.id).await;
                 }
                 break;
@@ -300,7 +354,7 @@ impl WatchEngine {
             Ok(actor) => actor,
             Err(e) => {
                 let text = e.to_string();
-                if text.contains("not granted") || text.contains("revoked") || text.contains("no longer an enabled participant") {
+                if confirmed_loss(&text) {
                     return Admission::Drop(text);
                 }
                 return Admission::Defer("controller check failed");
@@ -371,7 +425,7 @@ impl WatchEngine {
         // retry: a confirmed loss drops the watch; a read failure waits.
         if let Err(e) = storage.controller_actor(&watch.session_id, &watch.slug).await {
             let text = e.to_string();
-            if text.contains("not granted") || text.contains("revoked") || text.contains("no longer an enabled participant") {
+            if confirmed_loss(&text) {
                 self.drop_watch(storage, &watch, &text).await;
                 return FireOutcome::Dropped(text);
             }
@@ -686,12 +740,23 @@ impl SignalingBridge {
         let watch = storage
             .upsert_control_watch(&actor.session_id, actor.participant_id, &actor.slug, request_id, targets.as_deref(), kinds.as_deref(), wake, end)
             .await?;
-        if existing.is_some() {
-            // Filters changed: the pending marker is re-derived from the cursor.
+        if existing.as_ref().is_some_and(|previous| !same_filters(previous, &watch)) {
+            // Filters changed: the pending marker is re-derived from the
+            // cursor. A retry or a `wake` toggle keeps the first
+            // unacknowledged event with its claim and delivery receipts — a
+            // swept pending is never swapped for a later row, a delivered
+            // wake is not repeated (feedback #135, EYES plan review).
             sqlx::query("UPDATE control_watches SET pending_since = NULL WHERE id = ?").bind(watch.id).execute(storage.pool()).await?;
         }
         let engine = WatchEngine::new();
-        engine.rearm_from_cursor(self, storage, watch.id).await?.context("the watch vanished")
+        let watch = engine.rearm_from_cursor(self, storage, watch.id).await?.context("the watch vanished")?;
+        // A waking watch that keeps a tracked event (turned on, or retried)
+        // fires for it now — once: a delivered claim answers AlreadyFired.
+        if watch.wake && watch.pending_since.is_some() {
+            engine.try_fire(self, storage, watch.id).await;
+            return storage.control_watch_by_id(watch.id).await?.context("the watch vanished");
+        }
+        Ok(watch)
     }
 
     /// `app_control ack`: the explicit, per-watch, monotonic acknowledgement.
@@ -1097,6 +1162,119 @@ mod tests {
         lapse(named.id).await;
         assert_eq!(engine.try_fire(&r.bridge, &r.storage, named.id).await, FireOutcome::Released);
         assert_eq!(pump(&r.bridge, "c", &mut r.rx).await.len(), 1);
+    }
+
+    /// Feedback #135: a `wake: false` watch still tracks the first
+    /// unacknowledged matching event — as its description promises — and
+    /// never wakes: no notice, no `HostWake`, the controller's halt untouched,
+    /// no boot respawn. A session created after the watch is covered; `ack`
+    /// re-arms from the cursor; the start-up re-arm finds a row the engine
+    /// never saw. Tracking is not authority: a controller that lost its grant
+    /// loses the passive watch too.
+    #[tokio::test]
+    async fn a_passive_watch_tracks_its_first_unacknowledged_event_without_waking() {
+        let mut r = rig().await;
+        let actor = r.storage.controller_actor("c", "hands").await.unwrap();
+        r.storage.declare_session_halt("c", "hands", "AFK, watching").await.unwrap();
+        let w = r.bridge.control_watch_upsert(&r.storage, &actor, "quiet", None, None, false).await.unwrap();
+        assert!(!w.wake && w.pending_since.is_none());
+        drain(&mut r.rx);
+        park_decision(&r.storage, "t", "q1").await;
+        r.journal.record(&decision("t", "q1")).await;
+        let tracked = r.storage.control_watch(r.hands, "quiet").await.unwrap().unwrap();
+        let first = tracked.pending_since.expect("a passive watch records its first match");
+        assert_eq!(tracked.pending_kind.as_deref(), Some("decision_pending"));
+        assert_eq!((tracked.woke_for, tracked.cursor), (None, w.cursor), "nothing claimed, cursor untouched: {tracked:?}");
+        let quiet = |s: &Storage| {
+            let s = s.clone();
+            async move { s.messages_for_session("c", None).await.unwrap().iter().filter(|m| m.content.contains("watch quiet woke")).count() }
+        };
+        assert_eq!(quiet(&r.storage).await, 0, "no notice");
+        assert!(drain(&mut r.rx).is_empty(), "nothing to the ring");
+        assert!(r.storage.session_halt("c").await.unwrap().is_some(), "the controller's halt stands");
+        assert!(r.storage.sessions_with_pending_attention_watch().await.unwrap().is_empty(), "no boot respawn for a passive watch");
+        // A session created after the watch: covered, but the first pending stays.
+        r.storage.create_session("late", "later work", None).await.unwrap();
+        r.storage.ensure_session_roster("late", 2).await.unwrap();
+        sqlx::query("UPDATE session_participants SET capabilities = '[]' WHERE session_id = 'late'").execute(r.storage.pool()).await.unwrap();
+        park_decision(&r.storage, "late", "q2").await;
+        r.journal.record(&decision("late", "q2")).await;
+        assert_eq!(r.storage.control_watch(r.hands, "quiet").await.unwrap().unwrap().pending_since, Some(first), "the first unacknowledged match stays");
+        // `ack` past the first: the later session's decision is next.
+        let acked = r.bridge.control_watch_ack(&r.storage, &actor, "quiet", first).await.unwrap();
+        let next = r.storage.control_event_by_id(acked.pending_since.expect("re-armed from the cursor")).await.unwrap().unwrap();
+        assert_eq!((next.session_id.as_str(), next.ref_id.as_deref()), ("late", Some("q2")));
+        // The start-up re-arm finds a row the engine never saw.
+        let end = r.storage.max_control_event_id().await.unwrap();
+        r.bridge.control_watch_ack(&r.storage, &actor, "quiet", end).await.unwrap();
+        let unseen = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "session_closed".into(), ..Default::default() }).await.unwrap();
+        r.journal.start().await;
+        assert_eq!(r.storage.control_watch(r.hands, "quiet").await.unwrap().unwrap().pending_since, Some(unseen));
+        assert_eq!(quiet(&r.storage).await, 0);
+        assert!(drain(&mut r.rx).iter().all(|c| !matches!(c, SequencerCommand::HostWake { .. })), "never a wake");
+        assert!(r.storage.session_halt("c").await.unwrap().is_some());
+        // Revoked: the passive watch goes too, at its next event.
+        let end = r.storage.max_control_event_id().await.unwrap();
+        r.bridge.control_watch_ack(&r.storage, &actor, "quiet", end).await.unwrap();
+        sqlx::query("UPDATE roles SET capabilities = '[]' WHERE slug = 'hands'").execute(r.storage.pool()).await.unwrap();
+        park_decision(&r.storage, "t", "q3").await;
+        r.journal.record(&decision("t", "q3")).await;
+        assert!(r.storage.control_watch(r.hands, "quiet").await.unwrap().is_none(), "dropped on a confirmed loss");
+    }
+
+    /// Feedback #135 / EYES (plan-eyes 23:07Z): an upsert that changes only
+    /// `wake`, or repeats the request, keeps the watch's first unacknowledged
+    /// pending event and its claim/delivery receipts — a passive watch turned
+    /// on wakes once for what it tracked (even a row retention swept), a
+    /// delivered wake is not repeated by off→on, and an identical retry moves
+    /// nothing. Only a real filter change re-derives the pending event.
+    #[tokio::test]
+    async fn a_wake_toggle_or_retry_keeps_the_pending_event_and_its_receipts() {
+        let mut r = rig().await;
+        let actor = r.storage.controller_actor("c", "hands").await.unwrap();
+        r.bridge.control_watch_upsert(&r.storage, &actor, "w", None, None, false).await.unwrap();
+        drain(&mut r.rx);
+        park_decision(&r.storage, "t", "q1").await;
+        r.journal.record(&decision("t", "q1")).await;
+        let p = r.storage.control_watch(r.hands, "w").await.unwrap().unwrap().pending_since.expect("tracked");
+        park_decision(&r.storage, "t", "q2").await;
+        r.journal.record(&decision("t", "q2")).await;
+        // Off → on: wakes once, for the event it tracked.
+        let on = r.bridge.control_watch_upsert(&r.storage, &actor, "w", None, None, true).await.unwrap();
+        assert_eq!(on.pending_since, Some(p), "the first unacknowledged match is kept: {on:?}");
+        assert_eq!(pump(&r.bridge, "c", &mut r.rx).await, vec![(r.hands, on.id, p)], "one wake, for it");
+        let delivered = r.storage.control_watch(r.hands, "w").await.unwrap().unwrap();
+        assert!(delivered.wake_delivered_at.is_some(), "{delivered:?}");
+        // On → off → on, unacknowledged: the delivered wake is not repeated.
+        let off = r.bridge.control_watch_upsert(&r.storage, &actor, "w", None, None, false).await.unwrap();
+        assert_eq!((off.pending_since, off.woke_for, off.wake_delivered_at.clone()), (Some(p), Some(p), delivered.wake_delivered_at.clone()), "receipts kept: {off:?}");
+        r.bridge.control_watch_upsert(&r.storage, &actor, "w", None, None, true).await.unwrap();
+        assert!(pump(&r.bridge, "c", &mut r.rx).await.is_empty(), "no second wake before an ack");
+        // An identical retry moves nothing.
+        let before = r.storage.control_watch(r.hands, "w").await.unwrap().unwrap();
+        let again = r.bridge.control_watch_upsert(&r.storage, &actor, "w", None, None, true).await.unwrap();
+        assert_eq!(
+            (again.pending_since, again.cursor, again.woke_for, again.wake_delivered_at.clone()),
+            (before.pending_since, before.cursor, before.woke_for, before.wake_delivered_at.clone())
+        );
+        assert!(pump(&r.bridge, "c", &mut r.rx).await.is_empty());
+        // A passive watch whose tracked row retention swept: turned on, it
+        // wakes once for that row — not for a later event in its place.
+        r.bridge.control_watch_upsert(&r.storage, &actor, "s", None, None, false).await.unwrap();
+        let closed = r.storage.insert_control_event(&NewControlEvent { session_id: "t".into(), kind: "session_closed".into(), ..Default::default() }).await.unwrap();
+        r.journal.start().await;
+        let s = r.storage.control_watch(r.hands, "s").await.unwrap().unwrap();
+        assert_eq!(s.pending_since, Some(closed));
+        sqlx::query("DELETE FROM control_events WHERE id = ?").bind(closed).execute(r.storage.pool()).await.unwrap();
+        park_decision(&r.storage, "t", "q3").await;
+        r.journal.record(&decision("t", "q3")).await;
+        drain(&mut r.rx);
+        let s_on = r.bridge.control_watch_upsert(&r.storage, &actor, "s", None, None, true).await.unwrap();
+        assert_eq!(s_on.pending_since, Some(closed), "{s_on:?}");
+        assert_eq!(pump(&r.bridge, "c", &mut r.rx).await, vec![(r.hands, s_on.id, closed)]);
+        // A real filter change re-derives from the cursor (documented).
+        let narrowed = r.bridge.control_watch_upsert(&r.storage, &actor, "s", None, Some(vec!["message".into()]), true).await.unwrap();
+        assert_ne!(narrowed.pending_since, Some(closed), "a filter change re-derives: {narrowed:?}");
     }
 
     /// The wake, end to end through the real bridge: a decision parked in the
