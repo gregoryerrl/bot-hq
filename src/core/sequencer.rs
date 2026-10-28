@@ -2419,7 +2419,30 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     );
                     release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
                 } else if state.holder.is_none() {
-                    deliver_staged_if_pending(&deps, &mut state.staged_pending).await;
+                    // The user's stage keeps its priority: handed to the app
+                    // here, its delivery is the release that deals, and the
+                    // summons below pre-empts that deal rather than racing it.
+                    if deliver_staged_if_pending(&deps, &mut state.staged_pending).await {
+                        continue;
+                    }
+                    // A summons queued during boot — a controller's `send`,
+                    // which arrives as one — is dealt now (feedback #138): the
+                    // Summon arm holds it while `boot_hold` stands, and nothing
+                    // else would serve it until the controller sent again. Only
+                    // for a target the ring can actually honour: an empty or
+                    // invalid queue falls through to no turn at all, D29's
+                    // no-task/no-turn rule. `advance_turn`'s halt/gate/pause
+                    // checks still refuse the deal and leave the entry queued.
+                    if state.winding_down.is_none()
+                        && has_honourable_summons(&deps, &state.summons.queue).await
+                    {
+                        debug!(
+                            session = %deps.session_id,
+                            "sequencer: boot ended; dealing the summons queued during boot"
+                        );
+                        state.reseed_gates_if_needed(&deps).await;
+                        advance_turn(&deps, &mut rx, &mut state, false, false).await;
+                    }
                 }
             }
             SequencerCommand::Oriented { participant_id } => {
@@ -2620,11 +2643,18 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // whenever no turn is in flight. A winding-down holder still
                 // owes a completion: queue only, the replay advances later.
                 state.summons.queue.push_back(QueuedSummon { participant_id, incarnation: incarnation.clone() });
-                let idle = state.holder.is_none() && state.winding_down.is_none();
+                // **Not while booting** (feedback #138). The target may have
+                // oriented already while the rest of the roster still reads,
+                // and a turn dealt now reports to the readiness channel and
+                // never completes; `hand_to_summoned` checks the target's own
+                // orientation only. The queue keeps the entry and `BootEnded`
+                // deals it, after READY.
+                let idle = state.holder.is_none() && state.winding_down.is_none() && !state.boot_hold;
                 debug!(
                     session = %deps.session_id,
                     participant_id,
                     idle,
+                    booting = state.boot_hold,
                     queued = state.summons.queue.len(),
                     "sequencer: participant summoned (retry wake)"
                 );
@@ -4247,6 +4277,23 @@ impl QueuedSummon {
 /// summons that cannot be read would strand the session on a transient error.
 /// The ring still moves; the user's message still lands, one turn later, on
 /// whoever the rotation reaches.
+/// Does the summons queue hold an entry the ring could honour — a live
+/// incarnation naming an enabled participant of THIS session? The boot-end
+/// deal (feedback #138) asks this BEFORE stepping, because `advance_turn` with
+/// nothing honourable queued steps the ring itself and would deal an
+/// unsolicited turn into a session with no task (rc3 D29). Read-only: the
+/// entries are judged, dropped or served by [`hand_to_summoned`] at the deal.
+async fn has_honourable_summons(deps: &SequencerDeps, queue: &VecDeque<QueuedSummon>) -> bool {
+    for summon in queue.iter().filter(|s| s.is_live()) {
+        if let Ok(Some(p)) = deps.storage.participant_by_id(summon.participant_id).await {
+            if *p.session_id == *deps.session_id && p.enabled {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn hand_to_summoned(deps: &SequencerDeps, queue: &mut VecDeque<QueuedSummon>)
     -> Option<(Participant, Option<tokio::sync::OwnedRwLockReadGuard<()>>)> {
     // D4: a summoned participant that is still orienting keeps its place in the
@@ -8464,6 +8511,167 @@ mod tests {
         drop(tx);
         assert!(exited(task).await);
         assert!(seats[1].drain().is_empty(), "the boundary parked for the stage");
+    }
+
+    /// Feedback #138: a controller's `send` during BOOT is a summons. It must
+    /// wait for `BootEnded` even when its target has already oriented (the
+    /// rest of the roster is still booting — a turn dealt now reports to the
+    /// readiness channel), and `BootEnded` must then deal it without a re-send:
+    /// the delegated task sat queued behind READY until the controller sent it
+    /// again (bench s-be7c0002, 00:29–00:33Z).
+    #[tokio::test]
+    async fn a_summons_during_boot_waits_for_boot_to_end_then_is_dealt_once() {
+        let (mut deps, storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        // `a` has oriented; `b` is still reading its orientation.
+        deps.orienting = Some(seed_orienting(true, [b]));
+        storage
+            .post_to_channel("s1", "system", None, MessageKind::SystemNotice.as_str(),
+                "Delegated message from driver of s-drv:\nthe task", None)
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::Summon { participant_id: a }).await;
+        assert!(seats[0].extra_wire().await.is_none(), "no turn before READY, even to an oriented target");
+        assert!(seats[1].extra_wire().await.is_none());
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(
+            seats[0].expect(1).await,
+            vec!["Delegated message from driver of s-drv:\nthe task"],
+            "the summons queued during boot is dealt at boot end, once"
+        );
+        seats[1].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// rc3 D29 still holds at boot end: summonses the ring cannot honour — no
+    /// such participant, a disabled one, one whose process incarnation was
+    /// retired — deal nothing; no unsolicited ordinary turn falls out of an
+    /// invalid queue.
+    #[tokio::test]
+    async fn boot_ending_with_only_invalid_summonses_deals_nothing() {
+        let (deps, storage, mut seats, mut events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        sqlx::query("UPDATE session_participants SET enabled = 0 WHERE id = ?")
+            .bind(b)
+            .execute(storage.pool())
+            .await
+            .unwrap();
+        let retired = crate::agents::incarnation::Incarnation::new();
+        retired.retire().await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::Summon { participant_id: 987_654 }).await;
+        send(&tx, SequencerCommand::Summon { participant_id: b }).await;
+        send(&tx, SequencerCommand::Summon { participant_id: a }.from_incarnation(&retired)).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert!(next_due_quick(&mut events).await.is_none());
+        assert!(seats[0].extra_wire().await.is_none(), "no turn dealt at boot end");
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(seats[1].drain().is_empty());
+    }
+
+    /// A stage and a summons both held through boot: the user's staged message
+    /// keeps its priority — it is handed to the app at `BootEnded` and the
+    /// summons waits for the deal that delivery starts, so exactly one holder
+    /// results, and it is the user's message that is read first.
+    #[tokio::test]
+    async fn boot_ending_with_a_stage_and_a_summons_delivers_the_stage_first() {
+        let (deps, _storage, mut seats, mut events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let b = seats[1].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, SequencerCommand::MessageStaged).await;
+        send(&tx, SequencerCommand::Summon { participant_id: b }).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(next_due(&mut events).await.as_deref(), Some("s1"), "the stage is delivered at boot end");
+        assert!(seats[1].extra_wire().await.is_none(), "the summons does not race the staged delivery");
+        drop(tx);
+        assert!(exited(task).await);
+        assert!(seats[0].drain().is_empty());
+    }
+
+    /// A held user release and a summons at boot end: one deal. The release
+    /// restarts the rotation and the summons pre-empts its step, so the
+    /// summoned participant takes that single turn.
+    #[tokio::test]
+    async fn boot_ending_with_a_held_release_and_a_summons_deals_one_turn() {
+        let (deps, storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let b = seats[1].id;
+        post(&storage, "user", None, "typed during boot").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+
+        send(&tx, user_message()).await;
+        send(&tx, SequencerCommand::Summon { participant_id: b }).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert_eq!(seats[1].expect(1).await, vec!["typed during boot"], "the summoned seat takes the one turn");
+        seats[0].quiet().await;
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// `BootEnded` releases nothing the ring holds for other reasons: a gate
+    /// opened during boot keeps the summons queued until the gate resolves,
+    /// a Pause and a standing halt keep it queued past boot end.
+    #[tokio::test]
+    async fn boot_ending_does_not_deal_a_summons_past_a_gate_pause_or_halt() {
+        // Gate: queued through boot end, dealt when the gate resolves.
+        let (deps, storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        storage
+            .post_to_channel("s1", "system", None, MessageKind::SystemNotice.as_str(), "Delegated message from driver of s-drv:\ngo", None)
+            .await
+            .unwrap();
+        park_gate(&storage, "g1").await;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, gate_opened("g1")).await;
+        send(&tx, SequencerCommand::Summon { participant_id: a }).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert!(seats[0].extra_wire().await.is_none(), "a gate holds the ring through boot end");
+        storage.answer_tray_entry("g1", "Approve").await.unwrap();
+        send(&tx, gate_resolved("g1")).await;
+        assert_eq!(seats[0].expect(1).await, vec!["Delegated message from driver of s-drv:\ngo"]);
+        drop(tx);
+        assert!(exited(task).await);
+
+        // Pause: nothing at boot end; the controller's resume is the release.
+        let (deps, _storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, SequencerCommand::Pause).await;
+        send(&tx, SequencerCommand::Summon { participant_id: a }).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert!(seats[0].extra_wire().await.is_none(), "paused: no deal at boot end");
+        drop(tx);
+        assert!(exited(task).await);
+
+        // Standing halt: the summons waits for the user's release.
+        let (deps, _storage, mut seats, _events) =
+            booting_ring(&[("a", "active"), ("b", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        send(&tx, parked_by_nobody()).await;
+        send(&tx, SequencerCommand::Summon { participant_id: a }).await;
+        send(&tx, SequencerCommand::BootEnded).await;
+        assert!(seats[0].extra_wire().await.is_none(), "halted: no deal at boot end");
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// A halt declared during boot does not release a stage: the stage waits

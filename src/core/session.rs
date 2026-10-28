@@ -3399,11 +3399,13 @@ async fn boot_then_start(
     tracing::info!(session_id, ready, want, waiting, "boot complete");
 }
 
-/// Whether a user message is waiting for boot to end (feedback #10): a stage in
-/// the slot, or a user row posted after the spawn began (`watermark`). Read
-/// from durable state — the ring holds the same messages, but asking it would
-/// stall behind a Pause. A read error counts as nothing waiting: only READY's
-/// wording depends on it, never the delivery.
+/// Whether a message is waiting for boot to end (feedback #10): a stage in the
+/// slot, or a task row posted after the spawn began (`watermark`) — the user's
+/// own text, or a delegated controller's send (feedback #138: its summons is
+/// dealt at `BootEnded` like a held release, so READY must not say nobody
+/// takes a turn). Read from durable state — the ring holds the same messages,
+/// but asking it would stall behind a Pause. A read error counts as nothing
+/// waiting: only READY's wording depends on it, never the delivery.
 async fn message_waiting_at_boot_end(storage: &Storage, session_id: &str, watermark: i64) -> bool {
     let staged = storage.staged_message(session_id).await.unwrap_or_else(|e| {
         warn!(session_id, ?e, "reading the staged message at boot end failed");
@@ -3412,7 +3414,7 @@ async fn message_waiting_at_boot_end(storage: &Storage, session_id: &str, waterm
     if staged.is_some() {
         return true;
     }
-    storage.user_wrote_after(session_id, watermark).await.unwrap_or_else(|e| {
+    storage.task_message_after(session_id, watermark).await.unwrap_or_else(|e| {
         warn!(session_id, ?e, "checking for a message sent during boot failed");
         false
     })
@@ -3431,7 +3433,9 @@ fn ready_notice(ready: usize, want: usize, timeout_secs: u64, waiting: bool) -> 
         )
     };
     if waiting {
-        format!("{head}. The message you sent during boot goes to them now.]")
+        // "sent", not "you sent": a delegated controller's message waits here
+        // the same way (feedback #138), and its words are not the user's.
+        format!("{head}. The message sent during boot goes to them now.]")
     } else if ready == want {
         format!("{head} and waiting. Send your task to begin; nobody takes a turn until you do.]")
     } else {
@@ -7106,7 +7110,7 @@ mod tests {
         );
         assert_eq!(
             ready_notice(2, 2, 120, true),
-            "[System: READY — 2 participant(s) oriented. The message you sent during \
+            "[System: READY — 2 participant(s) oriented. The message sent during \
              boot goes to them now.]"
         );
         assert_eq!(
@@ -7118,7 +7122,7 @@ mod tests {
         assert_eq!(
             ready_notice(1, 2, 120, true),
             "[System: READY — 1 of 2 participant(s) oriented before the 120s boot \
-             timeout; the rest join as they finish. The message you sent during boot \
+             timeout; the rest join as they finish. The message sent during boot \
              goes to them now.]"
         );
     }

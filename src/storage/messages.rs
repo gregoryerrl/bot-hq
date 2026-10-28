@@ -213,6 +213,33 @@ impl Storage {
         Ok(hit.is_some())
     }
 
+    /// Whether a TASK arrived for this session's participants after
+    /// `after_id`: the user's own typed text ([`user_wrote_after`]), or a
+    /// delegated controller's message — a system notice the controller sent
+    /// through application control, identified by its `delegated_messages`
+    /// row, never by its author column. READY's wording reads this (feedback
+    /// #138: a controller's send during boot left READY saying "nobody takes
+    /// a turn until you do" while the task sat queued).
+    ///
+    /// [`user_wrote_after`]: Self::user_wrote_after
+    pub async fn task_message_after(&self, session_id: &str, after_id: i64) -> Result<bool> {
+        if self.user_wrote_after(session_id, after_id).await? {
+            return Ok(true);
+        }
+        let hit: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM messages m \
+             WHERE m.session_id = ? AND m.id > ? \
+               AND EXISTS (SELECT 1 FROM delegated_messages d WHERE d.message_id = m.id) \
+             LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(after_id)
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| format!("checking for delegated rows in {session_id} after {after_id}"))?;
+        Ok(hit.is_some())
+    }
+
     /// The NEWEST `limit` rows of a session, oldest-first, optionally those
     /// before `before_id` (exclusive) — the chat's mount read and its "load
     /// older" page (round 8, N2). `messages_for_session(sid, None)` has no
@@ -335,6 +362,37 @@ mod tests {
         assert_eq!(oldest.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), vec!["a"]);
         assert!(s.messages_tail("s1", Some(ids[0]), 2).await.unwrap().is_empty());
         assert_eq!(s.messages_tail("s1", None, 0).await.unwrap().len(), 1, "limit clamps to 1");
+    }
+
+    /// Feedback #138: READY's "a message is waiting" check counts a delegated
+    /// controller's message posted during boot — persisted as a system notice
+    /// under `author = user` with a `delegated_messages` row — beside the
+    /// user's own typed text; an ordinary host notice counts as nothing.
+    #[tokio::test]
+    async fn a_delegated_message_counts_as_a_task_waiting_after_the_watermark() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        let watermark = s
+            .post_to_channel("s1", "system", None, MessageKind::SystemNotice.as_str(), "[System: BOOT]", None)
+            .await
+            .unwrap()
+            .message_id();
+        assert!(!s.task_message_after("s1", watermark).await.unwrap(), "nothing yet");
+        s.post_to_channel("s1", "system", None, MessageKind::SystemNotice.as_str(), "an ordinary host notice", None)
+            .await
+            .unwrap();
+        assert!(!s.task_message_after("s1", watermark).await.unwrap(), "a host notice is not a task");
+        // The shape `persist_controlled_message` writes.
+        let delegated: i64 = sqlx::query("INSERT INTO messages (session_id, participant_id, origin, kind, content, envelope, author, created_at) VALUES ('s1', NULL, 'system', 'system_notice', 'Delegated message from driver of s-drv:\nthe task', NULL, 'user', ?)")
+            .bind(crate::storage::now_utc()).execute(s.pool()).await.unwrap().last_insert_rowid();
+        sqlx::query("INSERT INTO delegated_messages (source_session, source_participant, request_id, target_session, content_sha256, message_id) VALUES ('s-drv', 7, 'r1', 's1', 'sha', ?)")
+            .bind(delegated).execute(s.pool()).await.unwrap();
+        assert!(s.task_message_after("s1", watermark).await.unwrap(), "a delegated message is a task waiting");
+        assert!(!s.task_message_after("s1", delegated).await.unwrap(), "…only after the watermark");
+        assert!(!s.user_wrote_after("s1", watermark).await.unwrap(), "the user did not write it");
+        // The user's own typed text still counts, as before.
+        s.post_to_channel("s1", "user", None, MessageKind::Text.as_str(), "typed during boot", None).await.unwrap();
+        assert!(s.task_message_after("s1", delegated).await.unwrap());
     }
 
     /// **The watermark read SEEKS** (round 8, review). `messages_for_session`

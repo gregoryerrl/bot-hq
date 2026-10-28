@@ -119,6 +119,15 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   executor. Before this, a controller's rejection reached the executor as
   "rejected (no reason given)" and cost a decision round trip (feedback #140,
   #142).
+- A delegated controller's `send` to a session that is still booting is
+  delivered when the session reaches READY. Its summons now waits for boot to
+  end — even when its target has already oriented while the rest of the roster
+  is still reading — and is dealt once boot ends, after a held user message or
+  staged text, and never past an open gate, a Pause or a standing halt; an
+  invalid summons still deals no turn. READY says "The message sent during boot
+  goes to them now" for a controller's message too. Before this the task sat
+  queued behind "nobody takes a turn until you do" until the controller sent it
+  again (feedback #138).
 - Context Library writes and rescans now register a missing project before
   indexing its files, preserving existing project metadata and custom paths.
   A file saved before an indexing failure returns "written but NOT indexed"
