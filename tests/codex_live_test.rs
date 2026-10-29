@@ -169,3 +169,112 @@ async fn a_codex_participant_runs_one_gated_turn_for_real() {
     assert!(usage.used_tokens > 1_000 && usage.used_tokens < 200_000, "a model call's prompt size, not a running total: {}", usage.used_tokens);
     eprintln!("final text:\n{final_text}\ncontext: {usage:?}");
 }
+
+/// Feedback #139, against the REAL Codex app-server: a participant's
+/// TEMPORARY halt interrupts its turn (reason `halt-temporary`) but keeps the
+/// command its exec session is running; a Pause while the participant is
+/// idle then stops it. The job is tracked by the PID of its own `sleep`
+/// process, captured once it starts — never by a pattern over time.
+/// Ignored like the test above; run it against an isolated COPY of a
+/// signed-in home, never the shared managed one:
+///
+/// ```text
+/// BOT_HQ_CODEX_LIVE_HOME=/tmp/copy-of-home cargo test --test codex_live_test a_temporary_halt -- --ignored --nocapture
+/// ```
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "spends one Codex turn on a real account; set BOT_HQ_CODEX_LIVE_HOME to an isolated copy"]
+async fn a_temporary_halt_keeps_the_running_job_and_an_idle_pause_stops_it() {
+    use bot_hq::agents::protocol::{PAUSE_INTERRUPT, TEMPORARY_HALT_INTERRUPT};
+    let Ok(home) = std::env::var("BOT_HQ_CODEX_LIVE_HOME") else {
+        eprintln!("BOT_HQ_CODEX_LIVE_HOME is not set; nothing to run against");
+        return;
+    };
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_bot-hq"));
+    let data = tempfile::tempdir().unwrap();
+    let data_dir = data.path().to_path_buf();
+    std::fs::create_dir_all(data_dir.join(".local")).unwrap();
+    std::fs::create_dir_all(data_dir.join("config")).unwrap();
+    std::fs::write(data_dir.join("config/tool-gate.json"), "[]").unwrap();
+    let storage = Storage::memory().await.unwrap();
+    storage.create_session("s-live", "codex live", Some("/tmp")).await.unwrap();
+    storage.ensure_session_roster("s-live", MAX_SESSION_PARTICIPANTS).await.unwrap();
+    let bridge = SignalingBridge::new();
+    bridge.set_storage(storage.clone()).await;
+    bridge.set_hook_token("live-hook-token");
+    let server = start_signaling_server(Arc::clone(&bridge)).await.unwrap();
+    std::fs::write(data_dir.join(".local/signaling-addr"), format!("{}\n", server.local_addr)).unwrap();
+    std::fs::write(data_dir.join(".local/hook-token"), "live-hook-token\n").unwrap();
+    bridge.register_mcp_token("s-live", "hands", "live-mcp-secret");
+    write_hooks_json(Path::new(&home), &exe, &data_dir).unwrap();
+    let rendered = RenderedHook::new(Path::new(&home), &exe, &data_dir);
+    let probe = probe_home(&CodexProbeRequest { bin: None, home: home.clone(), cwd: Some("/tmp".into()) }).await;
+    let trust = probe.hooks.iter().find_map(|h| rendered.trust_for(h)).expect("bot-hq's hook is listed in the home");
+    // A marker no other process on the machine carries.
+    let marker = format!("{}", 170 + (std::process::id() % 29));
+    let prompt = format!("You are a probe inside bot-hq. Run exactly this shell command and wait for it: sleep {marker} ; then reply done.");
+    let prompt_path = data_dir.join("prompt.txt");
+    std::fs::write(&prompt_path, &prompt).unwrap();
+    let cfg = SpawnConfig {
+        agent_name: "hands".into(),
+        config: AgentConfig {
+            agent_name: "hands".into(), provider: "openai".into(), model_name: "gpt-6.1-sol".into(), base_url: None, auth_token: None,
+            updated_at: String::new(), context_window: Some(475_000), cli_settings: None, claude_config_dir: Some(home.clone()), runtime: "codex".into(),
+        },
+        system_prompt_path: prompt_path, mcp_config_path: None, working_dir: Some(PathBuf::from("/tmp")), claude_bin: None,
+        session_id: "s-live".into(), resume_session_id: None, project: None, data_dir: data_dir.clone(),
+        capabilities: ResolvedCapabilities::Known(CapabilitySet::preset_hands()), overrides: Default::default(), blank_cli_attribution: true,
+        account_dir: Some(home.clone()), account_email: None, account_org: None,
+        codex: Some(CodexSpawn {
+            bin: None, mcp_url: format!("http://{}/sessions/s-live/hands/mcp", server.local_addr), mcp_token: "live-mcp-secret".into(),
+            hook_trust: vec![trust], hook_exe: Some(exe.clone()), model_catalog: None,
+        }),
+        forwarded_mcp: Vec::new(),
+    };
+    let mut handle = spawn_codex_agent(cfg).await.expect("the participant starts");
+    let row = storage.post_to_channel("s-live", "user", None, "text", "Go.", None).await.unwrap();
+    assert!(handle.input().deliver_batch(&[row]).await, "the page is taken");
+    let sleep_pid = || -> Option<u32> {
+        let out = std::process::Command::new("pgrep").args(["-x", "-f", &format!("sleep {marker}")]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
+    };
+    let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) == 0 };
+    // The job starts: its own `sleep` PID, captured once.
+    let started = tokio::time::Instant::now() + Duration::from_secs(120);
+    let pid = loop {
+        if let Some(pid) = sleep_pid() { break pid; }
+        assert!(tokio::time::Instant::now() < started, "the job never started");
+        while let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(200), handle.event_rx.recv()).await {
+            eprintln!("event: {ev:?}");
+        }
+    };
+    eprintln!("job: sleep {marker}, pid {pid}");
+    // The temporary halt's own interrupt: the turn ends, the job stays.
+    assert!(handle.interrupt_at(TEMPORARY_HALT_INTERRUPT, 1), "the interrupt was queued");
+    let mut notices = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match tokio::time::timeout_at(deadline, handle.event_rx.recv()).await {
+            Ok(Some(AgentEvent::TurnComplete { stop_reason, .. })) => { eprintln!("turn complete: {stop_reason:?}"); break; }
+            Ok(Some(AgentEvent::Notice(n))) => { eprintln!("notice: {n}"); notices.push(n); }
+            Ok(Some(ev)) => eprintln!("event: {ev:?}"),
+            other => panic!("no completion after the interrupt: {other:?}"),
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(alive(pid), "the temporary halt kept the job (pid {pid}); notices: {notices:?}");
+    assert!(!notices.iter().any(|n| n.contains("stopped")), "nothing reported stopped: {notices:?}");
+    // A Pause while idle stops it, after the atomic grace.
+    let paused = std::time::Instant::now();
+    assert!(handle.interrupt_at(PAUSE_INTERRUPT, 1), "the Pause was queued");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut stopped_notice = None;
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, handle.event_rx.recv()).await {
+        if let AgentEvent::Notice(n) = &ev { if n.contains("paused") { stopped_notice = Some(n.clone()); break; } }
+        eprintln!("event: {ev:?}");
+    }
+    eprintln!("pause notice after {:?}: {stopped_notice:?}", paused.elapsed());
+    assert!(!alive(pid), "the idle Pause stopped the job");
+    assert!(stopped_notice.is_some_and(|n| n.contains("1 process was stopped")));
+    handle.kill();
+}
