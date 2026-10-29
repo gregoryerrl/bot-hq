@@ -171,6 +171,19 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   participants get no user MCP servers, and the change reaches participants
   spawned after it. Before this a Driver asked to check a team channel had no
   Discord (feedback #141).
+- A Codex participant's TEMPORARY halt no longer kills the job it is waiting
+  on. Declaring `mark_awaiting_user` / `halt` with `wake_after_secs` still
+  interrupts the declarer's turn (and the deadline still reaps a turn that
+  will not end), but the commands its own exec sessions are running are kept
+  through to the wake; a plain halt, a preempt, a stray turn, a failed gate
+  hook, a replacement and a close stop them as before. Pause now stops such a
+  kept job even when the participant is idle — after the atomic-command
+  grace, since what still runs after a turn ended is not known to be a plain
+  command — and an app-server whose processes cannot be told apart is reaped
+  rather than guessed at. bot-hq's own host commands still stop on any
+  interrupt; on Windows there is no process-tree walk, as before. Before
+  this, following the external-wait rule killed a running test suite
+  (feedback #139).
 - A controller's watch set to `wake: false` now records its pending event:
   `watches` shows the first unacknowledged matching event, for sessions created
   after the watch too, and nothing wakes the controller — no notice, no turn,

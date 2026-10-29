@@ -2859,7 +2859,7 @@ impl SignalingBridge {
     ) -> Option<String> {
         if !incarnation.is_active() { return None; }
         let prior = self.mark_awaiting_user(session_id.clone(), agent.clone(), reason).await;
-        self.notify_incarnation_halt_acked(&session_id, &agent, incarnation);
+        self.notify_incarnation_halt_acked(&session_id, &agent, incarnation, false);
         prior
     }
 

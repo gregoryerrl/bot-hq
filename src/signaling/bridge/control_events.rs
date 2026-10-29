@@ -481,7 +481,7 @@ mod tests {
             SignalingEvent::SessionAttention { session_id: "t".into(), state: None },
             SignalingEvent::StageDelivered { session_id: "t".into() },
             SignalingEvent::StagedDeliveryDue { session_id: "t".into() },
-            SignalingEvent::HaltAcked { session_id: "t".into(), agent: "hands".into(), incarnation: None },
+            SignalingEvent::HaltAcked { session_id: "t".into(), agent: "hands".into(), incarnation: None, temporary: false },
             SignalingEvent::SessionCloseRequest { session_id: "t".into(), agent: "hands".into(), archive: false },
         ] {
             journal.record(&quiet).await;

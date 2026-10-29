@@ -295,6 +295,15 @@ pub struct ControlRequestBody {
     pub fields: serde_json::Map<String, Value>,
 }
 
+/// The interrupt a user's Pause sends (`core::state::interrupt_then_escalate`).
+pub const PAUSE_INTERRUPT: &str = "cancel";
+
+/// The interrupt a participant's own TEMPORARY halt sends once the halt
+/// landed (feedback #139): it ends the turn like any interrupt, but a Codex
+/// driver keeps the commands the declarer left running — the external job
+/// the halt waits on — where every other interrupt stops them.
+pub const TEMPORARY_HALT_INTERRUPT: &str = "halt-temporary";
+
 impl ControlRequest {
     /// An `interrupt` control request. `request_id` correlates the
     /// `control_response` ACK (any string unique enough per in-flight request).

@@ -366,6 +366,14 @@ fn parse_wake_after(args: &Value) -> Result<Option<std::time::Duration>, JsonRpc
     Ok(Some(std::time::Duration::from_secs(secs)))
 }
 
+/// Whether halt tool arguments declare a TEMPORARY halt — by the tools' own
+/// rule ([`parse_wake_after`]): a present, valid `wake_after_secs`. The pump
+/// reads a declaration's arguments with this (feedback #139), so a plain, a
+/// null or an out-of-range wake never counts as temporary.
+pub(crate) fn requests_temporary_halt(args: &Value) -> bool {
+    matches!(parse_wake_after(args), Ok(Some(_)))
+}
+
 /// Does a halt `reason` read as waiting on a PEER rather than on the user?
 ///
 /// The shape it refuses (the `s-96fda118` deadlock): both agents marked

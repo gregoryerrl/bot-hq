@@ -640,7 +640,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                                 tracing::warn!(?e, %session_id, "close_session via MCP event failed");
                             }
                         }
-                        SignalingEvent::HaltAcked { session_id, agent, incarnation } => {
+                        SignalingEvent::HaltAcked { session_id, agent, incarnation, temporary } => {
                             // rc3 D35: the declarer said it is waiting — stop
                             // its residual generation so the halt is a halt.
                             // Keyed on the halt tool's RESULT reaching the
@@ -650,7 +650,7 @@ fn run_gui(startup: &mut StartupState) -> Result<()> {
                             // agent's transcript showed its own halt as
                             // rejected. By the time the result is in the
                             // stream there is nothing left to race.
-                            core_for_worker.halt_declared(&session_id, &agent, incarnation).await;
+                            core_for_worker.halt_declared(&session_id, &agent, incarnation, temporary).await;
                         }
                         SignalingEvent::StrayTurn { session_id, agent, epoch, incarnation } => {
                             // D3: a turn nobody dealt, while another

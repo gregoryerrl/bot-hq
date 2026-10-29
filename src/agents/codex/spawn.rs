@@ -767,12 +767,51 @@ impl Driver {
                     }
                 }
                 ctl = control_rx.recv(), if controls_open => {
-                    let Some(_ctl) = ctl else { controls_open = false; continue };
+                    let Some(ctl) = ctl else { controls_open = false; continue };
+                    let reason = ctl.request_id.as_str();
                     self.interrupt(active_turn.as_deref());
                     if active_turn.is_some() {
                         let atomic = atomic_in_flight(&running);
                         arm_deadline(&mut deadline, atomic, &self.deadlines);
-                        stop_commands = Some(stop_commands.unwrap_or(false) || atomic);
+                        // A TEMPORARY halt's own interrupt keeps the commands
+                        // the declarer left running — the external job its halt
+                        // waits on (feedback #139). The turn still ends and the
+                        // deadline still reaps a turn that will not; any other
+                        // interrupt in the same turn (a Pause, a preempt) asks
+                        // for the cleanup, and nothing un-asks it.
+                        if reason != crate::agents::protocol::TEMPORARY_HALT_INTERRUPT {
+                            stop_commands = Some(stop_commands.unwrap_or(false) || atomic);
+                        }
+                    } else if reason == crate::agents::protocol::PAUSE_INTERRUPT {
+                        // A Pause with no turn in flight: nothing to interrupt
+                        // (no RPC, no turn), but what an earlier turn left
+                        // running — kept by a temporary halt, or outliving an
+                        // ordinary completion — is stopped now. With the ATOMIC
+                        // grace: the item map clears at every turn end, so what
+                        // still runs is not known to be plain.
+                        let grace = tokio::time::Instant::now() + self.deadlines.atomic;
+                        match self.stop_interrupted_commands(true, Some(grace)).await {
+                            Ok(0) => {}
+                            Ok(n) => {
+                                let _ = event_tx.send(AgentEvent::Notice(format!(
+                                    "{}'s command was still running when it was paused; {n} process{} stopped.",
+                                    self.agent_name, if n == 1 { " was" } else { "es were" }
+                                ))).await;
+                            }
+                            Err(why) => {
+                                // Unknown is not clean: the app-server's own tree
+                                // goes, as after an interrupted turn.
+                                warn!(agent = %self.agent_name, %why, "could not tell whether a kept command still runs; giving the app-server up");
+                                if let Some(pid) = self.server_pid {
+                                    crate::process::kill_process_tree(pid);
+                                }
+                                let _ = event_tx.send(AgentEvent::Notice(format!(
+                                    "{}: at a Pause bot-hq could not tell whether its command still runs ({why}); its Codex app-server was reaped and the next message resumes its thread.",
+                                    self.agent_name
+                                ))).await;
+                                return;
+                            }
+                        }
                     }
                 }
                 inc = incoming.recv() => {
@@ -2038,6 +2077,151 @@ mod tests {
         assert!(alive(helper_pid), "Codex's helper, beside its binary and started by it, is left alone");
         assert!(own.iter().all(|p| alive(*p)), "the server's own codex binary is untouched");
         assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
+        drop(server);
+    }
+
+    /// Feedback #139: a TEMPORARY halt's own interrupt ends the turn — the
+    /// RPC goes out, the deadline is armed — but keeps the command the
+    /// declarer is waiting on: no "stopped" notice, the job lives through the
+    /// halt and an ordinary next turn. A Pause on the idle participant then
+    /// stops it, with the ATOMIC grace (what still runs after a turn ended is
+    /// not known to be plain: the item map clears at every turn end), sending
+    /// nothing to the server and starting no turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_temporary_halt_keeps_the_command_it_waits_on_until_a_pause() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("run the suite")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let command = start_command(server_pid, &own);
+        h.fake.write(json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "exec-1", "command": "/bin/zsh -lc 'cargo test'", "status": "inProgress"}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        h.control.send(ControlRequest::interrupt(crate::agents::protocol::TEMPORARY_HALT_INTERRUPT)).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        h.fake.turn_interrupted("t1").await;
+        let done = next_event(&mut h).await;
+        assert!(matches!(&done, AgentEvent::TurnComplete { .. }), "the completion, with no cleanup notice first: {done:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(alive(command), "the job the halt waits on runs on");
+        // The wake's ordinary turn: the job still runs after it.
+        h.input.send(OutgoingUserMessage::text("[system] the temporary halt expired")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t2", "status": "inProgress", "items": []}})).await;
+        h.fake.turn_completed("t2").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { is_error: false, .. }));
+        assert!(alive(command));
+        // Pause, idle: the kept job is stopped — after the atomic grace.
+        let t0 = std::time::Instant::now();
+        h.control.send(ControlRequest::interrupt(crate::agents::protocol::PAUSE_INTERRUPT)).await.unwrap();
+        let notice = next_event(&mut h).await;
+        assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "{notice:?}");
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(700), "the atomic grace first: {:?}", t0.elapsed());
+        assert!(!alive(command), "gone before the notice");
+        h.fake.silent_for(std::time::Duration::from_millis(300)).await;
+        assert!(own.iter().all(|p| alive(*p)) && alive(server_pid), "the app-server's own tree is untouched");
+        drop(server);
+    }
+
+    /// The idle Pause's grace is a real wait: a kept job — here an atomic
+    /// step, a `git commit` — that finishes by itself inside it is not killed
+    /// and nothing is reported stopped.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_pause_lets_a_kept_job_finish_inside_the_grace() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        let mut h = harness();
+        SERVER_PID.with(|p| p.set(None));
+        h.input.send(OutgoingUserMessage::text("commit it")).await.unwrap();
+        h.fake.hooks_armed().await;
+        let start = h.fake.read().await;
+        h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+        let command = start_command(server_pid, &own);
+        h.fake.write(json!({"method": "item/started", "params": {"item": {"type": "commandExecution", "id": "exec-1", "command": "/bin/zsh -lc 'git commit -m x'", "status": "inProgress"}}})).await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::ToolUse { .. }));
+        h.control.send(ControlRequest::interrupt(crate::agents::protocol::TEMPORARY_HALT_INTERRUPT)).await.unwrap();
+        let req = h.fake.read().await;
+        h.fake.answer_interrupt(&req, "t1").await;
+        h.fake.turn_interrupted("t1").await;
+        assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
+        assert!(alive(command));
+        h.control.send(ControlRequest::interrupt(crate::agents::protocol::PAUSE_INTERRUPT)).await.unwrap();
+        // The job ends by itself 300 ms into the grace.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        unsafe {
+            libc::kill(command as i32, libc::SIGTERM);
+        }
+        assert!(wait_dead(command));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1200), h.events.recv()).await.is_err(),
+            "nothing was killed, so nothing is reported stopped"
+        );
+        assert!(own.iter().all(|p| alive(*p)) && alive(server_pid));
+        drop(server);
+    }
+
+    /// A Pause and a temporary halt in the same turn, in either order: the
+    /// Pause's cleanup request stands — the halt never cancels it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pause_beside_a_temporary_halt_still_stops_the_command() {
+        use crate::agents::protocol::{PAUSE_INTERRUPT, TEMPORARY_HALT_INTERRUPT};
+        for order in [[TEMPORARY_HALT_INTERRUPT, PAUSE_INTERRUPT], [PAUSE_INTERRUPT, TEMPORARY_HALT_INTERRUPT]] {
+            let (server, server_pid, own) = command_server();
+            SERVER_PID.with(|p| p.set(Some(server_pid)));
+            let mut h = harness();
+            SERVER_PID.with(|p| p.set(None));
+            h.input.send(OutgoingUserMessage::text("run it")).await.unwrap();
+            h.fake.hooks_armed().await;
+            let start = h.fake.read().await;
+            h.fake.answer(&start, json!({"turn": {"id": "t1", "status": "inProgress", "items": []}})).await;
+            let command = start_command(server_pid, &own);
+            for reason in order {
+                h.control.send(ControlRequest::interrupt(reason)).await.unwrap();
+                let req = h.fake.read().await;
+                h.fake.answer_interrupt(&req, "t1").await;
+            }
+            h.fake.turn_interrupted("t1").await;
+            let notice = next_event(&mut h).await;
+            assert!(matches!(&notice, AgentEvent::Notice(n) if n.contains("1 process was stopped")), "{order:?}: {notice:?}");
+            assert!(!alive(command), "{order:?}");
+            assert!(matches!(next_event(&mut h).await, AgentEvent::TurnComplete { .. }));
+            drop(server);
+        }
+    }
+
+    /// An idle Pause over an app-server whose own tree was never listed:
+    /// the kept work cannot be told from the server's own processes, so the
+    /// server is given up and the notice says why — never a kill by guess.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_idle_pause_over_an_unknown_baseline_reaps_the_server() {
+        let (server, server_pid, own) = command_server();
+        SERVER_PID.with(|p| p.set(Some(server_pid)));
+        BASELINE_UNKNOWN.with(|b| b.set(true));
+        let mut h = harness();
+        BASELINE_UNKNOWN.with(|b| b.set(false));
+        SERVER_PID.with(|p| p.set(None));
+        let command = start_command(server_pid, &own);
+        h.control.send(ControlRequest::interrupt(crate::agents::protocol::PAUSE_INTERRUPT)).await.unwrap();
+        let mut saw = false;
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(6), h.events.recv()).await.unwrap() {
+                Some(AgentEvent::Notice(n)) if n.contains("could not tell") && n.contains("never listed") => saw = true,
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(saw, "the reaped notice names the unknown baseline");
+        let mut server = server;
+        assert!(wait_dead(command) && server.exited());
         drop(server);
     }
 

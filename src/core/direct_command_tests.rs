@@ -99,7 +99,10 @@ async fn routine_direct_output_is_not_rebroadcast_to_the_channel() {
 
 #[tokio::test]
 async fn every_issuer_interrupt_stops_direct_work_and_records_unknown_outcome() {
-    for reason in ["cancel", "halt-self-declared", "stray-turn", "user-preempt"] {
+    // A TEMPORARY halt's interrupt included, on purpose (feedback #139): it
+    // keeps the commands a Codex participant's own exec sessions run, never
+    // bot-hq's host-owned direct work, which stops on any issuer interrupt.
+    for reason in ["cancel", "halt-self-declared", crate::agents::protocol::TEMPORARY_HALT_INTERRUPT, "stray-turn", "user-preempt"] {
         let f = gate_fixture().await;
         let task = run(&f, "echo $$ > gate-leader; sh gate-command.sh; :");
         started(&f).await;

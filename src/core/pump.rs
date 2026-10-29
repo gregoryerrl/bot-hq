@@ -1230,7 +1230,9 @@ pub async fn pump_agent(
     // turn it into a rejection. Id-matched like the atomic flag (parallel tool
     // calls), cleared with it at turn end so a stranded id cannot fire on the
     // next turn's unrelated result.
-    let mut halt_tool_id: Option<String> = None;
+    // The halt declaration in flight: its id, and whether it is a TEMPORARY
+    // halt by the halt tools' own rule (feedback #139).
+    let mut halt_tool: Option<(String, bool)> = None;
     // Provider-limit detection: the first matching line seen this turn, and the
     // last time a notice fired (per-incarnation dedupe — one notice per
     // incident, not one per nudged retry).
@@ -1704,9 +1706,16 @@ pub async fn pump_agent(
                     pass_pending = true;
                 }
                 // A1b: remember a halt declaration's id — the interrupt waits
-                // for ITS result (see `halt_tool_id`).
+                // for ITS result (see `halt_tool`) — and whether it asked for a
+                // wake (a TEMPORARY halt, feedback #139), read from its own
+                // arguments by the tools' own rule; Codex may hand the
+                // arguments over as a JSON string.
                 if is_halt_tool(&name) {
-                    halt_tool_id = Some(id.clone());
+                    let args = match &input {
+                        serde_json::Value::String(text) => serde_json::from_str(text).unwrap_or(serde_json::Value::Null),
+                        other => other.clone(),
+                    };
+                    halt_tool = Some((id.clone(), crate::signaling::requests_temporary_halt(&args)));
                 }
                 // Batch 7: a tool call started — suppress stall detection until
                 // its ToolResult (a long build/install emits no events meanwhile).
@@ -1821,11 +1830,10 @@ pub async fn pump_agent(
                 // NON-error result: a halt that failed took no effect, and a
                 // declarer whose halt never landed must not be cut off. The
                 // id match, not the position: parallel tool calls.
-                if halt_tool_id.as_deref() == Some(tool_use_id.as_str()) {
-                    halt_tool_id = None;
+                if let Some((_, temporary)) = halt_tool.take_if(|(id, _)| *id == tool_use_id) {
                     if !is_error {
                         if let Some(bridge) = &cfg.bridge {
-                            bridge.notify_incarnation_halt_acked(&cfg.session_id, &cfg.slug, &cfg.incarnation);
+                            bridge.notify_incarnation_halt_acked(&cfg.session_id, &cfg.slug, &cfg.incarnation, temporary);
                         }
                     }
                 }
@@ -2478,7 +2486,7 @@ pub async fn pump_agent(
                 }
                 // A1b: same for a halt declaration whose result never came —
                 // it must not fire on the next turn's unrelated result.
-                halt_tool_id = None;
+                halt_tool = None;
             }
             AgentEvent::Init {
                 session_id,
@@ -5566,6 +5574,48 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(drain_acks(&mut events), 0, "a plain tool result is not a halt ack");
 
+        drop(ev_tx);
+        task.await.unwrap();
+    }
+
+    /// Feedback #139: the ack says whether the halt was TEMPORARY, read with
+    /// the halt tools' own rule — a valid `wake_after_secs` (10 s–48 h), as an
+    /// object or a JSON string (Codex hands arguments either way). A plain
+    /// halt, a null wake, an out-of-range one and a failed halt never count;
+    /// a failed one fires nothing at all.
+    #[tokio::test]
+    async fn a_temporary_halts_ack_says_so_by_the_tools_own_rule() {
+        let (storage, state) = setup().await;
+        let bridge = SignalingBridge::new();
+        bridge.set_storage(storage.clone()).await;
+        let mut events = bridge.subscribe();
+        let cfg = PumpConfig { bridge: Some(Arc::clone(&bridge)), ..fast_cfg("hands") };
+        let (ev_tx, ev_rx) = mpsc::channel::<AgentEvent>(16);
+        let task = tokio::spawn(pump_agent(cfg, ev_rx, storage.clone(), state));
+        use crate::signaling::SignalingEvent;
+        let acks = |events: &mut tokio::sync::broadcast::Receiver<SignalingEvent>| {
+            let mut out = Vec::new();
+            while let Ok(ev) = events.try_recv() {
+                if let SignalingEvent::HaltAcked { temporary, .. } = ev {
+                    out.push(temporary);
+                }
+            }
+            out
+        };
+        let cases = [
+            ("t1", serde_json::json!({"reason": "CI on #531", "wake_after_secs": 600}), false, vec![true]),
+            ("t2", serde_json::json!("{\"reason\":\"CI\",\"wake_after_secs\":600}"), false, vec![true]),
+            ("t3", serde_json::json!({"reason": "your call"}), false, vec![false]),
+            ("t4", serde_json::json!({"reason": "plain", "wake_after_secs": null}), false, vec![false]),
+            ("t5", serde_json::json!({"reason": "typo", "wake_after_secs": 5}), false, vec![false]),
+            ("t6", serde_json::json!({"reason": "CI", "wake_after_secs": 600}), true, vec![]),
+        ];
+        for (id, input, is_error, expected) in cases {
+            ev_tx.send(AgentEvent::ToolUse { id: id.into(), name: "mcp__bot-hq-signaling__mark_awaiting_user".into(), input }).await.unwrap();
+            ev_tx.send(AgentEvent::ToolResult { tool_use_id: id.into(), content: "ok".into(), is_error }).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(acks(&mut events), expected, "{id}");
+        }
         drop(ev_tx);
         task.await.unwrap();
     }

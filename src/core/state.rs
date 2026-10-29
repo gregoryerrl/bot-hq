@@ -2839,7 +2839,7 @@ impl AppState {
     /// nothing left to race; a halt whose result is an error took no effect
     /// and does not interrupt. `main.rs` pins the routing.
     pub async fn halt_declared(&self, session_id: &str, agent_slug: &str,
-        incarnation: Option<Arc<crate::agents::incarnation::Incarnation>>) {
+        incarnation: Option<Arc<crate::agents::incarnation::Incarnation>>, temporary: bool) {
         let _lease = match incarnation.as_ref() {
             Some(i) => match i.enter().await { Some(lease) => Some(lease), None => return },
             None => None,
@@ -2849,7 +2849,11 @@ impl AppState {
             for agent in handle.agents() {
                 if agent.slug == agent_slug && incarnation.as_ref()
                     .is_none_or(|i| agent.handle.incarnation().id() == i.id()) {
-                    agent.interrupt("halt-self-declared");
+                    // A TEMPORARY halt names itself (feedback #139): the
+                    // turn ends either way, but a Codex driver keeps the
+                    // commands the declarer left running — the external job
+                    // its halt waits on — for this reason only.
+                    agent.interrupt(if temporary { crate::agents::protocol::TEMPORARY_HALT_INTERRUPT } else { "halt-self-declared" });
                 }
             }
         }
@@ -3624,8 +3628,8 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(calls.len(), 1, "halt_declared has exactly one caller in main.rs");
-        assert!(main[calls[0]..].starts_with("halt_declared(&session_id, &agent, incarnation).await"),
-            "the control worker must preserve the queued incarnation, not pass None");
+        assert!(main[calls[0]..].starts_with("halt_declared(&session_id, &agent, incarnation, temporary).await"),
+            "the control worker must preserve the queued incarnation, not pass None, and the halt's kind");
         let arm_start = main[..calls[0]]
             .rfind("SignalingEvent::")
             .expect("the call sits inside a match arm");
@@ -3723,16 +3727,38 @@ mod tests {
             if retired { old.retire().await; }
             // Even an active but different incarnation must not target the
             // installed handle just because its slug and epoch match.
-            state.halt_declared("s1", "hands", Some(old.clone())).await;
+            state.halt_declared("s1", "hands", Some(old.clone()), false).await;
             state.sessions.lock().await.get("s1").unwrap().in_atomic_tool.store(true, Ordering::Release);
             tokio::time::timeout(std::time::Duration::from_millis(100), state.stray_turn("s1", "hands", 15, Some(old)))
                 .await.expect("a stale callback must not wait on the replacement's atomic tool");
             assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
             assert!(!said_stopped(&storage).await);
             let current = state.sessions.lock().await.get("s1").unwrap().participants[0].handle.incarnation();
-            state.halt_declared("s1", "hands", Some(current)).await;
+            state.halt_declared("s1", "hands", Some(current), false).await;
             assert_eq!(stamp.load(Ordering::Acquire), 15, "a matching live incarnation still interrupts");
         }
+    }
+
+    /// Feedback #139: the self-interrupt names the halt it follows — a
+    /// TEMPORARY halt sends `halt-temporary` (a Codex driver then keeps the
+    /// declarer's running commands: the external job its halt waits on), a
+    /// plain one `halt-self-declared`, as before.
+    #[tokio::test]
+    async fn a_temporary_halt_interrupts_with_its_own_reason() {
+        let (state, _storage, _tmp) = state_with_stub().await;
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(4);
+        {
+            let mut sessions = state.sessions.lock().await;
+            let handle = sessions.get_mut("s1").unwrap();
+            let (_event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+            let (input_tx, _input_rx) = tokio::sync::mpsc::channel(1);
+            let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel();
+            handle.participants[0].handle = crate::agents::AgentHandle::from_parts("hands".into(), "s1", event_rx, input_tx, control_tx, kill_tx);
+        }
+        state.halt_declared("s1", "hands", None, true).await;
+        assert_eq!(control_rx.try_recv().unwrap().request_id, crate::agents::protocol::TEMPORARY_HALT_INTERRUPT);
+        state.halt_declared("s1", "hands", None, false).await;
+        assert_eq!(control_rx.try_recv().unwrap().request_id, "halt-self-declared");
     }
 
     #[tokio::test]
@@ -3754,7 +3780,7 @@ mod tests {
             }
         };
         assert_eq!(scope.as_ref().map(|i| i.id()), Some(old.id()));
-        state.halt_declared("s1", "hands", scope).await;
+        state.halt_declared("s1", "hands", scope, false).await;
         assert_eq!(stamp.load(Ordering::Acquire), crate::agents::NO_INTERRUPT_EPOCH);
         assert!(storage.session_halt("s1").await.unwrap().unwrap().1.contains("recorded limit halt"));
         assert!(matches!(ring_rx.try_recv(), Ok(crate::core::sequencer::SequencerCommand::HaltDeclared { .. })),

@@ -32,6 +32,7 @@ pub(crate) use bridge::ApprovalContext;
 pub(crate) use bridge::McpTokenProof;
 pub(crate) use bridge::{commands_run, gate_surface, is_gh_api_read, is_outward, GateSurface, RunCommand};
 mod jsonrpc;
+pub(crate) use jsonrpc::requests_temporary_halt;
 /// Parity oracle for the session-focused redesign — pins today's tool
 /// authorization so the capability rewrite can be proven not to change it.
 /// Test-only: compiles to nothing in a release build.

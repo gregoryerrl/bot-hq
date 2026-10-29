@@ -261,6 +261,10 @@ pub enum SignalingEvent {
         session_id: String,
         agent: String,
         incarnation: Option<Arc<crate::agents::incarnation::Incarnation>>,
+        /// The declaration was a TEMPORARY halt (a valid `wake_after_secs`,
+        /// feedback #139): the self-interrupt then keeps a Codex declarer's
+        /// running commands — the external job its halt waits on.
+        temporary: bool,
     },
     /// A participant's pump saw a turn nobody dealt — claude-code started it
     /// itself, e.g. on a background task's notification — while ANOTHER
@@ -1305,14 +1309,18 @@ impl SignalingBridge {
             session_id: session_id.to_string(),
             agent: agent.to_string(),
             incarnation: None,
+            temporary: false,
         });
     }
 
+    /// `temporary`: the halt was a TEMPORARY one by the halt tools' own rule
+    /// (feedback #139) — only the pump, reading the declaration's own
+    /// arguments, may say so; a host-declared halt is never one.
     pub fn notify_incarnation_halt_acked(&self, session_id: &str, agent: &str,
-        incarnation: &Arc<crate::agents::incarnation::Incarnation>) {
+        incarnation: &Arc<crate::agents::incarnation::Incarnation>, temporary: bool) {
         let _ = self.event_tx.send(SignalingEvent::HaltAcked {
             session_id: session_id.to_string(), agent: agent.to_string(),
-            incarnation: Some(Arc::clone(incarnation)),
+            incarnation: Some(Arc::clone(incarnation)), temporary,
         });
     }
 
