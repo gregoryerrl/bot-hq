@@ -1141,15 +1141,24 @@ pub enum SequencerCommand {
     /// events across 38 sessions (49% of two-participant sessions), worst gap
     /// 478 minutes, always the reviewer. The tally/lap clear does NOT read this
     /// flag: the user speaking clears votes either way (see `advance_turn`).
+    ///
+    /// **`answers_for` names the ASKERS of the tray answers this release
+    /// delivers** (feedback #133) — empty for anything else: a typed message,
+    /// a controller's send, a wake. A release the ring holds back and replays
+    /// later meets the persisted halt slot first ([`replay_held_release`]):
+    /// only a halt declared by one of these askers — who halted without
+    /// having read its answer — may be cleared by it.
     UserMessage {
         mentions: Vec<i64>,
         restarts_rotation: bool,
+        answers_for: Vec<String>,
     },
     /// Internal replay boundary: the fresh user message that released a Pause.
     /// Held commands before it update state without issuing another deal.
     PauseReleased {
         mentions: Vec<i64>,
         restarts_rotation: bool,
+        answers_for: Vec<String>,
     },
     /// The user STAGED a response while the ring runs (the Stage toggle,
     /// 2026-08-15): the content sits in `AppState`; this is only the flag.
@@ -1427,6 +1436,29 @@ impl SequencerCommand {
 /// inherit. The one deliberate exception is the summons QUEUE — an unserved
 /// summons is the user's standing instruction, not stretch state; see its
 /// field doc. The individual field docs say why for each.
+/// A release the ring holds back — a wind-down stash, a boot hold, an answer
+/// for a live holder — folded: the mentions it carries (queued behind each
+/// other), whether any of it was a typed steer (a reset wins), and the askers
+/// of the tray answers in it (feedback #133).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct HeldRelease {
+    mentions: Vec<i64>,
+    restarts: bool,
+    askers: Vec<String>,
+}
+
+impl HeldRelease {
+    fn fold(&mut self, mentions: Vec<i64>, restarts: bool, askers: Vec<String>) {
+        self.mentions.extend(mentions);
+        self.restarts |= restarts;
+        self.askers.extend(askers);
+    }
+
+    fn fold_into(slot: &mut Option<HeldRelease>, mentions: Vec<i64>, restarts: bool, askers: Vec<String>) {
+        slot.get_or_insert_with(HeldRelease::default).fold(mentions, restarts, askers);
+    }
+}
+
 #[derive(Default)]
 struct RingState {
     boundary: Option<BoundaryState>,
@@ -1531,13 +1563,16 @@ struct RingState {
     /// keeps firing as D35 designed: it is what makes the completion arrive in
     /// milliseconds rather than at the residual generation's leisure.
     winding_down: Option<i64>,
-    /// The mentions of a `UserMessage` held back by `winding_down` (see above);
-    /// `None` = nothing held. Two releases in the window merge into one — the
-    /// rows are already in the channel, and one restart drains them.
-    stashed_release: Option<(Vec<i64>, bool)>,
+    /// A `UserMessage` held back by `winding_down` (see above), folded into a
+    /// [`HeldRelease`]; `None` = nothing held. Two releases in the window merge
+    /// into one — the rows are already in the channel, and one restart drains
+    /// them. Its replay meets the halt slot first ([`replay_held_release`]).
+    stashed_release: Option<HeldRelease>,
     /// Non-preempting tray answers wait for a LIVE holder, without the short
     /// wind-down deadline: real work may take minutes, and is not interrupted.
-    pending_answer: Option<Vec<i64>>,
+    /// Also where a replayed release is KEPT when a later halt stands
+    /// ([`replay_held_release`]): the next `release_ring` merges it.
+    pending_answer: Option<HeldRelease>,
     /// Preserve a user release's reset intent while an approval still blocks
     /// dealing. Its mentions are already in the summons queue.
     gated_restart: Option<bool>,
@@ -1554,7 +1589,7 @@ struct RingState {
     /// and deals it when 3 s pass, and boot takes about a minute — a boot
     /// release in the stash was dealt to a pump still orienting, the #10
     /// wedge. Only `BootEnded` releases this one.
-    boot_release: Option<(Vec<i64>, bool)>,
+    boot_release: Option<HeldRelease>,
     /// Pause-release markers still in the replay queue. Replayed completions
     /// record their endings, but the final release alone deals the new work.
     /// A second Pause can hold an earlier marker, so this is a count, not a flag.
@@ -1562,6 +1597,9 @@ struct RingState {
     /// A typed steer among coalesced releases must not become a continuation
     /// just because the last release was a tray answer.
     pause_release_restarts: bool,
+    /// The askers of the tray answers coalesced into a Pause release (feedback
+    /// #133) — carried to the release that finally deals.
+    pause_release_askers: Vec<String>,
     /// Participants that have parked a question and cannot proceed until the user
     /// answers (rc3 D22). The ring skips no-one on account of this — it HALTS when
     /// it reaches one, which is what bounds the extra work at one lap. Cleared by
@@ -1612,50 +1650,34 @@ impl RingState {
     /// Hold a release back for the halted holder's completion (round 10, B1).
     /// A second release in the window merges its mentions into the first — one
     /// restart drains every row.
-    fn stash_release(&mut self, mentions: Vec<i64>, restarts_rotation: bool) {
-        match self.stashed_release.as_mut() {
-            // Two held releases fold into one replay: mentions queue behind
-            // each other as they would across two turns, and ONE of them
-            // being a typed message (a reset) makes the fold a reset — the
-            // stronger semantic wins, so a user's steer is never downgraded
-            // to a continuation by a tray answer sharing the stash.
-            Some((held, restarts)) => {
-                held.extend(mentions);
-                *restarts |= restarts_rotation;
-            }
-            None => self.stashed_release = Some((mentions, restarts_rotation)),
-        }
+    fn stash_release(&mut self, mentions: Vec<i64>, restarts_rotation: bool, askers: Vec<String>) {
+        // Two held releases fold into one replay: mentions queue behind
+        // each other as they would across two turns, and ONE of them
+        // being a typed message (a reset) makes the fold a reset — the
+        // stronger semantic wins, so a user's steer is never downgraded
+        // to a continuation by a tray answer sharing the stash.
+        HeldRelease::fold_into(&mut self.stashed_release, mentions, restarts_rotation, askers);
     }
 
     /// Hold a release that arrived during boot (feedback #10). Folds exactly
     /// like [`Self::stash_release`] — mentions queue behind each other and a
     /// reset wins — but into `boot_release`, which no timer watches.
-    fn hold_for_boot(&mut self, mentions: Vec<i64>, restarts_rotation: bool) {
-        match self.boot_release.as_mut() {
-            Some((held, restarts)) => {
-                held.extend(mentions);
-                *restarts |= restarts_rotation;
-            }
-            None => self.boot_release = Some((mentions, restarts_rotation)),
-        }
+    fn hold_for_boot(&mut self, mentions: Vec<i64>, restarts_rotation: bool, askers: Vec<String>) {
+        HeldRelease::fold_into(&mut self.boot_release, mentions, restarts_rotation, askers);
     }
 
     /// The held release, once nothing is winding down any more; `None` when
     /// there is nothing to replay or a completion is still owed.
-    fn take_stashed_release(&mut self) -> Option<(Vec<i64>, bool)> {
+    fn take_stashed_release(&mut self) -> Option<HeldRelease> {
         if self.winding_down.is_some() {
             return None;
         }
         if !self.has_live_turn() {
-            if let Some(mut mentions) = self.pending_answer.take() {
-                let restarts = match self.stashed_release.take() {
-                    Some((later_mentions, restarts)) => {
-                        mentions.extend(later_mentions);
-                        restarts
-                    }
-                    None => false,
-                };
-                return Some((mentions, restarts));
+            if let Some(mut held) = self.pending_answer.take() {
+                if let Some(later) = self.stashed_release.take() {
+                    held.fold(later.mentions, later.restarts, later.askers);
+                }
+                return Some(held);
             }
         }
         self.stashed_release.take()
@@ -2076,8 +2098,8 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                          grace; dealing the held release anyway"
                     );
                     state.winding_down = None;
-                    if let Some((mentions, restarts)) = state.take_stashed_release() {
-                        release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
+                    if let Some(held) = state.take_stashed_release() {
+                        replay_held_release(&deps, &mut rx, &mut state, held).await;
                     }
                     continue;
                 }
@@ -2100,7 +2122,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // loop off the DEFERRED queue was read earlier and must not
                 // release a pause that arrived after it: it falls through to the
                 // gate below and is held like anything else.
-                Some(SequencerCommand::UserMessage { mentions, restarts_rotation }) if state.paused => {
+                Some(SequencerCommand::UserMessage { mentions, restarts_rotation, answers_for }) if state.paused => {
                     state.paused = false;
                     // The steer takes its place at the END of the held queue, so
                     // everything the pause caught ahead of it — a park, a
@@ -2116,6 +2138,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     state.held.push_back(SequencerCommand::PauseReleased {
                         mentions,
                         restarts_rotation,
+                        answers_for,
                     });
                     let replayed = release_held(&mut state.held, &mut state.deferred);
                     debug!(
@@ -2187,10 +2210,10 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         SequencerCommand::GateOpened { choice_id: choice_id.clone() });
                     boundary_completion = true;
                 }
-                SequencerCommand::PauseReleased { mentions, restarts_rotation } => {
+                SequencerCommand::PauseReleased { mentions, restarts_rotation, answers_for } => {
                     state.pause_releases_pending = state.pause_releases_pending.saturating_sub(1);
                     state.boundary.as_mut().unwrap().queued.push_back(
-                        SequencerCommand::UserMessage { mentions, restarts_rotation });
+                        SequencerCommand::UserMessage { mentions, restarts_rotation, answers_for });
                     continue;
                 }
                 command => {
@@ -2227,29 +2250,34 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // A release held back for this participant's completion is dealt
                 // now that its process is idle (round 10, B1) — the same path a
                 // fresh `UserMessage` takes, so nothing about the restart differs.
-                if let Some((mentions, restarts)) = state.take_stashed_release() {
+                if let Some(held) = state.take_stashed_release() {
                     debug!(
                         session = %deps.session_id,
                         "sequencer: replaying the release held for the halted holder's completion"
                     );
-                    release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
+                    replay_held_release(&deps, &mut rx, &mut state, held).await;
                 }
             }
             SequencerCommand::UserMessage {
                 mentions,
                 restarts_rotation,
+                answers_for,
             }
             | SequencerCommand::PauseReleased {
                 mentions,
                 restarts_rotation,
+                answers_for,
             } => {
                 if state.pause_releases_pending != 0 {
                     state.summons.queue.extend(mentions.into_iter().map(QueuedSummon::user));
                     state.pause_release_restarts |= restarts_rotation;
+                    state.pause_release_askers.extend(answers_for);
                     continue;
                 }
                 let restarts_rotation =
                     restarts_rotation | std::mem::take(&mut state.pause_release_restarts);
+                let mut answers_for = answers_for;
+                answers_for.extend(std::mem::take(&mut state.pause_release_askers));
                 // **A release during boot waits for boot to end** (feedback
                 // #10). Every pump is still orienting, so a turn dealt now
                 // reports to the readiness channel and never completes. The
@@ -2259,7 +2287,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         session = %deps.session_id,
                         "sequencer: a release arrived during boot; holding it until boot ends"
                     );
-                    state.hold_for_boot(mentions, restarts_rotation);
+                    state.hold_for_boot(mentions, restarts_rotation, answers_for);
                     continue;
                 }
                 // **A release that lands while the halted holder is still
@@ -2274,11 +2302,11 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         "sequencer: a release arrived while the halted holder is still finishing; \
                          holding it until that completion lands"
                     );
-                    state.stash_release(mentions, restarts_rotation);
+                    state.stash_release(mentions, restarts_rotation, answers_for);
                     continue;
                 }
                 if !restarts_rotation && state.has_live_turn() {
-                    state.pending_answer.get_or_insert_with(Vec::new).extend(mentions);
+                    HeldRelease::fold_into(&mut state.pending_answer, mentions, false, answers_for);
                     // Repair a stale UI mark from the ring's actual owner;
                     // never let that stale mark license a second live deal.
                     if let (Some(activity), Some(holder)) = (&deps.activity, &state.holder) {
@@ -2288,7 +2316,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                         "sequencer: tray answer retained for the live holder's completion");
                     continue;
                 }
-                release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation).await;
+                release_ring(&deps, &mut rx, &mut state, mentions, restarts_rotation, answers_for).await;
             }
             SequencerCommand::HostWake { participant_id, watch_id, pending, attempt } => {
                 // The wake as the bridge claimed it, read now: a watch removed,
@@ -2380,7 +2408,7 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                     continue;
                 }
                 debug!(session = %deps.session_id, participant_id, watch_id, pending, "sequencer: a watch wake releases the ring");
-                release_ring(&deps, &mut rx, &mut state, vec![participant_id], true).await;
+                release_ring(&deps, &mut rx, &mut state, vec![participant_id], true, Vec::new()).await;
                 // Returning is not delivering: the drain may have stopped or
                 // failed before the notice reached the controller. Only the
                 // receipt says the wake was delivered; otherwise the claim stays
@@ -2412,12 +2440,12 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // (E4). A stage pending beside it stays pending and lands at
                 // the next boundary, the ordinary staged semantics; with no
                 // release held it is the release, delivered now.
-                if let Some((mentions, restarts)) = state.boot_release.take() {
+                if let Some(held) = state.boot_release.take() {
                     debug!(
                         session = %deps.session_id,
                         "sequencer: boot ended; dealing the release held during boot"
                     );
-                    release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
+                    replay_held_release(&deps, &mut rx, &mut state, held).await;
                 } else if state.holder.is_none() {
                     // The user's stage keeps its priority: handed to the app
                     // here, its delivery is the release that deals, and the
@@ -2536,13 +2564,13 @@ pub async fn run_sequencer(mut deps: SequencerDeps, mut rx: mpsc::Receiver<Seque
                 // the replay's deal reaches the new process, not the dead one.
                 if state.winding_down == Some(participant_id) {
                     state.winding_down = None;
-                    if let Some((mentions, restarts)) = state.take_stashed_release() {
+                    if let Some(held) = state.take_stashed_release() {
                         debug!(
                             session = %deps.session_id,
                             participant_id,
                             "sequencer: the halted holder respawned; replaying the held release"
                         );
-                        release_ring(&deps, &mut rx, &mut state, mentions, restarts).await;
+                        replay_held_release(&deps, &mut rx, &mut state, held).await;
                     }
                 }
             }
@@ -2938,25 +2966,100 @@ fn release_held(
 /// answer — see the flag's doc on [`SequencerCommand::UserMessage`]). Halt
 /// clearing, spin clearing and the vote-tally reset are release semantics, not
 /// restart semantics: they happen either way.
+/// Replay a release the ring held back — a wind-down stash, a boot hold, an
+/// answer kept for a live holder (feedback #133). Every release clears the
+/// persisted halt slot when it arrives (`AppState::user_responded`), so a halt
+/// standing NOW was declared after the input this carries — or that clear
+/// failed. Only one such halt may yield to it: one declared by an ASKER of an
+/// answer in it, who halted without having read its answer. That halt — its
+/// id and declarer read together — is cleared on exactly that pair, and the
+/// release deals. Anything else keeps the release held under the halt (the
+/// ring's latch stays): another participant's or the host's halt, a halt with
+/// no id, a slot that cannot be read, a clear that lost to a newer
+/// declaration or failed. The user's next message merges it.
+async fn replay_held_release(
+    deps: &SequencerDeps,
+    rx: &mut mpsc::Receiver<SequencerCommand>,
+    state: &mut RingState,
+    held: HeldRelease,
+) {
+    if let Some(why) = held_release_refusal(deps, &held.askers).await {
+        debug!(session = %deps.session_id, why, "sequencer: a held release stays held under a standing halt");
+        HeldRelease::fold_into(&mut state.pending_answer, held.mentions, held.restarts, held.askers);
+        return;
+    }
+    release_ring(deps, rx, state, held.mentions, held.restarts, held.askers).await;
+}
+
+/// Why a held release may not deal now — `None` when no halt stands, or when
+/// the one standing was its own asker's and has just been cleared.
+async fn held_release_refusal(deps: &SequencerDeps, askers: &[String]) -> Option<&'static str> {
+    let (id, declared_by) = match deps.storage.session_halt_owner(&deps.session_id).await {
+        Ok(None) => return None,
+        Ok(Some(owner)) => owner,
+        Err(_) => return Some("the halt slot could not be read"),
+    };
+    let Some(id) = id else { return Some("the standing halt has no id") };
+    if !askers.iter().any(|asker| *asker == declared_by) {
+        return Some("the standing halt is not one an answer here was for");
+    }
+    #[cfg(test)]
+    replay_hook::before_clear().await;
+    match deps.storage.clear_session_halt_if_owned(&deps.session_id, &id, &declared_by).await {
+        Ok(true) => {
+            if let Some(bridge) = &deps.bridge {
+                bridge.notify_halts_cleared(deps.session_id.to_string());
+                bridge.clear_session_awaiting(&deps.session_id).await;
+            }
+            None
+        }
+        Ok(false) => Some("the halt changed before it could be cleared"),
+        Err(_) => Some("the halt could not be cleared"),
+    }
+}
+
+/// A test's chance to change the halt slot between the replay's read and its
+/// conditional clear — the race the id+declarer clear exists for.
+#[cfg(test)]
+mod replay_hook {
+    type Hook = std::sync::Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+    thread_local! {
+        static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn set(hook: Option<Hook>) {
+        HOOK.with(|h| *h.borrow_mut() = hook);
+    }
+    pub(super) async fn before_clear() {
+        let hook = HOOK.with(|h| h.borrow().clone());
+        if let Some(hook) = hook {
+            hook().await;
+        }
+    }
+}
+
 async fn release_ring(
     deps: &SequencerDeps,
     rx: &mut mpsc::Receiver<SequencerCommand>,
     state: &mut RingState,
     mut mentions: Vec<i64>,
     mut restarts_rotation: bool,
+    answers_for: Vec<String>,
 ) {
     if let Some(boundary) = state.boundary.as_mut().filter(|b| !b.replaying) {
-        boundary.queued.push_back(SequencerCommand::UserMessage { mentions, restarts_rotation });
+        boundary.queued.push_back(SequencerCommand::UserMessage { mentions, restarts_rotation, answers_for });
         return;
     }
     if state.pause_releases_pending != 0 {
         state.summons.queue.extend(mentions.into_iter().map(QueuedSummon::user));
         state.pause_release_restarts |= restarts_rotation;
+        state.pause_release_askers.extend(answers_for);
         return;
     }
-    if let Some(mut earlier) = state.pending_answer.take() {
-        earlier.append(&mut mentions);
-        mentions = earlier;
+    if let Some(earlier) = state.pending_answer.take() {
+        let mut merged = earlier.mentions;
+        merged.append(&mut mentions);
+        mentions = merged;
+        restarts_rotation |= earlier.restarts;
     }
     if state.open_gates.is_empty() {
         restarts_rotation |= state.gated_restart.take().unwrap_or(false);
@@ -3036,7 +3139,7 @@ async fn continue_after_gate(
         return;
     }
     if let Some(restart) = state.gated_restart.take() {
-        release_ring(deps, rx, state, Vec::new(), restart).await;
+        release_ring(deps, rx, state, Vec::new(), restart, Vec::new()).await;
         return;
     }
     let unread = async {
@@ -5720,15 +5823,27 @@ mod tests {
             // their own helper, `answer_message`, so a test's intent is
             // visible at the call site.
             restarts_rotation: true,
+            answers_for: Vec::new(),
         }
     }
 
     /// A tray/gate ANSWER: releases the ring without resetting the rotation
-    /// (the starvation fix, 2026-08-27).
+    /// (the starvation fix, 2026-08-27). Its asker unknown — see
+    /// [`answer_for`] for one that names it (feedback #133).
     fn answer_message() -> SequencerCommand {
         SequencerCommand::UserMessage {
             mentions: Vec::new(),
             restarts_rotation: false,
+            answers_for: Vec::new(),
+        }
+    }
+
+    /// The answer to the question `asker` parked (feedback #133).
+    fn answer_for(asker: &str) -> SequencerCommand {
+        SequencerCommand::UserMessage {
+            mentions: Vec::new(),
+            restarts_rotation: false,
+            answers_for: vec![asker.to_string()],
         }
     }
 
@@ -5781,6 +5896,7 @@ mod tests {
         SequencerCommand::UserMessage {
             mentions: mentions.to_vec(),
             restarts_rotation: true,
+            answers_for: Vec::new(),
         }
     }
 
@@ -7008,7 +7124,9 @@ mod tests {
     #[test]
     fn the_deal_has_exactly_one_site() {
         let src = include_str!("sequencer.rs");
-        let prod = &src[..src.find("#[cfg(test)]").expect("tests follow production")];
+        // The tests module is the boundary — not the first `#[cfg(test)]`,
+        // which a test-only item inside production code also carries.
+        let prod = &src[..src.find("#[cfg(test)]\nmod tests {").expect("tests follow production")];
         let calls = prod.matches("hand_turn_to(deps, ").count();
         assert_eq!(calls, 1, "hand_turn_to is called from start_turn and nowhere else (calls, not the declaration): {calls}");
     }
@@ -7198,7 +7316,9 @@ mod tests {
     #[test]
     fn a_host_wake_is_exempt_from_the_pause_hold_and_never_a_user_message() {
         let src = include_str!("sequencer.rs");
-        let prod = &src[..src.find("#[cfg(test)]").expect("tests follow production")];
+        // The tests module is the boundary — not the first `#[cfg(test)]`,
+        // which a test-only item inside production code also carries.
+        let prod = &src[..src.find("#[cfg(test)]\nmod tests {").expect("tests follow production")];
         assert!(prod.contains("SequencerCommand::Pause | SequencerCommand::Resume | SequencerCommand::HostWake { .. })"), "the pause hold exempts HostWake so it is dropped, never replayed");
         let arm = prod.split("SequencerCommand::HostWake { participant_id, watch_id, pending, attempt } => {").nth(1).expect("the HostWake arm");
         let arm = &arm[..arm.find("SequencerCommand::MessageStaged if state.boot_hold").expect("the next arm")];
@@ -11165,6 +11285,236 @@ mod tests {
         assert!(notices(&storage).await.is_empty(), "a fresh user cycle is not an all-pass lap");
         drop(tx);
         assert!(exited(task).await);
+    }
+
+    // ---- Feedback #133: a held release meets the persisted halt slot ----
+
+    /// A solo ring wired to a bridge whose awaiting flag the test can read.
+    async fn ring_awaiting(roster: &[(&str, &str)]) -> (SequencerDeps, Storage, Vec<Seat>, Arc<std::sync::atomic::AtomicBool>) {
+        let (mut deps, storage, seats) = ring(roster).await;
+        let bridge = SignalingBridge::new();
+        deps.bridge = Some(Arc::clone(&bridge));
+        let awaiting = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        bridge.register_session_awaiting("s1".into(), Arc::clone(&awaiting)).await;
+        (deps, storage, seats, awaiting)
+    }
+
+    /// The #133 sequence: the asker's answer lands mid-turn and is held for
+    /// the completion; not having read it, the asker halts. The answer's own
+    /// release cleared the slot before that halt existed, so the replay meets
+    /// it — declared by this answer's asker, it is cleared on exactly its id
+    /// and declarer, the awaiting flag drops, and the answer is dealt. Before
+    /// this the ring released while the slot stayed: gate releases suppressed
+    /// and the session "awaiting" until someone typed.
+    #[tokio::test]
+    async fn a_held_answer_clears_the_halt_its_own_asker_declared_before_reading_it() {
+        let (deps, storage, mut seats, awaiting) = ring_awaiting(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "decide something").await;
+        send(&tx, user_message()).await;
+        assert_eq!(seats[0].expect(1).await, vec!["decide something"]);
+        post(&storage, "user", None, "the pick").await;
+        send(&tx, answer_for("a")).await;
+        storage.declare_session_halt("s1", "a", "Waiting on the pick").await.unwrap();
+        awaiting.store(true, std::sync::atomic::Ordering::Release);
+        send(&tx, halt_by(a)).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        assert_eq!(seats[0].expect(1).await, vec!["the pick"], "the answer is dealt");
+        assert!(storage.session_halt("s1").await.unwrap().is_none(), "the stale halt is cleared");
+        assert!(!awaiting.load(std::sync::atomic::Ordering::Acquire), "the session no longer awaits the user");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// Asker A, holder B: A's answer is held while B works, then B halts on
+    /// its own account. An answer to A is not B's release: B's halt stands,
+    /// nothing is dealt, and the user's next message deals both.
+    #[tokio::test]
+    async fn an_answer_to_one_participant_leaves_anothers_later_halt_standing() {
+        let (deps, storage, mut seats, awaiting) = ring_awaiting(&[("a", "active"), ("b", "active")]).await;
+        let (a, b) = (seats[0].id, seats[1].id);
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        post(&storage, "participant", Some("a"), "asked the user").await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        seats[1].expect(2).await;
+        post(&storage, "user", None, "a's pick").await;
+        send(&tx, answer_for("a")).await;
+        storage.declare_session_halt("s1", "b", "need the user's call").await.unwrap();
+        awaiting.store(true, std::sync::atomic::Ordering::Release);
+        send(&tx, halt_by(b)).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: b, epoch: 2, ending: SPOKE }).await;
+        seats[0].quiet().await;
+        seats[1].quiet().await;
+        assert_eq!(storage.session_halt("s1").await.unwrap().map(|(by, ..)| by).as_deref(), Some("b"), "b's halt stands");
+        assert!(awaiting.load(std::sync::atomic::Ordering::Acquire));
+        // The user speaks: AppState clears the slot first, then releases.
+        storage.clear_session_halt("s1").await.unwrap();
+        post(&storage, "user", None, "carry on").await;
+        send(&tx, user_message()).await;
+        let dealt = seats[0].expect(2).await;
+        assert!(dealt.contains(&"a's pick".to_string()) && dealt.contains(&"carry on".to_string()), "{dealt:?}");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A halt the answer's asker did not declare — the host's — and one with
+    /// no id (an older build's, so no exact pair to clear) both stand.
+    #[tokio::test]
+    async fn a_held_answer_stays_held_under_a_host_or_id_less_halt() {
+        for (declared_by, legacy) in [("system", false), ("a", true)] {
+            let (deps, storage, mut seats, awaiting) = ring_awaiting(&[("a", "active")]).await;
+            let a = seats[0].id;
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            post(&storage, "user", None, "go").await;
+            send(&tx, user_message()).await;
+            seats[0].expect(1).await;
+            post(&storage, "user", None, "the pick").await;
+            send(&tx, answer_for("a")).await;
+            storage.declare_session_halt("s1", declared_by, "a standing halt").await.unwrap();
+            if legacy {
+                sqlx::query("UPDATE sessions SET halt_id = NULL WHERE id = 's1'").execute(storage.pool()).await.unwrap();
+            }
+            awaiting.store(true, std::sync::atomic::Ordering::Release);
+            send(&tx, halt_by(a)).await;
+            send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+            seats[0].quiet().await;
+            assert!(storage.session_halt("s1").await.unwrap().is_some(), "{declared_by}/legacy={legacy}: the halt stands");
+            assert!(awaiting.load(std::sync::atomic::Ordering::Acquire));
+            drop(tx);
+            assert!(exited(task).await);
+        }
+    }
+
+    /// The race the exact clear exists for: a newer declaration lands between
+    /// the replay's read of the slot and its conditional clear. The clear
+    /// finds another id and does nothing; the release stays held under the
+    /// newer halt and the awaiting flag is not touched.
+    #[tokio::test]
+    async fn a_replacement_halt_between_the_read_and_the_clear_stands() {
+        let (deps, storage, mut seats, awaiting) = ring_awaiting(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        post(&storage, "user", None, "the pick").await;
+        send(&tx, answer_for("a")).await;
+        storage.declare_session_halt("s1", "a", "Waiting on the pick").await.unwrap();
+        awaiting.store(true, std::sync::atomic::Ordering::Release);
+        let racing = storage.clone();
+        replay_hook::set(Some(Arc::new(move || {
+            let racing = racing.clone();
+            Box::pin(async move {
+                racing.declare_session_halt("s1", "a", "a newer wait").await.unwrap();
+            })
+        })));
+        send(&tx, halt_by(a)).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        seats[0].quiet().await;
+        replay_hook::set(None);
+        assert_eq!(storage.session_halt("s1").await.unwrap().map(|(_, reason, _)| reason).as_deref(), Some("a newer wait"));
+        assert!(awaiting.load(std::sync::atomic::Ordering::Acquire), "a replacement that won the race keeps the session awaiting");
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// A typed message after the halt — its own arrival cleared the slot —
+    /// replays as before: nothing stands, the stash is dealt.
+    #[tokio::test]
+    async fn a_typed_message_after_the_halt_still_replays_as_before() {
+        let (deps, storage, mut seats, _awaiting) = ring_awaiting(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        storage.declare_session_halt("s1", "a", "your call").await.unwrap();
+        send(&tx, halt_by(a)).await;
+        storage.clear_session_halt("s1").await.unwrap();
+        post(&storage, "user", None, "steer").await;
+        send(&tx, user_message()).await;
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        assert_eq!(seats[0].expect(1).await, vec!["steer"]);
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// The wind-down timer replays through the same check: typed input held
+    /// in the stash does not release a halt declared after it, even when the
+    /// halted holder's completion never comes.
+    #[tokio::test]
+    async fn the_wind_down_timer_leaves_a_later_halt_standing() {
+        let (deps, storage, mut seats, _awaiting) = ring_awaiting(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        storage.declare_session_halt("s1", "a", "first wait").await.unwrap();
+        send(&tx, halt_by(a)).await;
+        storage.clear_session_halt("s1").await.unwrap();
+        post(&storage, "user", None, "steer").await;
+        send(&tx, user_message()).await;
+        storage.declare_session_halt("s1", "a", "a later wait").await.unwrap();
+        tokio::time::sleep(HALT_WIND_DOWN_GRACE + Duration::from_millis(500)).await;
+        seats[0].quiet().await;
+        assert_eq!(storage.session_halt("s1").await.unwrap().map(|(_, reason, _)| reason).as_deref(), Some("a later wait"));
+        drop(tx);
+        assert!(exited(task).await);
+    }
+
+    /// An answer held during boot meets the slot at `BootEnded` too: its own
+    /// asker's halt (declared while orienting) is cleared and the answer
+    /// dealt; another participant's halt holds it.
+    #[tokio::test]
+    async fn a_boot_held_answer_meets_the_halt_slot_at_boot_end() {
+        for (declared_by, dealt) in [("a", true), ("b", false)] {
+            let (deps, storage, mut seats, _events) = booting_ring(&[("a", "active"), ("b", "active")]).await;
+            let (tx, rx) = mpsc::channel(8);
+            let task = tokio::spawn(run_sequencer(deps, rx));
+            post(&storage, "user", None, "the pick").await;
+            send(&tx, answer_for("a")).await;
+            storage.declare_session_halt("s1", declared_by, "waiting").await.unwrap();
+            send(&tx, SequencerCommand::BootEnded).await;
+            if dealt {
+                assert_eq!(seats[0].expect(1).await, vec!["the pick"], "{declared_by}");
+                assert!(storage.session_halt("s1").await.unwrap().is_none());
+            } else {
+                seats[0].quiet().await;
+                seats[1].quiet().await;
+                assert!(storage.session_halt("s1").await.unwrap().is_some());
+            }
+            drop(tx);
+            assert!(exited(task).await);
+        }
+    }
+
+    /// Every replay of a held release goes through the one helper — the
+    /// three `take_stashed_release` sites and the boot release alike — so a
+    /// timer, a respawn or a boot end cannot skip the halt check.
+    #[test]
+    fn every_held_release_replays_through_the_halt_check() {
+        let src = include_str!("sequencer.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let takes: Vec<usize> = prod.match_indices("state.take_stashed_release()").map(|(i, _)| i).collect();
+        assert_eq!(takes.len(), 3, "the timer, the completion and the respawn");
+        for i in takes {
+            let window = &prod[i..(i + 600).min(prod.len())];
+            assert!(window.contains("replay_held_release(") && !window.contains("release_ring("), "{window}");
+        }
+        let boot = prod.find("state.boot_release.take()").expect("the boot release");
+        let window = &prod[boot..boot + 400];
+        assert!(window.contains("replay_held_release(") && !window.contains("release_ring("), "{window}");
     }
 
     #[tokio::test]

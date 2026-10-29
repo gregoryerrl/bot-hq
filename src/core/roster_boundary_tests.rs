@@ -106,6 +106,7 @@ mod roster_boundary {
                         vec![]
                     },
                     restarts_rotation: true,
+                    answers_for: vec![],
                 },
             )
             .await;
@@ -420,6 +421,7 @@ mod roster_boundary {
             SequencerCommand::UserMessage {
                 mentions: vec![seats[2].id],
                 restarts_rotation: true,
+                answers_for: vec![],
             },
         )
         .await;

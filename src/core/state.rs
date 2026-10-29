@@ -1875,12 +1875,17 @@ impl AppState {
     /// which releases the ring without resetting, so the rotation steps onward
     /// and the participant after the asker is served. The halt clear does not
     /// depend on it: a responded-to session holds no halt either way.
+    ///
+    /// `answer_for`: the ASKER of the tray answer this response is (feedback
+    /// #133), so a release the ring holds for a live turn can clear a halt
+    /// that asker declared before reading it — `None` for everything else.
     async fn user_responded(
         &self,
         session_id: &str,
         mentions: Vec<i64>,
         release_ring: bool,
         restarts_rotation: bool,
+        answer_for: Option<String>,
     ) {
         // The halt slot FIRST. If the ring release panicked or the process died
         // between the two, a cleared slot and a halted ring is a session the
@@ -1898,7 +1903,7 @@ impl AppState {
         // so waking the ring on it would hand out a turn over an empty backlog.
         if release_ring {
             self.bridge
-                .notify_ring_user_message(session_id, mentions, restarts_rotation)
+                .notify_ring_user_message(session_id, mentions, restarts_rotation, answer_for.into_iter().collect())
                 .await;
         }
     }
@@ -2124,7 +2129,7 @@ impl AppState {
         // to drain. Reversing these two hands out a turn over an empty backlog
         // and the message lands a turn late. Both halves of "the user responded"
         // ride this one call (rc3 D28).
-        self.user_responded(session_id, mentions, true, authored != Authored::ByController).await;
+        self.user_responded(session_id, mentions, true, authored != Authored::ByController, None).await;
         // A user prompt re-arms the idle-unflagged watchdog's once-per-window
         // nudge (and its >0 count marks the session as having a task at all).
         handle
@@ -2238,7 +2243,7 @@ impl AppState {
                 handle.activity.set_paused(false);
             }
         }
-        self.user_responded(session_id, Vec::new(), true, true).await;
+        self.user_responded(session_id, Vec::new(), true, true, None).await;
         Ok(())
     }
 
@@ -2461,7 +2466,7 @@ impl AppState {
         // elapses. Found in review before it shipped; the premise in the
         // paragraph above is stated as a fact about the CALLER, and this path
         // is a caller it was never true for.
-        self.user_responded(session_id, Vec::new(), source.releases_ring(), true)
+        self.user_responded(session_id, Vec::new(), source.releases_ring(), true, None)
             .await;
 
         // The in-memory move AND the epoch bump, together. Both callers of this
@@ -2693,6 +2698,10 @@ impl AppState {
         // predicate below. Fail-CLOSED to "gate" (round 13): an unreadable row
         // must not release a standing agent halt.
         let mut resolved_a_gate = true;
+        // Who asked (feedback #133): the release carries the asker, so a halt
+        // it declared before reading this answer can yield to it at replay.
+        // Unreadable → unknown, which holds the release under such a halt.
+        let mut asker: Option<String> = None;
         if matches!(
             outcome,
             ResolveOutcome::Delivered | ResolveOutcome::DeliveredOutOfBand { .. }
@@ -2704,6 +2713,7 @@ impl AppState {
                 .and_then(|r| r.as_ref())
                 .map(|r| crate::storage::is_gate_row(&r.kind, r.options_json.as_deref()))
                 .unwrap_or(true);
+            asker = row.as_ref().ok().and_then(|r| r.as_ref()).map(|r| r.agent.clone());
             if let Ok(Some(entry)) = row {
                 let sessions = self.sessions.lock().await;
                 if let Some(handle) = sessions.get(&entry.session_id) {
@@ -2806,7 +2816,7 @@ impl AppState {
                         // flag, every approval re-dealt the executor and the
                         // reviewer starved (137 events / 38 sessions / worst
                         // gap 478 min; see SequencerCommand::UserMessage).
-                        self.user_responded(session_id, Vec::new(), true, false)
+                        self.user_responded(session_id, Vec::new(), true, false, asker.clone())
                             .await;
                     }
                 }
@@ -3491,6 +3501,8 @@ mod tests {
                 let commands: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
                 assert_eq!(commands.len(), usize::from(!paused), "busy={busy}, paused={paused}: {commands:?}");
                 assert!(commands.iter().all(|c| matches!(c, SequencerCommand::UserMessage { restarts_rotation: false, .. })));
+                // Feedback #133: the release names the answer's asker.
+                assert!(commands.iter().all(|c| matches!(c, SequencerCommand::UserMessage { answers_for, .. } if answers_for == &["hands".to_string()])), "{commands:?}");
             }
         }
     }

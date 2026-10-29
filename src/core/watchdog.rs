@@ -559,6 +559,7 @@ async fn deliver_idle_nudge(session_id: &str, idle_watch: &IdleWatch, bridge: &S
             // the nudge asks for a state declaration and the front is the
             // participant that can give one.
             true,
+            Vec::new(),
         )
         .await;
 }
@@ -802,6 +803,7 @@ mod tests {
             Ok(crate::core::sequencer::SequencerCommand::UserMessage {
                 mentions,
                 restarts_rotation,
+                ..
             }) => {
                 assert_eq!(
                     mentions,

@@ -205,6 +205,7 @@ async fn startup_snapshot_stops_at_its_frontier_and_later_rows_arrive_once() {
             .send(SequencerCommand::UserMessage {
                 mentions: vec![target],
                 restarts_rotation: true,
+                answers_for: vec![],
             })
             .await
             .unwrap();
@@ -300,7 +301,7 @@ async fn helper_fixture_with_database(disk: bool) -> (Fixture,mpsc::UnboundedRec
         })
     }));
     f.state.storage.post_to_channel("s1","user",None,"text","Investigate using helpers.",None).await.unwrap();
-    f.ring.send(SequencerCommand::UserMessage {mentions:vec![],restarts_rotation:true}).await.unwrap();
+    f.ring.send(SequencerCommand::UserMessage {mentions:vec![],restarts_rotation:true,answers_for:vec![]}).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3),f.seats[0].input.recv()).await.unwrap().unwrap();
     (f,rx)
 }
@@ -394,7 +395,7 @@ async fn helpers_inherit_the_parents_effort_and_are_told_to_show_their_searches(
         })
     }));
     f.state.storage.post_to_channel("s1","user",None,"text","Investigate using helpers.",None).await.unwrap();
-    f.ring.send(SequencerCommand::UserMessage {mentions:vec![],restarts_rotation:true}).await.unwrap();
+    f.ring.send(SequencerCommand::UserMessage {mentions:vec![],restarts_rotation:true,answers_for:vec![]}).await.unwrap();
     tokio::time::timeout(Duration::from_secs(3),f.seats[0].input.recv()).await.unwrap().unwrap();
     // An effort outside the CLI's set is the caller's error, before any spawn.
     let bad=serde_json::json!({"action":"start","request_id":"bad","tasks":[{"goal":"g","files":[],"expected_evidence":"e","model_id":"old","effort":"ultra"}],"timeout_secs":30});
@@ -939,7 +940,7 @@ async fn push_gate_decisions_reach_the_hook_verbatim_and_attributed() {
 async fn driver_send_waits_for_the_live_turn_and_reports_real_delivery() {
     let mut f = driver_fixture(false).await;
     f.state.storage.post_to_channel("s1", "user", None, "text", "Start existing work", None).await.unwrap();
-    f.ring.send(SequencerCommand::UserMessage { mentions: vec![], restarts_rotation: true }).await.unwrap();
+    f.ring.send(SequencerCommand::UserMessage { mentions: vec![], restarts_rotation: true, answers_for: vec![] }).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), f.seats[0].input.recv()).await.unwrap().unwrap();
     let epoch = f.state.sessions.lock().await["s1"].participants[0].turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
     let args = serde_json::json!({"action":"send","session_id":"s1","request_id":"send-once","text":"@eyes Review this after the current turn"});
@@ -1261,7 +1262,7 @@ async fn driver_roster_changes_keep_provenance_and_recheck_the_reserved_boundary
         let revoke = mode == "revoke";
         let mut f = driver_fixture(false).await;
         f.state.storage.post_to_channel("s1", "user", None, "text", "Existing task", None).await.unwrap();
-        f.ring.send(SequencerCommand::UserMessage { mentions:vec![], restarts_rotation:true }).await.unwrap();
+        f.ring.send(SequencerCommand::UserMessage { mentions:vec![], restarts_rotation:true, answers_for:vec![] }).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), f.seats[0].input.recv()).await.unwrap().unwrap();
         let epoch = f.state.sessions.lock().await["s1"].participants[0].turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
         let revision = f.state.storage.roster_revision("s1").await.unwrap();
@@ -1733,7 +1734,7 @@ async fn effort_changes_wait_for_the_live_turn_and_can_be_cancelled_before_sendi
     for cancel in [false, true] {
         let mut f = Fixture::new(false).await; install_effort_fixture(&f, "normal").await;
         f.state.storage.post_to_channel("s1", "user", None, "text", "work", None).await.unwrap();
-        f.ring.send(SequencerCommand::UserMessage { mentions:vec![], restarts_rotation:true }).await.unwrap();
+        f.ring.send(SequencerCommand::UserMessage { mentions:vec![], restarts_rotation:true, answers_for:vec![] }).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), f.seats[0].input.recv()).await.unwrap().unwrap();
         let epoch = f.state.sessions.lock().await["s1"].participants[0].turn_epoch.as_ref().unwrap().load(Ordering::Acquire);
         let (services, mut spawned) = services(false);
@@ -2145,6 +2146,7 @@ async fn worker_switches_both_connectors_without_restarting_peers_and_receives_n
             .send(SequencerCommand::UserMessage {
                 mentions: vec![],
                 restarts_rotation: true,
+                answers_for: vec![],
             })
             .await
             .unwrap();
@@ -2207,6 +2209,7 @@ async fn worker_waits_for_the_live_turn_and_duplicate_clicks_share_one_spawn() {
         .send(SequencerCommand::UserMessage {
             mentions: vec![],
             restarts_rotation: true,
+            answers_for: vec![],
         })
         .await
         .unwrap();
@@ -2612,6 +2615,7 @@ async fn a_pending_change_can_be_cancelled_without_stopping_the_current_turn() {
         .send(SequencerCommand::UserMessage {
             mentions: vec![],
             restarts_rotation: true,
+            answers_for: vec![],
         })
         .await
         .unwrap();

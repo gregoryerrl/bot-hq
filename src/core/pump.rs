@@ -5116,6 +5116,7 @@ mod tests {
             .send(crate::core::sequencer::SequencerCommand::UserMessage {
                 mentions: Vec::new(),
                 restarts_rotation: true,
+                answers_for: Vec::new(),
             })
             .await
             .unwrap();

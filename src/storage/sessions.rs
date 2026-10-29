@@ -333,6 +333,37 @@ impl Storage {
     }
 
     /// The session's declared halt, if any: `(declared_by, reason, declared_at)`.
+    /// The standing halt's `halt_id` and declarer, read together in ONE row
+    /// read (feedback #133) — `None` when no halt stands; the id is `None` for
+    /// a halt an older build wrote. A replay that clears a halt must observe
+    /// both from the same record, never mix two reads.
+    pub async fn session_halt_owner(&self, session_id: &str) -> Result<Option<(Option<String>, String)>> {
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT halt_id, halt_declared_by FROM sessions WHERE id = ? AND halt_reason IS NOT NULL",
+        )
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|(id, by)| Some((id, by?))))
+    }
+
+    /// Clear the halt only if it is still the one observed — this `halt_id`
+    /// AND this declarer — so a replacement declaration that landed in
+    /// between survives (feedback #133). `false` when either no longer matches.
+    pub async fn clear_session_halt_if_owned(&self, session_id: &str, halt_id: &str, declared_by: &str) -> Result<bool> {
+        let res = sqlx::query(
+            "UPDATE sessions SET halt_declared_by = NULL, halt_reason = NULL, halt_declared_at = NULL, \
+             halt_wake_at = NULL, halt_id = NULL WHERE id = ? AND halt_id = ? AND halt_declared_by = ?",
+        )
+        .bind(session_id)
+        .bind(halt_id)
+        .bind(declared_by)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("clearing the observed halt for session {session_id}"))?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn session_halt(
         &self,
         session_id: &str,
@@ -738,6 +769,33 @@ impl Storage {
 mod tests {
     use super::{list_active_sessions_with_preview_sql, session_order_by};
     use crate::storage::{MessageKind, Storage};
+
+    /// Feedback #133: the halt's id and declarer are read TOGETHER, and the
+    /// conditional clear needs both still to match — an id with another
+    /// declarer, a newer halt by the same declarer, or no halt at all clears
+    /// nothing; a halt with no id (an older build's) has no owner to match.
+    #[tokio::test]
+    async fn a_halt_is_cleared_only_by_its_own_id_and_declarer() {
+        let s = Storage::memory().await.unwrap();
+        s.create_session("s1", "t", None).await.unwrap();
+        assert_eq!(s.session_halt_owner("s1").await.unwrap(), None);
+        s.declare_session_halt("s1", "hands", "waiting on the pick").await.unwrap();
+        let (id, by) = s.session_halt_owner("s1").await.unwrap().expect("a halt stands");
+        let id = id.expect("a current halt has an id");
+        assert_eq!(by, "hands");
+        assert!(!s.clear_session_halt_if_owned("s1", &id, "eyes").await.unwrap(), "another declarer");
+        assert!(!s.clear_session_halt_if_owned("s1", "not-the-id", "hands").await.unwrap(), "another id");
+        s.declare_session_halt("s1", "hands", "a newer wait").await.unwrap();
+        assert!(!s.clear_session_halt_if_owned("s1", &id, "hands").await.unwrap(), "a newer halt by the same declarer");
+        let (newer, _) = s.session_halt_owner("s1").await.unwrap().unwrap();
+        assert!(s.clear_session_halt_if_owned("s1", &newer.unwrap(), "hands").await.unwrap());
+        assert_eq!(s.session_halt_owner("s1").await.unwrap(), None);
+        assert!(s.session_halt("s1").await.unwrap().is_none(), "the whole slot is cleared");
+        // An id-less halt (written before `halt_id` existed): owned by nobody here.
+        sqlx::query("UPDATE sessions SET halt_declared_by = 'hands', halt_reason = 'legacy', halt_declared_at = 'x', halt_id = NULL WHERE id = 's1'")
+            .execute(s.pool()).await.unwrap();
+        assert_eq!(s.session_halt_owner("s1").await.unwrap(), Some((None, "hands".to_string())));
+    }
 
     /// A boot brings back the sessions that hold a TEMPORARY halt — a wake
     /// instant is a promise of a turn, and the wake needs a ring. A plain

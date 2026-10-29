@@ -1398,11 +1398,14 @@ impl SignalingBridge {
     /// rotation to the front, an answer releases the ring and lets it step
     /// onward from the anchor. See the flag's doc on `SequencerCommand::
     /// UserMessage` for the measurement that forced the split.
+    /// `answers_for`: the askers of the tray answers this release delivers
+    /// (feedback #133) — empty for anything that is not an answer.
     pub async fn notify_ring_user_message(
         &self,
         session_id: &str,
         mentions: Vec<i64>,
         restarts_rotation: bool,
+        answers_for: Vec<String>,
     ) {
         let seq = self.session_sequencer.lock().await.get(session_id).cloned();
         if let Some(tx) = seq {
@@ -1410,6 +1413,7 @@ impl SignalingBridge {
                 .try_send(crate::core::sequencer::SequencerCommand::UserMessage {
                     mentions,
                     restarts_rotation,
+                    answers_for,
                 })
                 .is_err()
             {

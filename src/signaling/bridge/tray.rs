@@ -2793,7 +2793,7 @@ impl SignalingBridge {
         tracing::info!(session_id, agent, wake_at, "temporary halt ended; waking the declarer");
         // Targeted at the declarer via the mention; `true` keeps the pre-flag
         // reset fallback if the slug lookup missed (see watchdog's wake).
-        self.notify_ring_user_message(session_id, mentions, true).await;
+        self.notify_ring_user_message(session_id, mentions, true, Vec::new()).await;
     }
 
     /// Re-arm ONE session's temporary halt when its ring registers (timers are
@@ -3189,7 +3189,7 @@ mod tests {
             "parking must halt the ring"
         );
 
-        bridge.notify_ring_user_message("s1", Vec::new(), true).await;
+        bridge.notify_ring_user_message("s1", Vec::new(), true, Vec::new()).await;
         assert!(
             matches!(rx.try_recv(), Ok(SequencerCommand::UserMessage { .. })),
             "a user message must RELEASE the halt — without this the cycle never restarts"

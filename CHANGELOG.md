@@ -171,6 +171,17 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   participants get no user MCP servers, and the change reaches participants
   spawned after it. Before this a Driver asked to check a team channel had no
   Discord (feedback #141).
+- A question answered while its asker was still mid-turn no longer leaves the
+  session halted on a wait the answer had already met. The ring holds such an
+  answer until the turn ends; if the asker declared a halt in that window —
+  "waiting on the pick" — the halt now yields when the held answer is
+  delivered: it is cleared by its exact id and declarer, the session stops
+  awaiting the user, and the asker is dealt its answer. A halt anyone else
+  declared, the host's, an older id-less one, or a newer declaration that
+  landed meanwhile still stands, and the held input waits for the user's next
+  message — so does a controller's message held the same way. Before this the
+  ring moved on while the stale halt kept the session "awaiting" and stopped
+  an approved gate's output from waking anyone (feedback #133).
 - A Codex participant's TEMPORARY halt no longer kills the job it is waiting
   on. Declaring `mark_awaiting_user` / `halt` with `wake_after_secs` still
   interrupts the declarer's turn (and the deadline still reaps a turn that
