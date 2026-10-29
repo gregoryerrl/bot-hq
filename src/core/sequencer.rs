@@ -2973,8 +2973,8 @@ fn release_held(
 /// failed. Only one such halt may yield to it: one declared by an ASKER of an
 /// answer in it, who halted without having read its answer. That halt — its
 /// id and declarer read together — is cleared on exactly that pair, and the
-/// release deals. Anything else keeps the release held under the halt (the
-/// ring's latch stays): another participant's or the host's halt, a halt with
+/// release deals. Anything else keeps the release held under the halt AND
+/// latches the ring halted: another participant's or the host's halt, a halt with
 /// no id, a slot that cannot be read, a clear that lost to a newer
 /// declaration or failed. The user's next message merges it.
 async fn replay_held_release(
@@ -2986,6 +2986,12 @@ async fn replay_held_release(
     if let Some(why) = held_release_refusal(deps, &held.askers).await {
         debug!(session = %deps.session_id, why, "sequencer: a held release stays held under a standing halt");
         HeldRelease::fold_into(&mut state.pending_answer, held.mentions, held.restarts, held.askers);
+        // The ring halts with it (EYES `5c873f13`): the slot can be ahead of
+        // the latch — a halt persisted during boot whose `HaltDeclared` has
+        // not arrived yet, or a slot that could not be read — and a summons
+        // or any other deal trigger must not hand out the held input under
+        // it. The user's next release clears this as it clears any halt.
+        state.halted_pending_user = true;
         return;
     }
     release_ring(deps, rx, state, held.mentions, held.restarts, held.askers).await;
@@ -11475,11 +11481,15 @@ mod tests {
 
     /// An answer held during boot meets the slot at `BootEnded` too: its own
     /// asker's halt (declared while orienting) is cleared and the answer
-    /// dealt; another participant's halt holds it.
+    /// dealt; another participant's halt holds it — and the refusal LATCHES
+    /// the ring (EYES `5c873f13`): the halt is persisted, but its
+    /// `HaltDeclared` has not reached the ring yet, so a summons arriving
+    /// next must not deal under it. The user's next release still resumes.
     #[tokio::test]
     async fn a_boot_held_answer_meets_the_halt_slot_at_boot_end() {
         for (declared_by, dealt) in [("a", true), ("b", false)] {
             let (deps, storage, mut seats, _events) = booting_ring(&[("a", "active"), ("b", "active")]).await;
+            let a = seats[0].id;
             let (tx, rx) = mpsc::channel(8);
             let task = tokio::spawn(run_sequencer(deps, rx));
             post(&storage, "user", None, "the pick").await;
@@ -11493,10 +11503,48 @@ mod tests {
                 seats[0].quiet().await;
                 seats[1].quiet().await;
                 assert!(storage.session_halt("s1").await.unwrap().is_some());
+                // A deal trigger before the halt's own notification arrives.
+                send(&tx, SequencerCommand::Summon { participant_id: a }).await;
+                seats[0].quiet().await;
+                seats[1].quiet().await;
+                // The user speaks: AppState clears the slot, then releases.
+                storage.clear_session_halt("s1").await.unwrap();
+                post(&storage, "user", None, "go on").await;
+                send(&tx, user_message()).await;
+                let got = seats[0].expect(2).await;
+                assert!(got.contains(&"the pick".to_string()) && got.contains(&"go on".to_string()), "{got:?}");
             }
             drop(tx);
             assert!(exited(task).await);
         }
+    }
+
+    /// A slot that cannot be read is not "no halt": the held release stays
+    /// held and the ring latches (EYES `5c873f13`), so a summons deals
+    /// nothing; the user's release resumes it.
+    #[tokio::test]
+    async fn an_unreadable_halt_slot_keeps_the_held_release_and_latches_the_ring() {
+        let (deps, storage, mut seats, _awaiting) = ring_awaiting(&[("a", "active")]).await;
+        let a = seats[0].id;
+        let (tx, rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_sequencer(deps, rx));
+        post(&storage, "user", None, "go").await;
+        send(&tx, user_message()).await;
+        seats[0].expect(1).await;
+        post(&storage, "user", None, "the pick").await;
+        send(&tx, answer_for("a")).await;
+        sqlx::query("ALTER TABLE sessions RENAME COLUMN halt_id TO halt_id_unreadable").execute(storage.pool()).await.unwrap();
+        send(&tx, SequencerCommand::TurnComplete { participant_id: a, epoch: 1, ending: SPOKE }).await;
+        seats[0].quiet().await;
+        send(&tx, SequencerCommand::Summon { participant_id: a }).await;
+        seats[0].quiet().await;
+        sqlx::query("ALTER TABLE sessions RENAME COLUMN halt_id_unreadable TO halt_id").execute(storage.pool()).await.unwrap();
+        post(&storage, "user", None, "go on").await;
+        send(&tx, user_message()).await;
+        let got = seats[0].expect(2).await;
+        assert!(got.contains(&"the pick".to_string()) && got.contains(&"go on".to_string()), "{got:?}");
+        drop(tx);
+        assert!(exited(task).await);
     }
 
     /// Every replay of a held release goes through the one helper — the

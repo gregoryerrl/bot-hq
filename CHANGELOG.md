@@ -178,8 +178,9 @@ the checkbox grants managed helpers only. Existing processes adopt this at resta
   delivered: it is cleared by its exact id and declarer, the session stops
   awaiting the user, and the asker is dealt its answer. A halt anyone else
   declared, the host's, an older id-less one, or a newer declaration that
-  landed meanwhile still stands, and the held input waits for the user's next
-  message — so does a controller's message held the same way. Before this the
+  landed meanwhile still stands, and the held input waits — the ring stays
+  halted, whatever else asks for a turn — for the user's next message; so does
+  a controller's message held the same way. Before this the
   ring moved on while the stale halt kept the session "awaiting" and stopped
   an approved gate's output from waking anyone (feedback #133).
 - A Codex participant's TEMPORARY halt no longer kills the job it is waiting
