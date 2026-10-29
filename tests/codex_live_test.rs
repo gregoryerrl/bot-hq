@@ -3,8 +3,12 @@
 //! default; run it on purpose:
 //!
 //! ```text
-//! BOT_HQ_CODEX_LIVE_HOME=/Users/you/.codex-bot-hq cargo test --test codex_live_test -- --ignored --nocapture
+//! BOT_HQ_CODEX_LIVE_HOME=/tmp/copy-of-a-signed-in-home cargo test --test codex_live_test -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! Point it at a disposable COPY of a signed-in home, never the managed home
+//! live sessions use: each test rewrites the home's `hooks.json` (hence one
+//! test at a time).
 //!
 //! What it proves that no fake can: the hooks file bot-hq writes is listed and
 //! trusted through `-c hooks.state`, the gate hook runs the built `bot-hq`
@@ -234,9 +238,22 @@ async fn a_temporary_halt_keeps_the_running_job_and_an_idle_pause_stops_it() {
     let mut handle = spawn_codex_agent(cfg).await.expect("the participant starts");
     let row = storage.post_to_channel("s-live", "user", None, "text", "Go.", None).await.unwrap();
     assert!(handle.input().deliver_batch(&[row]).await, "the page is taken");
+    // The job's own `sleep`, and only one this test's app-server started:
+    // its parent chain must reach this test process.
+    let parent_of = |pid: u32| -> Option<u32> {
+        let out = std::process::Command::new("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).output().ok()?;
+        String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    };
+    let ours = |pid: u32| {
+        let mut at = pid;
+        for _ in 0..12 {
+            match parent_of(at) { Some(p) if p == std::process::id() => return true, Some(p) if p > 1 => at = p, _ => return false }
+        }
+        false
+    };
     let sleep_pid = || -> Option<u32> {
         let out = std::process::Command::new("pgrep").args(["-x", "-f", &format!("sleep {marker}")]).output().ok()?;
-        String::from_utf8_lossy(&out.stdout).lines().next()?.trim().parse().ok()
+        String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).find(|p| ours(*p))
     };
     let alive = |pid: u32| unsafe { libc::kill(pid as i32, 0) == 0 };
     // The job starts: its own `sleep` PID, captured once.
@@ -255,7 +272,11 @@ async fn a_temporary_halt_keeps_the_running_job_and_an_idle_pause_stops_it() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match tokio::time::timeout_at(deadline, handle.event_rx.recv()).await {
-            Ok(Some(AgentEvent::TurnComplete { stop_reason, .. })) => { eprintln!("turn complete: {stop_reason:?}"); break; }
+            Ok(Some(AgentEvent::TurnComplete { stop_reason, .. })) => {
+                eprintln!("turn complete: {stop_reason:?}");
+                assert_eq!(stop_reason.as_deref(), Some("interrupted"), "the interrupt ended the turn");
+                break;
+            }
             Ok(Some(AgentEvent::Notice(n))) => { eprintln!("notice: {n}"); notices.push(n); }
             Ok(Some(ev)) => eprintln!("event: {ev:?}"),
             other => panic!("no completion after the interrupt: {other:?}"),
@@ -274,6 +295,7 @@ async fn a_temporary_halt_keeps_the_running_job_and_an_idle_pause_stops_it() {
         eprintln!("event: {ev:?}");
     }
     eprintln!("pause notice after {:?}: {stopped_notice:?}", paused.elapsed());
+    assert!(paused.elapsed() >= Duration::from_secs(7), "the kept job got the atomic grace first: {:?}", paused.elapsed());
     assert!(!alive(pid), "the idle Pause stopped the job");
     assert!(stopped_notice.is_some_and(|n| n.contains("1 process was stopped")));
     handle.kill();
