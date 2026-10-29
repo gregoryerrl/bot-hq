@@ -41,7 +41,9 @@ async fn a_codex_participant_runs_one_gated_turn_for_real() {
     // The live app's shape, in-process: storage with a roster, the bridge, the
     // signaling server, the addr + hook-token files the hook binary reads.
     let storage = Storage::memory().await.unwrap();
-    storage.create_session("s-live", "codex live", None).await.unwrap();
+    // A repo: a gate parks only in a session that can run it (#134); the
+    // participant works in /tmp below.
+    storage.create_session("s-live", "codex live", Some("/tmp")).await.unwrap();
     storage.ensure_session_roster("s-live", MAX_SESSION_PARTICIPANTS).await.unwrap();
     let bridge = SignalingBridge::new();
     bridge.set_storage(storage.clone()).await;
