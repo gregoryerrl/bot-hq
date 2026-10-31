@@ -3010,7 +3010,7 @@ mod tests {
         for prose in ["and/or", "read/write", "i/p/a/v", "added/fixed/changed", "client/server", "github.com", "claude.ai", "e.g.", "1.2.3"] {
             assert!(!is_artifact(prose), "{prose} must not be a filename/path term");
         }
-        for real in ["eod.md", "src/core/pump.rs", "~/.bot-hq/library", "projects/bcc/audit", "/tmp/x-dir", "tool-gate.json"] {
+        for real in ["eod.md", "src/core/pump.rs", "~/.bot-hq/library", "projects/acme/audit", "/tmp/x-dir", "tool-gate.json"] {
             assert!(is_artifact(real), "{real} is a filename/path term");
         }
     }

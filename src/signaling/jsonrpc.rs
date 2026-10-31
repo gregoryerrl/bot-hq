@@ -6357,7 +6357,7 @@ mod tests {
         let bridge = SignalingBridge::new();
         let storage = crate::storage::Storage::memory().await.unwrap();
         bridge.set_storage(storage.clone()).await;
-        storage.create_session("s1", "ad-manager EOD", None).await.unwrap();
+        storage.create_session("s1", "project EOD", None).await.unwrap();
         let who = caller();
         let write = |args: serde_json::Value| {
             dispatch(req("tools/call", json!({"name": "session_doc_write", "arguments": args}), 1), &who, &bridge)
@@ -6370,7 +6370,7 @@ mod tests {
         let items = storage.user_action_items().await.unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!((items[0].session_id.as_str(), items[0].slug.as_str(), items[0].preview.as_str()), ("s1", "eod-draft", "EOD"));
-        assert_eq!(items[0].session_title, "ad-manager EOD");
+        assert_eq!(items[0].session_title, "project EOD");
         assert!(items[0].session_closed_at.is_none());
         let doc = storage.session_document_by_slug("s1", "eod-draft").await.unwrap().unwrap();
         assert_eq!(doc.kind.as_deref(), Some("user_action"));

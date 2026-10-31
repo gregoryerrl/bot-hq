@@ -398,7 +398,7 @@ const SHELL_SYNTAX: [char; 9] = ['|', '>', '<', '&', ';', '$', '`', '(', ')'];
 /// the first against a word's basename (and a tool such as `mkfs.ext4` for
 /// `mkfs`); a short-flag word (`-rf`) against a flag cluster holding all its
 /// letters (`-fr`, `-rfv`), case-sensitive since `-d` is not `-D`; a last
-/// word ending in a non-alphanumeric character (`if=`, `ep-solitary-field-`)
+/// word ending in a non-alphanumeric character (`if=`, `pg-prod-primary-`)
 /// as a prefix; any other word exactly, case-insensitive.
 fn words_hit(keyword: &str, commands: &[Vec<String>]) -> bool {
     let kws: Vec<&str> = keyword.split_whitespace().collect();
@@ -1124,7 +1124,7 @@ mod tests {
         "gh issue pin", "gh issue unpin", "gh pr comment", "gh pr create", "gh pr edit", "gh pr close",
         "gh pr review", "gh pr merge", "gh release create", "gh release edit", "gh release delete",
         "gh repo delete", "gh repo archive", "gh secret set", "gh secret delete", "gh gist create",
-        "npm publish", "cargo publish", "psql -h ep-solitary-field-", "gh repo edit", "gh repo create",
+        "npm publish", "cargo publish", "psql -h pg-prod-primary-", "gh repo edit", "gh repo create",
         "gh repo rename", "gh workflow", "gh run rerun", "gh run cancel", "gh variable",
         "gh release upload", "gh ssh-key", "gh gpg-key", "gh auth token", "git filter-branch",
         "git filter-repo", "git reflog expire", "git gc --prune", "git remote set-url", "git branch -D",
@@ -1179,7 +1179,7 @@ mod tests {
             "git -c alias.x='!gh api x' x",
             "python3 <<EOF\nimport os\nos.system('gh api x')\nEOF",
             "sh -c \"$CMD gh api\"",
-            "psql -h ep-solitary-field-a5wk.aws -c 'select 1'",
+            "psql -h pg-prod-primary-x1.db -c 'select 1'",
             "cat <<EOF\ngh api\nEOF",
             // `cd` runs zsh's chpwd hooks, so it is not a data tool (EYES 9392b713).
             "cd src && grep -rn \"git reset --hard\" .",

@@ -538,7 +538,7 @@ fn check_immutable_artifacts(repo: &Path) -> i32 {
 /// what screened the content. Its reader is usually an agent, and a policy
 /// edit is logged, never blocked (`audit.rs`) — so it names narrowing the list
 /// as the USER's call and tells the agent not to touch the policy (EYES
-/// a375989c: the bcc projects' disguise lists refuse content on purpose).
+/// a375989c: some projects' forbidden-word lists refuse content on purpose).
 fn content_refusal_note(policy: &Policy) -> &'static str {
     if policy.forbidden_in_content.is_empty() {
         "\n(The commit-message list screens file content too. Whether content \

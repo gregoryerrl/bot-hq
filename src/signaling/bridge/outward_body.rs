@@ -2984,7 +2984,7 @@ mod tests {
             "gcloud logging read 'severity>=ERROR' --limit 5",
             "gcloud logging read x | head -5",
             "bq ls --format=json | jq '.[].id' | grep prod | wc -l",
-            "psql -h ep-solitary-field-x -c 'select 1' | cut -d, -f1 | tail -3",
+            "psql -h pg-prod-primary-x -c 'select 1' | cut -d, -f1 | tail -3",
         ] {
             assert_eq!(single_read_command(ok), Ok(()), "{ok}");
         }

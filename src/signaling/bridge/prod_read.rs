@@ -526,7 +526,7 @@ mod tests {
     fn cfg() -> ProdReadConfig {
         ProdReadConfig {
             engine: "postgres".into(),
-            host: "ep-solitary-field-x.aws.pg.laravel.cloud".into(),
+            host: "pg-prod-primary-x.db.example.com".into(),
             port: Some(5432),
             database: "main".into(),
             user: "readonly".into(),
@@ -542,7 +542,7 @@ mod tests {
             command,
             "PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=30000 -c timezone=UTC' \
              PGCLIENTENCODING=UTF8 PGSSLMODE='require' 'psql' -1 -X -q -v ON_ERROR_STOP=1 \
-             -h 'ep-solitary-field-x.aws.pg.laravel.cloud' -p 5432 -d 'main' -U 'readonly' -f - <<'BOTHQ_SQL'\n\
+             -h 'pg-prod-primary-x.db.example.com' -p 5432 -d 'main' -U 'readonly' -f - <<'BOTHQ_SQL'\n\
              SET TRANSACTION READ ONLY;\nSET LOCAL statement_timeout = 30000;\nSET LOCAL timezone = 'UTC';\n\
              SELECT current_setting('transaction_read_only') AS bot_hq_read_only;\nselect 1;\nBOTHQ_SQL"
         );

@@ -738,8 +738,8 @@ pub fn contains_word(haystack: &str, needle: &str) -> bool {
 fn merge(base: Policy, overlay: Option<Policy>) -> Policy {
     let Some(o) = overlay else { return base };
     // The content list defaults to the message list OF ITS OWN LAYER: a
-    // project that carries its own message list (bcc-ad-manager's
-    // load-bearing disguise list) keeps screening its content with it, even
+    // project that carries its own message list (one real project's
+    // load-bearing forbidden-word list) keeps screening its content with it, even
     // when the general policy narrows content to the attribution trailer. An
     // empty merged content list is what says "this policy's message list".
     // Read before the literal below moves `o.forbidden_in_commits`.
@@ -1075,7 +1075,7 @@ mod tests {
     /// Feedback #103: the content list defaults to the message list OF ITS
     /// LAYER, a set list replaces it for content only, and a general content
     /// list never narrows a project's own message list (EYES 0b239dad: the
-    /// bcc projects' disguise lists screen the lines their commits add).
+    /// some projects' forbidden-word lists screen the lines their commits add).
     /// `Vendor` stands in for a vendor name, `Acme-Trailer` for the
     /// attribution trailer this repo's own policy refuses in content.
     #[test]

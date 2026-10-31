@@ -10,7 +10,7 @@ const mockInvoke = vi.mocked(invoke);
 
 const item = {
   session_id: "s-123f01aa",
-  session_title: "ad-manager EOD",
+  session_title: "project EOD",
   session_closed_at: "2026-10-02T10:00:00Z",
   slug: "eod-draft",
   updated_at: new Date(Date.now() - 5 * 60_000).toISOString(),
@@ -48,7 +48,7 @@ describe("ActionItemsPanel", () => {
     const panel = await screen.findByTestId("action-items");
     expect(panel).toHaveTextContent("Your action items");
     expect(panel).toHaveTextContent("eod-draft");
-    expect(panel).toHaveTextContent("ad-manager EOD · closed");
+    expect(panel).toHaveTextContent("project EOD · closed");
     expect(panel).toHaveTextContent("Today we shipped the thing.");
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     await waitFor(() =>

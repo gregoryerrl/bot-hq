@@ -7559,7 +7559,7 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("general-policy.yaml"),
-            "production_reads:\n  - gcloud logging read\n  - bq\nstaging_reads:\n  - psql -h ep-young-glitter-\n",
+            "production_reads:\n  - gcloud logging read\n  - bq\nstaging_reads:\n  - psql -h pg-staging-replica-\n",
         )
         .unwrap();
     }
@@ -7610,7 +7610,7 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
         list_reads(data.path());
         let bridge = bridge_with(data.path(), &[], "s1", repo.path()).await;
         let marker = repo.path().join("ran.txt");
-        let command = format!("psql -h ep-young-glitter-a5po.aws -c 'select 1'; touch {}", posix_path(&marker));
+        let command = format!("psql -h pg-staging-replica-y2.db -c 'select 1'; touch {}", posix_path(&marker));
         let out = bridge.action_gate("s1".into(), "hands".into(), command, false).await.unwrap();
         assert!(out.to_lowercase().contains("parked"), "{out}");
         assert!(!marker.exists(), "parked, not run");
@@ -7666,7 +7666,7 @@ exit "$(cat "$d/exit.txt" 2>/dev/null || echo 0)"
             ("gcloud logging read x; rm -rf ~/d", "ONE command"),
             ("gcloud logging read x | sort -o ~/.zshrc", "ONE command"),
             ("gcloud auth list", "matches none"),
-            ("psql -h ep-young-glitter-x -c 'select 1'", "database client (`psql`)"),
+            ("psql -h pg-staging-replica-x -c 'select 1'", "database client (`psql`)"),
             ("bq query --use_legacy_sql=false 'SELECT 1; DELETE FROM ds.t WHERE true'", "`;`"),
             ("bq load ds.t gs://b/x.csv", "`load`"),
         ] {

@@ -2,7 +2,7 @@
 //! #94, group K).
 //!
 //! The rule "a production read needs the user's approval" lived in prose and
-//! one global keyword (`psql -h ep-solitary-field-`), matched anywhere in a
+//! one global keyword (`psql -h pg-prod-primary-`), matched anywhere in a
 //! line. Six kinds of `gcloud` read matched nothing, and both participants of
 //! one session ran them ungated all day until the user said "you have not
 //! gated any reads. HARD CHECK" (#51). The user's picks (tray `5660fc1e`,
@@ -96,9 +96,9 @@ mod tests {
                 "gcloud logging read".into(),
                 "gcloud run".into(),
                 "bq".into(),
-                "psql -h ep-solitary-field-".into(),
+                "psql -h pg-prod-primary-".into(),
             ],
-            staging_reads: vec!["psql -h ep-young-glitter-".into()],
+            staging_reads: vec!["psql -h pg-staging-replica-".into()],
             ..Policy::default()
         }
     }
@@ -115,11 +115,11 @@ mod tests {
             ("gcloud --project p logging read x", prod("gcloud logging read")),
             ("gcloud run jobs describe export", prod("gcloud run")),
             ("bq query --use_legacy_sql=false 'SELECT 1'", prod("bq")),
-            ("psql -U u -h ep-solitary-field-a5wk.aws.pg.laravel.cloud -d db", prod("psql -h ep-solitary-field-")),
-            ("psql --host=ep-solitary-field-a5wk.aws -d db", prod("psql -h ep-solitary-field-")),
-            ("psql -hep-solitary-field-a5wk.aws", prod("psql -h ep-solitary-field-")),
-            ("psql postgres://u@ep-solitary-field-a5wk.aws/db -c 'select 1'", prod("psql -h ep-solitary-field-")),
-            ("PGHOST=ep-solitary-field-a5wk.aws psql -c 'select 1'", prod("psql -h ep-solitary-field-")),
+            ("psql -U u -h pg-prod-primary-x1.db.example.com -d db", prod("psql -h pg-prod-primary-")),
+            ("psql --host=pg-prod-primary-x1.db -d db", prod("psql -h pg-prod-primary-")),
+            ("psql -hpg-prod-primary-x1.db", prod("psql -h pg-prod-primary-")),
+            ("psql postgres://u@pg-prod-primary-x1.db/db -c 'select 1'", prod("psql -h pg-prod-primary-")),
+            ("PGHOST=pg-prod-primary-x1.db psql -c 'select 1'", prod("psql -h pg-prod-primary-")),
             ("bash -c 'gcloud logging read x | head'", prod("gcloud logging read")),
             ("echo $(bq ls)", prod("bq")),
             ("/opt/homebrew/bin/gcloud run jobs list", prod("gcloud run")),
@@ -127,8 +127,8 @@ mod tests {
             assert_eq!(hit(command), want, "{command}");
         }
         assert_eq!(
-            hit("psql -h ep-young-glitter-a5po.aws -c 'select 1'"),
-            Some((DataReadKind::Staging, "psql -h ep-young-glitter-".into()))
+            hit("psql -h pg-staging-replica-y2.db -c 'select 1'"),
+            Some((DataReadKind::Staging, "psql -h pg-staging-replica-".into()))
         );
     }
 
@@ -138,7 +138,7 @@ mod tests {
     fn text_that_only_mentions_a_listed_read_does_not_match() {
         for command in [
             "grep -rn 'gcloud logging read' notes.md",
-            "echo \"run psql -h ep-solitary-field-x later\"",
+            "echo \"run psql -h pg-prod-primary-x later\"",
             "gcloud logging write my-log hello",
             "gcloud auth login",
             "psql -h localhost -d dev",
@@ -155,7 +155,7 @@ mod tests {
     fn the_lists_are_rendered_into_the_prompt_and_merged_by_tier() {
         let block = policy().render_system_prompt_block();
         assert!(block.contains("### Data reads (the user's approval, every time)"), "{block}");
-        assert!(block.contains("- production: `gcloud logging read`") && block.contains("- staging: `psql -h ep-young-glitter-`"), "{block}");
+        assert!(block.contains("- production: `gcloud logging read`") && block.contains("- staging: `psql -h pg-staging-replica-`"), "{block}");
         assert!(block.contains("`read_gate`"), "{block}");
         let general = Policy { production_reads: vec!["bq".into()], ..Policy::default() };
         let project = Policy { production_reads: vec!["gcloud run".into()], ..Policy::default() };
